@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  opensentry-cloudnode:
+    build: .
+    image: opensentry-cloudnode:latest
+    container_name: opensentry-cloudnode
+    
+    # Required for USB camera access
+    privileged: true
+    
+    # USB device passthrough
+    # Add additional cameras as needed
+    devices:
+      - /dev/video0:/dev/video0
+      # - /dev/video1:/dev/video1
+    
+    environment:
+      - OPENSENTRY_NODE_ID=${OPENSENTRY_NODE_ID:?Node ID required}
+      - OPENSENTRY_API_KEY=${OPENSENTRY_API_KEY:?API key required}
+      - OPENSENTRY_API_URL=${OPENSENTRY_API_URL:-http://host.docker.internal:8000}
+      - RUST_LOG=${RUST_LOG:-info}
+    
+    volumes:
+      # Persist recordings/snapshots
+      - ./data:/app/data
+    
+    ports:
+      - "8080:8080"
+    
+    restart: unless-stopped
+    
+    # Use host network for mDNS discovery (alternative to ports)
+    # network_mode: host
+    
+    # Log configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

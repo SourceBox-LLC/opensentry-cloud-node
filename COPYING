@@ -1,0 +1,90 @@
+OpenSentry CloudNode
+Copyright (C) 2026 SourceBox LLC
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+================================================================================
+
+CONTACT INFORMATION
+
+For questions about licensing or contributions, contact:
+- Email: [Your contact email]
+- GitHub: https://github.com/SourceBox-LLC/OpenSentry-CloudNode
+
+For commercial licensing options (dual-licensing), please contact SourceBox LLC.
+
+================================================================================
+
+DEPENDENCY LICENSES
+
+This software uses the following open-source libraries, each under their
+respective licenses:
+
+Runtime Dependencies:
+- tokio (MIT) - Async runtime
+- reqwest (MIT/Apache-2.0) - HTTP client
+- warp (MIT) - HTTP server
+- serde (MIT/Apache-2.0) - Serialization
+- clap (MIT/Apache-2.0) - CLI parser
+- tracing (MIT) - Logging
+- chrono (MIT/Apache-2.0) - Date/time
+- uuid (MIT/Apache-2.0) - UUID generation
+- anyhow (MIT/Apache-2.0) - Error handling
+- thiserror (MIT/Apache-2.0) - Error derives
+- ratatui (MIT) - Terminal UI
+- crossterm (MIT) - Terminal control
+- and others (see Cargo.toml for full list)
+
+All dependencies are compatible with GPL-3.0. Most use permissive licenses
+(MIT, Apache-2.0) which are compatible with GPL-3.0.
+
+For a complete list of dependencies and their licenses, run:
+  cargo license --json > dependencies.json
+
+================================================================================
+
+WHY GPL-3.0?
+
+OpenSentry CloudNode is surveillance infrastructure software meant to be
+deployed on user-owned hardware at the edge (homes, offices, etc.). We chose
+GPL-3.0 because:
+
+1. **Freedom Preservation**: Ensures users always have access to source code
+   for the software running on their cameras.
+
+2. **Community Contributions**: Improvements made by others who distribute
+   modified versions must be shared back to the community.
+
+3. **Surveillance Transparency**: Users have the right to inspect, modify,
+   and verify exactly what the software does with their video feeds.
+
+4. **Device Integration**: When embedded in devices (cameras, NAS, etc.),
+   GPL-3.0's anti-tivoization provisions ensure users can still modify the
+   software.
+
+5. **Patent Protection**: GPL-3.0 includes explicit patent grants, important
+   for surveillance/video technology.
+
+For commercial use cases that cannot use GPL-3.0, contact SourceBox LLC for
+dual-licensing options.
+
+================================================================================
+
+COPYRIGHT ASSIGNMENT
+
+By submitting a pull request or contributing code to this project, you agree
+that your contributions will be licensed under the same GPL-3.0 license that
+covers the entire project. You retain copyright to your contributions but
+grant SourceBox LLC and all users the right to use, modify, and distribute
+your contributions under GPL-3.0.

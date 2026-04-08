@@ -1,0 +1,44 @@
+# Build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Environment and config
+.env
+.env.*
+config.yaml
+config.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Storage (recordings/snapshots)
+data/
+recordings/
+snapshots/
+hls_output/
+
+# Logs
+*.log
+logs/
+
+# Git
+.git/
+.github/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+
+# Tests
+tests/
+benches/

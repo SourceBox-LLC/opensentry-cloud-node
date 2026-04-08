@@ -1,0 +1,60 @@
+# OpenSentry CloudNode Configuration Example
+
+# Node identification
+node:
+  # Friendly name shown in dashboard (optional, auto-generated if empty)
+  name: ""
+
+# Cloud connection settings
+cloud:
+  # OpenSentry Command Center URL
+  api_url: "http://localhost:8000"
+  
+  # Heartbeat interval in seconds (default: 30)
+  heartbeat_interval: 30
+
+# Camera settings
+cameras:
+  # Auto-detect USB cameras on startup
+  auto_detect: true
+  
+  # Manual camera list (used if auto_detect is false)
+  # devices:
+  #   - "/dev/video0"
+  #   - "/dev/video1"
+
+# Streaming settings per camera
+streaming:
+  # Target frames per second
+  fps: 30
+  
+  # JPEG quality (1-100)
+  jpeg_quality: 85
+
+# Recording settings
+recording:
+  # Enable local recording
+  enabled: true
+  
+  # Recording format: "mp4" or "mkv"
+  format: "mp4"
+  
+storage:
+  # Base path for recordings and snapshots
+  path: "./data"
+  
+  # Maximum storage size in GB (oldest recordings deleted when exceeded)
+  max_size_gb: 64
+
+# HTTP server settings (for serving recordings)
+server:
+  # Port for HTTP API
+  port: 8080
+  
+  # Bind address
+  bind: "0.0.0.0"
+
+# Logging settings
+logging:
+  # Log level: trace, debug, info, warn, error
+  level: "info"

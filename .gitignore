@@ -1,0 +1,40 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock (keep for binary, ignore for library)
+# Cargo.lock
+
+# Environment and config
+.env
+.env.*
+!.env.example
+config.yaml
+!.env.example
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# FFmpeg binaries (auto-downloaded on Windows)
+/ffmpeg/
+
+# Storage (database, recordings, snapshots)
+/data/
+/recordings/
+/snapshots/
+
+# Temporary files
+temp.txt
+
+# Logs
+*.log
+/logs/

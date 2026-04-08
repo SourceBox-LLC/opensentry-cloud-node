@@ -1,0 +1,707 @@
+// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// Copyright (C) 2026  SourceBox LLC
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//! HLS Generator - Generates HLS playlist and segments from video frames
+//!
+//! Uses FFmpeg to transcode frames into HLS format.
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::io::{BufRead, BufReader};
+
+use crate::error::Result;
+
+/// HLS segment information
+#[derive(Debug, Clone)]
+pub struct HlsSegment {
+    /// Segment filename (e.g., "segment_00001.ts")
+    pub filename: String,
+    /// Full path to segment file
+    pub path: PathBuf,
+    /// Segment duration in seconds
+    pub duration: f64,
+    /// Segment sequence number
+    pub sequence: u64,
+}
+
+/// HLS generator configuration
+#[derive(Debug, Clone)]
+pub struct HlsGeneratorConfig {
+    /// Output directory for segments
+    pub output_dir: PathBuf,
+    /// Segment duration in seconds
+    pub segment_duration: u32,
+    /// Playlist name
+    pub playlist_name: String,
+    /// Number of segments to keep in playlist
+    pub playlist_size: u32,
+    /// Video width
+    pub width: u32,
+    /// Video height
+    pub height: u32,
+    /// Target bitrate (e.g., "2000k")
+    pub bitrate: String,
+    /// FPS
+    pub fps: u32,
+    /// Video encoder override (empty = auto-detect)
+    pub encoder: String,
+}
+
+impl Default for HlsGeneratorConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: PathBuf::from("./hls_output"),
+            segment_duration: 1,
+            playlist_name: "stream.m3u8".to_string(),
+            playlist_size: 15,
+            width: 1280,
+            height: 720,
+            bitrate: "2500k".to_string(),
+            fps: 30,
+            encoder: String::new(),
+        }
+    }
+}
+
+impl From<crate::config::HlsConfig> for HlsGeneratorConfig {
+    fn from(config: crate::config::HlsConfig) -> Self {
+        Self {
+            output_dir: PathBuf::from("./data/hls"),
+            segment_duration: config.segment_duration,
+            playlist_name: "stream.m3u8".to_string(),
+            playlist_size: config.playlist_size,
+            width: 1280,
+            height: 720,
+            bitrate: config.bitrate,
+            fps: 30,
+            encoder: String::new(),
+        }
+    }
+}
+
+/// HLS Generator state
+pub struct HlsGenerator {
+    config: HlsGeneratorConfig,
+    running: Arc<AtomicBool>,
+    ffmpeg_process: Option<std::process::Child>,
+    /// Handle for the stderr drain thread (kept alive so it isn't dropped)
+    _stderr_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HlsGenerator {
+    /// Create a new HLS generator
+    pub fn new(config: HlsGeneratorConfig) -> Result<Self> {
+        // Create output directory
+        std::fs::create_dir_all(&config.output_dir)?;
+
+        Ok(Self {
+            config,
+            running: Arc::new(AtomicBool::new(false)),
+            ffmpeg_process: None,
+            _stderr_thread: None,
+        })
+    }
+
+    /// Find FFmpeg executable - check local path first, then system PATH
+    pub fn find_ffmpeg() -> String {
+        #[cfg(target_os = "windows")]
+        {
+            // Check local ffmpeg directory (downloaded by setup)
+            if let Ok(cwd) = std::env::current_dir() {
+                let local_ffmpeg = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+                if local_ffmpeg.exists() {
+                    tracing::debug!("Using FFmpeg from: {:?}", local_ffmpeg);
+                    return local_ffmpeg.to_string_lossy().to_string();
+                }
+            }
+        }
+
+        // Fall back to system PATH
+        tracing::debug!("Using FFmpeg from system PATH");
+        "ffmpeg".to_string()
+    }
+
+    /// Detect available hardware encoder by probing FFmpeg.
+    /// Returns the encoder name (e.g. "h264_nvenc", "h264_qsv", "h264_amf")
+    /// or None if only software encoding is available.
+    pub fn detect_hw_encoder(ffmpeg_path: &str) -> Option<String> {
+        // Probe order: NVIDIA NVENC > Intel QSV > AMD AMF > V4L2
+        let candidates = [
+            "h264_nvenc",   // NVIDIA (GeForce GTX 600+, all RTX)
+            "h264_qsv",    // Intel Quick Sync (most Intel CPUs with iGPU)
+            "h264_amf",    // AMD AMF (Radeon RX 400+)
+            "h264_v4l2m2m", // Linux V4L2 (Raspberry Pi 4, some ARM SoCs)
+        ];
+
+        // Run -encoders once, check all candidates against the output
+        let encoder_list = Command::new(ffmpeg_path)
+            .args(["-hide_banner", "-encoders"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok();
+
+        let available_encoders = match &encoder_list {
+            Some(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+            None => {
+                tracing::warn!("Failed to query FFmpeg encoders");
+                return None;
+            }
+        };
+
+        for encoder in &candidates {
+            if !available_encoders.contains(encoder) {
+                continue;
+            }
+
+            // Verify it actually works by doing a tiny test encode
+            let test = Command::new(ffmpeg_path)
+                .args([
+                    "-hide_banner",
+                    "-f", "lavfi",
+                    "-i", "nullsrc=s=256x256:d=0.1",
+                    "-c:v", encoder,
+                    "-f", "null",
+                    "-",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
+            if let Ok(status) = test {
+                if status.success() {
+                    tracing::info!("Hardware encoder detected: {}", encoder);
+                    return Some(encoder.to_string());
+                }
+            }
+            tracing::debug!("Encoder {} listed but test encode failed", encoder);
+        }
+
+        tracing::info!("No hardware encoder detected, using software (libx264)");
+        None
+    }
+
+    /// Build encoding arguments based on available hardware.
+    /// Hardware encoders use the GPU's dedicated media engine, freeing
+    /// the CPU for other work (upload, dashboard, multi-camera).
+    fn build_encoding_args(
+        hw_encoder: &Option<String>,
+        bitrate: &str,
+        bufsize_k: u32,
+        fps: u32,
+        segment_duration: u32,
+    ) -> Vec<String> {
+        let gop_size = (fps * segment_duration).to_string();
+        let bufsize = format!("{}k", bufsize_k);
+
+        match hw_encoder.as_deref() {
+            Some("h264_nvenc") => {
+                tracing::info!("Using NVIDIA NVENC hardware encoding");
+                vec![
+                    "-pix_fmt".into(), "yuv420p".into(),
+                    "-c:v".into(), "h264_nvenc".into(),
+                    "-preset".into(), "p4".into(),         // balanced speed/quality (p1=fastest, p7=best)
+                    "-tune".into(), "ll".into(),           // low latency
+                    "-profile:v".into(), "main".into(),
+                    "-level".into(), "auto".into(),        // let NVENC pick the right level for the resolution
+                    "-rc".into(), "cbr".into(),            // constant bitrate — smooth upload sizes
+                    "-b:v".into(), bitrate.into(),
+                    "-maxrate".into(), bitrate.into(),
+                    "-bufsize".into(), bufsize,
+                    "-g".into(), gop_size.clone(),
+                    "-strict_gop".into(), "1".into(),      // enforce strict GOP — no scene-cut keyframes
+                    "-c:a".into(), "aac".into(),
+                    "-b:a".into(), "128k".into(),
+                ]
+            }
+            Some("h264_qsv") => {
+                tracing::info!("Using Intel Quick Sync hardware encoding");
+                vec![
+                    "-pix_fmt".into(), "yuv420p".into(),
+                    "-c:v".into(), "h264_qsv".into(),
+                    "-preset".into(), "fast".into(),
+                    "-profile:v".into(), "main".into(),
+                    "-level".into(), "auto".into(),
+                    "-b:v".into(), bitrate.into(),
+                    "-maxrate".into(), bitrate.into(),
+                    "-bufsize".into(), bufsize,
+                    "-g".into(), gop_size.clone(),
+                    "-keyint_min".into(), gop_size,
+                    "-c:a".into(), "aac".into(),
+                    "-b:a".into(), "128k".into(),
+                ]
+            }
+            Some("h264_amf") => {
+                tracing::info!("Using AMD AMF hardware encoding");
+                vec![
+                    "-pix_fmt".into(), "yuv420p".into(),
+                    "-c:v".into(), "h264_amf".into(),
+                    "-quality".into(), "balanced".into(),
+                    "-profile:v".into(), "main".into(),
+                    "-level".into(), "auto".into(),
+                    "-rc".into(), "cbr".into(),
+                    "-b:v".into(), bitrate.into(),
+                    "-maxrate".into(), bitrate.into(),
+                    "-bufsize".into(), bufsize,
+                    "-g".into(), gop_size.clone(),
+                    "-keyint_min".into(), gop_size,
+                    "-c:a".into(), "aac".into(),
+                    "-b:a".into(), "128k".into(),
+                ]
+            }
+            Some("h264_v4l2m2m") => {
+                tracing::info!("Using V4L2 M2M hardware encoding (Raspberry Pi / ARM)");
+                vec![
+                    "-pix_fmt".into(), "yuv420p".into(),
+                    "-c:v".into(), "h264_v4l2m2m".into(),
+                    "-b:v".into(), bitrate.into(),
+                    "-maxrate".into(), bitrate.into(),
+                    "-bufsize".into(), bufsize,
+                    "-g".into(), gop_size.clone(),
+                    "-keyint_min".into(), gop_size,
+                    "-c:a".into(), "aac".into(),
+                    "-b:a".into(), "128k".into(),
+                ]
+            }
+            Some(other) => {
+                // Unknown hardware encoder — use generic args
+                tracing::info!("Using hardware encoder: {}", other);
+                vec![
+                    "-pix_fmt".into(), "yuv420p".into(),
+                    "-c:v".into(), other.into(),
+                    "-b:v".into(), bitrate.into(),
+                    "-maxrate".into(), bitrate.into(),
+                    "-bufsize".into(), bufsize,
+                    "-g".into(), gop_size.clone(),
+                    "-c:a".into(), "aac".into(),
+                    "-b:a".into(), "128k".into(),
+                ]
+            }
+            None => {
+                tracing::info!("Using software encoding (libx264)");
+                vec![
+                    "-pix_fmt".into(), "yuv420p".into(),
+                    "-c:v".into(), "libx264".into(),
+                    "-profile:v".into(), "main".into(),
+                    "-level".into(), "auto".into(),
+                    "-preset".into(), "veryfast".into(),
+                    "-tune".into(), "zerolatency".into(),
+                    "-b:v".into(), bitrate.into(),
+                    "-maxrate".into(), bitrate.into(),
+                    "-bufsize".into(), bufsize,
+                    "-g".into(), gop_size.clone(),
+                    "-keyint_min".into(), fps.to_string(),
+                    "-sc_threshold".into(), "0".into(),
+                    "-c:a".into(), "aac".into(),
+                    "-b:a".into(), "128k".into(),
+                ]
+            }
+        }
+    }
+
+    /// Get platform-specific FFmpeg input arguments
+    fn get_platform_input_args(&self, device_path: &str) -> Vec<String> {
+        #[cfg(target_os = "linux")]
+        {
+            vec![
+                "-f".to_string(),
+                "v4l2".to_string(),
+                "-framerate".to_string(),
+                self.config.fps.to_string(),
+                "-video_size".to_string(),
+                format!("{}x{}", self.config.width, self.config.height),
+                "-i".to_string(),
+                device_path.to_string(),
+            ]
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            vec![
+                "-f".to_string(),
+                "dshow".to_string(),
+                "-framerate".to_string(),
+                self.config.fps.to_string(),
+                "-video_size".to_string(),
+                format!("{}x{}", self.config.width, self.config.height),
+                "-i".to_string(),
+                format!("video={}", device_path), // Use camera name
+            ]
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            vec![
+                "-f".to_string(),
+                "avfoundation".to_string(),
+                "-framerate".to_string(),
+                self.config.fps.to_string(),
+                "-video_size".to_string(),
+                format!("{}x{}", self.config.width, self.config.height),
+                "-i".to_string(),
+                device_path.to_string(), // Use numeric index as string
+            ]
+        }
+    }
+
+    /// Start HLS generation from a video device
+    pub fn start_from_device(&mut self, device_path: &str) -> Result<()> {
+        if self.running.load(Ordering::SeqCst) {
+            return Err(crate::error::Error::Streaming("Already running".into()));
+        }
+
+        self.running.store(true, Ordering::SeqCst);
+
+        let playlist_path = self.config.output_dir.join(&self.config.playlist_name);
+
+        // Clean up old files
+        self.cleanup()?;
+
+        // Calculate bufsize
+        let bitrate_val: u32 = self
+            .config
+            .bitrate
+            .trim_end_matches('k')
+            .parse()
+            .unwrap_or(2000);
+        let bufsize = bitrate_val * 2;
+
+        // Get platform-specific input args
+        let input_args = self.get_platform_input_args(device_path);
+
+        // Find FFmpeg executable
+        let ffmpeg_path = Self::find_ffmpeg();
+
+        // Check if user chose an encoder in setup (stored in config DB)
+        let hw_encoder = if self.config.encoder == "libx264" {
+            tracing::info!("Using software encoder (configured)");
+            None
+        } else if !self.config.encoder.is_empty() {
+            tracing::info!("Using encoder from config: {}", self.config.encoder);
+            Some(self.config.encoder.clone())
+        } else {
+            // No preference set — auto-detect hardware encoder
+            Self::detect_hw_encoder(&ffmpeg_path)
+        };
+
+        // Build FFmpeg command
+        let mut cmd = Command::new(&ffmpeg_path);
+        cmd.args(&input_args);
+
+        // Build encoding args — uses GPU if available, falls back to CPU
+        let encoding_args = Self::build_encoding_args(
+            &hw_encoder,
+            &self.config.bitrate,
+            bufsize,
+            self.config.fps,
+            self.config.segment_duration,
+        );
+        cmd.args(&encoding_args);
+
+        // HLS output args
+        cmd.args([
+            "-f",
+            "hls",
+            "-hls_time",
+            &self.config.segment_duration.to_string(),
+            "-hls_list_size",
+            &self.config.playlist_size.to_string(),
+            "-hls_flags",
+            "append_list+split_by_time",
+            "-hls_segment_type",
+            "mpegts",
+            "-hls_segment_filename",
+            &self
+                .config
+                .output_dir
+                .join("segment_%05d.ts")
+                .to_string_lossy(),
+            &playlist_path.to_string_lossy(),
+        ]);
+
+        // Pipe stderr so we can drain it (prevents pipe deadlock) and
+        // capture FFmpeg errors/warnings for diagnostics.  Stdout is unused.
+        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+
+        tracing::info!(
+            "Starting FFmpeg for HLS generation on {} ({})",
+            device_path,
+            std::env::consts::OS
+        );
+
+        let mut child = cmd.spawn()?;
+
+        // Spawn a thread to continuously drain FFmpeg's stderr.
+        // Without this drain the OS pipe buffer fills up (~64 KB) and FFmpeg
+        // blocks on the next write, silently halting segment production.
+        let stderr = child.stderr.take();
+        let stderr_thread = std::thread::spawn(move || {
+            if let Some(stderr) = stderr {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            // Log errors/warnings at warn level, suppress noisy progress lines
+                            let trimmed = l.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            if trimmed.contains("error") || trimmed.contains("Error")
+                                || trimmed.contains("fatal") || trimmed.contains("Failed")
+                                || trimmed.contains("No such") || trimmed.contains("Could not")
+                                || trimmed.contains("Discarded") {
+                                tracing::warn!("[FFmpeg] {}", trimmed);
+                            } else {
+                                tracing::debug!("[FFmpeg] {}", trimmed);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                tracing::warn!("[FFmpeg] stderr stream closed — process likely exited");
+            }
+        });
+
+        self.ffmpeg_process = Some(child);
+        self._stderr_thread = Some(stderr_thread);
+
+        Ok(())
+    }
+
+    /// Start HLS generation from raw frames (for test patterns)
+    pub fn start_from_frames(&mut self, width: u32, height: u32, fps: u32) -> Result<()> {
+        if self.running.load(Ordering::SeqCst) {
+            return Err(crate::error::Error::Streaming("Already running".into()));
+        }
+
+        self.running.store(true, Ordering::SeqCst);
+
+        let playlist_path = self.config.output_dir.join(&self.config.playlist_name);
+
+        // Clean up old files
+        self.cleanup()?;
+
+        // Find FFmpeg executable
+        let ffmpeg_path = Self::find_ffmpeg();
+
+        // Generate test pattern using FFmpeg's testsrc
+        let mut cmd = Command::new(&ffmpeg_path);
+        cmd.args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={}x{}:rate={}", width, height, fps),
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=86400",
+            "-t",
+            "86400", // 24 hours max
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-level",
+            "3.0",
+            "-preset",
+            "veryfast",
+            "-b:v",
+            &self.config.bitrate,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-f",
+            "hls",
+            "-hls_time",
+            &self.config.segment_duration.to_string(),
+            "-hls_list_size",
+            &self.config.playlist_size.to_string(),
+            "-hls_flags",
+            "append_list",
+            "-hls_segment_filename",
+            &self
+                .config
+                .output_dir
+                .join("segment_%05d.ts")
+                .to_string_lossy(),
+            &playlist_path.to_string_lossy(),
+        ]);
+
+        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+
+        tracing::info!("Starting FFmpeg test pattern generator");
+
+        let mut child = cmd.spawn()?;
+
+        // Drain stderr — see start_from_device() for explanation
+        let stderr = child.stderr.take();
+        let stderr_thread = std::thread::spawn(move || {
+            if let Some(stderr) = stderr {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => tracing::debug!("[FFmpeg-test] {}", l.trim()),
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+
+        self.ffmpeg_process = Some(child);
+        self._stderr_thread = Some(stderr_thread);
+
+        Ok(())
+    }
+
+    /// Stop HLS generation
+    pub fn stop(&mut self) -> Result<()> {
+        self.running.store(false, Ordering::SeqCst);
+
+        if let Some(mut child) = self.ffmpeg_process.take() {
+            tracing::info!("Stopping FFmpeg process");
+            child.kill()?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if generator is running
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst) && self.ffmpeg_process.is_some()
+    }
+
+    /// Check if the FFmpeg process has exited. Returns Some(exit_status) if
+    /// it has exited, None if still running. Non-blocking (uses try_wait).
+    pub fn check_process(&mut self) -> Option<std::process::ExitStatus> {
+        if let Some(ref mut child) = self.ffmpeg_process {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::error!("[FFmpeg] Process exited with status: {}", status);
+                    self.running.store(false, Ordering::SeqCst);
+                    Some(status)
+                }
+                Ok(None) => None, // still running
+                Err(e) => {
+                    tracing::error!("[FFmpeg] Failed to check process status: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get the current playlist path
+    pub fn playlist_path(&self) -> PathBuf {
+        self.config.output_dir.join(&self.config.playlist_name)
+    }
+
+    /// List current segments
+    pub fn list_segments(&self) -> Result<Vec<HlsSegment>> {
+        let mut segments = Vec::new();
+
+        let entries = std::fs::read_dir(&self.config.output_dir)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.extension().map(|e| e == "ts").unwrap_or(false) {
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                // Extract sequence number from filename like "segment_00001.ts"
+                let sequence = filename
+                    .trim_start_matches("segment_")
+                    .trim_end_matches(".ts")
+                    .parse::<u64>()
+                    .unwrap_or(0);
+
+                segments.push(HlsSegment {
+                    filename,
+                    path,
+                    duration: self.config.segment_duration as f64,
+                    sequence,
+                });
+            }
+        }
+
+        // Sort by sequence number
+        segments.sort_by_key(|s| s.sequence);
+
+        Ok(segments)
+    }
+
+    /// Clean up all generated files
+    fn cleanup(&self) -> Result<()> {
+        let entries = std::fs::read_dir(&self.config.output_dir);
+        if entries.is_err() {
+            return Ok(());
+        }
+
+        for entry in entries? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Remove .ts and .m3u8 files
+            if path
+                .extension()
+                .map(|e| e == "ts" || e == "m3u8")
+                .unwrap_or(false)
+            {
+                std::fs::remove_file(path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get output directory
+    pub fn output_dir(&self) -> &PathBuf {
+        &self.config.output_dir
+    }
+}
+
+impl Drop for HlsGenerator {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hls_config_default() {
+        let config = HlsGeneratorConfig::default();
+        assert_eq!(config.segment_duration, 2);
+        assert_eq!(config.playlist_size, 10);
+        assert_eq!(config.playlist_name, "stream.m3u8");
+    }
+
+    #[test]
+    fn test_hls_generator_create() {
+        let config = HlsGeneratorConfig::default();
+        let generator = HlsGenerator::new(config);
+        assert!(generator.is_ok());
+        assert!(!generator.unwrap().is_running());
+    }
+}

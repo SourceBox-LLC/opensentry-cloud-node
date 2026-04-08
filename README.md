@@ -40,17 +40,34 @@ CloudNode runs on your local network, detects USB cameras, and streams live vide
 - An [OpenSentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key
 - **Docker** (recommended) or **Rust 1.70+** with **FFmpeg**
 
-### Setup
+### Install
+
+The fastest way to install CloudNode:
+
+**Linux / macOS:**
+```bash
+curl -fsSL https://opensentry-command.fly.dev/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://opensentry-command.fly.dev/install.ps1 | iex
+```
+
+The installer downloads the latest release, checks for FFmpeg, and guides you through setup.
+
+<details>
+<summary><strong>Manual install (build from source)</strong></summary>
 
 ```bash
-# Clone and build
-git clone https://github.com/SourceBox-LLC/OpenSentry-CloudNode.git
-cd OpenSentry-CloudNode
+git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
+cd opensentry-cloud-node
 cargo build --release
 
 # Run the interactive setup wizard
 ./target/release/opensentry-cloudnode setup
 ```
+</details>
 
 The setup wizard handles everything automatically:
 

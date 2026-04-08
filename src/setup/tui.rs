@@ -738,7 +738,7 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     panel_row(&format!(
         "  {}  {}",
         "Docs:       ".white().bold(),
-        "https://github.com/SourceBox-LLC/opensentry-cloudnode".cyan()
+        "https://github.com/SourceBox-LLC/opensentry-cloud-node".cyan()
     ));
 
     panel_blank();

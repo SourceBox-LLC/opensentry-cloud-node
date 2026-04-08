@@ -1,65 +1,34 @@
-# OpenSentry CloudNode
+<p align="center">
+  <h1 align="center">OpenSentry CloudNode</h1>
+  <p align="center">
+    Turn any USB webcam into a cloud-connected security camera.
+    <br />
+    <a href="#quick-start">Quick Start</a>
+    &middot;
+    <a href="#configuration">Configuration</a>
+    &middot;
+    <a href="#docker">Docker</a>
+    &middot;
+    <a href="#troubleshooting">Troubleshooting</a>
+  </p>
+</p>
 
-**Turn any USB webcam into a cloud-connected security camera.**
-
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-
-This node runs locally at your home/office, captures video from USB cameras, and streams to the OpenSentry Command Center in the cloud.
-
----
-
-## 🎨 Beautiful Animated Setup Experience
-
-OpenSentry CloudNode now features a stunning animated terminal UI for setup:
-
-```
-   ██████╗ ███████╗███████╗██████╗ ██████╗
-   ██╔══██╗██╔════╝██╔════╝██╔══██╗██╔══██╗
-   ██████╔╝█████╗  █████╗  ██████╔╝██║  ██║
-   ██╔══██║██╔══╝  ██╔══╝  ██╔══██╗██║  ██║
-   ██║  ██║███████╗███████╗██║  ██║██████╔╝
-   ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═════╝
-   
-   ✓ CloudNode Setup v0.1.0
-
-┌────────────────────────────────────────────────────────┐
-│  Step 1/5: System Prerequisites                      │
-╰────────────────────────────────────────────────────────┯
-
-[████████████████░░░░░░░░░░] 40% ━━━━━━━━ 8s
-
-  ✓ Platform: Windows 11 (x86_64)
-  ✓ Camera: MEE USB Camera (1920x1080)
-  ⏳ Downloading FFmpeg...
-  
-[████████████░░░░░░░░░░░░░░░] 60% Downloaded 24MB of 40MB
-```
-
-### One Command Setup
-
-```bash
-opensentry-cloudnode setup
-```
-
-The setup wizard will:
-- ✅ Detect your platform (Windows/Linux/macOS)
-- ✅ Auto-detect USB cameras
-- ✅ Download FFmpeg automatically (Windows)
-- ✅ Prompt for credentials from Command Center
-- ✅ Store config in SQLite database (API key encrypted at rest)
-- ✅ Detect and configure hardware video encoder (NVENC/QSV/AMF)
-- ✅ Verify everything works
-- ✅ Display next steps
+<p align="center">
+  <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Built_with-Rust-dea584.svg" alt="Built with Rust"></a>
+</p>
 
 ---
 
-## Platform Support
+CloudNode runs on your local network, detects USB cameras, and streams live video to the [OpenSentry Command Center](https://github.com/SourceBox-LLC/OpenSentry-Command) via HLS. All configuration is stored locally in an encrypted SQLite database — no cloud dependency for setup.
 
-| Platform | Camera API | FFmpeg Input | Status |
-|----------|-----------|--------------|--------|
-| **Linux** | Video4Linux2 (v4l2) | `-f v4l2 -i /dev/video0` | ✅ **Production Ready** |
-| **Windows** | DirectShow | `-f dshow -i "video=Camera Name"` | ✅ **Working** |
-| **macOS** | AVFoundation | `-f avfoundation -i "0"` | ⚠️ **Untested** |
+**Supported platforms:**
+
+| Platform | Status | Camera API |
+|----------|--------|------------|
+| Linux x86_64 / ARM64 | Production ready | Video4Linux2 |
+| Windows 10 / 11 | Production ready | DirectShow |
+| macOS | Experimental | AVFoundation |
 
 ---
 
@@ -67,728 +36,343 @@ The setup wizard will:
 
 ### Prerequisites
 
-- **Camera**: USB webcam (required)
-- **OpenSentry Command Center** account
-- **One of the following:**
-  - **Docker Desktop** (recommended)
-  - **Rust toolchain + FFmpeg** (for native build)
+- A USB webcam
+- An [OpenSentry Command Center](https://github.com/SourceBox-LLC/OpenSentry-Command) account with a Node ID and API Key
+- **Docker** (recommended) or **Rust 1.70+** with **FFmpeg**
 
-### Installation
-
-#### **Windows (Native)**
-
-**NEW:** OpenSentry CloudNode now runs natively on Windows using DirectShow for camera access.
-
-1. **Open PowerShell** and navigate to the repository:
-   ```powershell
-   cd C:\path\to\OpenSentry-CloudNode
-   ```
-
-2. **Run the setup script:**
-   ```powershell
-   .\setup.ps1
-   ```
-
-3. **Choose deployment method:**
-   - **Option 1: Windows Native** (Recommended)
-     - Runs directly on Windows
-     - Uses DirectShow for camera access
-     - FFmpeg auto-downloaded (~40MB)
-     - Requires Rust toolchain
-   
-   - **Option 2: WSL2 (Linux)**
-     - Runs inside Windows Subsystem for Linux
-     - Requires USB camera passthrough
-     - Good for testing Linux deployment
-
-4. **Follow the prompts:**
-   - Enter Node ID and API Key from Command Center
-   - FFmpeg will be downloaded automatically (native Windows)
-   - Binary will be built using `cargo build`
-
-5. **Access your camera:**
-   - Dashboard: http://localhost:5173
-   - Health check: http://localhost:8080/health
-
-**Windows Native Notes:**
-- FFmpeg is downloaded to `.\ffmpeg\bin\` during setup
-- Add `.\ffmpeg\bin` to PATH or use full path
-- For production, create a Windows service or startup shortcut
-
-#### **Windows (WSL2)**
-
-If you choose WSL2 deployment:
-
-1. **Open PowerShell as Administrator** and navigate to the repository:
-   ```powershell
-   cd C:\path\to\OpenSentry-CloudNode
-   ```
-
-2. **Run the setup script:**
-   ```powershell
-   .\setup.ps1
-   ```
-
-3. **Choose Option 2 (WSL2)** when prompted
-
-4. **USB Camera Passthrough:**
-   - **Windows 11 (build 22000+):** Automatic USB support
-   - **Windows 10:** Requires `usbipd` tool:
-     ```powershell
-     winget install usbipd
-     usbipd wsl attach --busid <BUSID>
-     ```
-
-#### **Linux / macOS**
-
-1. **Open a terminal** and navigate to the repository:
-   ```bash
-   cd /path/to/OpenSentry-CloudNode
-   ```
-
-2. **Make the setup script executable:**
-   ```bash
-   chmod +x setup.sh
-   ```
-
-3. **Run the setup script:**
-   ```bash
-   ./setup.sh
-   ```
-
-4. **Choose deployment method:**
-   - **Docker** (Recommended): Includes FFmpeg, easy updates
-   - **Native**: Requires Rust + FFmpeg, for development
-
-5. **Follow the prompts** to enter credentials and complete setup.
-
-**Linux Notes:**
-- Camera devices appear as `/dev/video*`
-- Ensure your user is in the `video` group: `sudo usermod -a -G video $USER`
-
-**macOS Notes:**
-- Install FFmpeg: `brew install ffmpeg`
-- Camera access may require permission in System Preferences → Security & Privacy
-
-### Manual Installation
-
-<details>
-<summary>Click to expand manual installation steps</summary>
-
-#### **Docker (Linux/macOS)**
+### Setup
 
 ```bash
-# Build and run
-docker build -t opensentry-cloudnode:latest .
-docker run -d \
-  --name opensentry-cloudnode \
-  --device /dev/video0:/dev/video0 \
-  -e OPENSENTRY_NODE_ID=your_node_id \
-  -e OPENSENTRY_API_KEY=org_sk_your_key \
-  -e OPENSENTRY_API_URL=https://your-backend.fly.dev \
-  -p 8080:8080 \
-  -v ./data:/app/data \
-  opensentry-cloudnode:latest
-```
-
-#### **Native (Linux/macOS)**
-
-```bash
-# Install FFmpeg
-sudo apt install ffmpeg  # Ubuntu/Debian
-# or: brew install ffmpeg  # macOS
-
-# Build
+# Clone and build
+git clone https://github.com/SourceBox-LLC/OpenSentry-CloudNode.git
+cd OpenSentry-CloudNode
 cargo build --release
 
-# Run setup wizard (creates config in data/node.db)
+# Run the interactive setup wizard
 ./target/release/opensentry-cloudnode setup
+```
 
-# Or run directly with env vars
-export OPENSENTRY_NODE_ID=your_node_id
-export OPENSENTRY_API_KEY=org_sk_your_key
-export OPENSENTRY_API_URL=https://your-backend.fly.dev
+The setup wizard handles everything automatically:
+
+1. Detects your platform and connected cameras
+2. Downloads FFmpeg if needed (Windows)
+3. Prompts for your Node ID and API Key
+4. Detects the best available hardware encoder (NVENC, QSV, AMF)
+5. Encrypts and stores credentials locally in `data/node.db`
+
+After setup, start the node:
+
+```bash
 ./target/release/opensentry-cloudnode
 ```
 
-#### **Docker Desktop (Windows - Experimental)**
+---
 
-USB passthrough in Docker Desktop is experimental. WSL2 is recommended instead.
+## Dashboard
 
-If you want to try Docker Desktop:
-```powershell
-# Build
-docker build -t opensentry-cloudnode:latest .
+CloudNode runs a full-screen terminal dashboard showing camera status, upload progress, and live logs.
 
-# Run (USB device may not work reliably)
-docker run -d `
-  --name opensentry-cloudnode `
-  --env-file .env `
-  -p 8080:8080 `
-  -v ${PWD}\data:/app/data `
-  opensentry-cloudnode:latest
-```
+Type `/` and press **Enter** to open the command menu.
 
-</details>
+**Main view:**
+
+| Command | Description |
+|---------|-------------|
+| `/settings` | Open the settings page |
+| `/status` | Show node status summary |
+| `/clear` | Clear the log panel |
+| `/quit` | Stop the node and exit |
+
+**Settings page:**
+
+| Command | Description |
+|---------|-------------|
+| `/export-logs` | Save logs to a timestamped file |
+| `/wipe confirm` | Erase all stored data and reset |
+| `/reauth confirm` | Clear credentials and re-run setup |
+| `/back` | Return to the dashboard |
+
+Press **Esc** to return from settings. Destructive commands require the `confirm` argument.
 
 ---
 
 ## Configuration
 
-### SQLite Database (Primary)
+### How config is loaded
 
-Configuration is stored in `data/node.db` — a local SQLite database created automatically by the setup wizard. The API key is **encrypted at rest** using AES-256-GCM with a machine-derived key (moving the database to another machine makes the key unreadable).
+CloudNode resolves configuration in this order (highest priority last):
 
-View your current configuration with the `/settings` command in the dashboard TUI.
+1. **SQLite database** (`data/node.db`) — created by setup wizard
+2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to DB on first load
+3. **Environment variables** — override any stored values
+4. **CLI flags** — highest priority
 
-### Environment Variables (Override)
+### Environment variables
 
-Environment variables can override database values (useful for debugging or CI):
+Use environment variables to override database values without modifying the DB:
 
 | Variable | Description |
 |----------|-------------|
-| `OPENSENTRY_NODE_ID` | Override node ID |
-| `OPENSENTRY_API_KEY` | Override API key |
-| `OPENSENTRY_API_URL` | Override Command Center URL |
-| `OPENSENTRY_ENCODER` | Override video encoder (e.g. `h264_nvenc`, `libx264`) |
-| `RUST_LOG` | Log level (trace, debug, info, warn, error) |
+| `OPENSENTRY_NODE_ID` | Node ID |
+| `OPENSENTRY_API_KEY` | API Key |
+| `OPENSENTRY_API_URL` | Command Center URL |
+| `OPENSENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
+| `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
-### Configuration File (Legacy)
+### CLI flags
 
-A `config.yaml` file is still supported as a fallback. On first run with a YAML/env config, values are automatically migrated to the SQLite database.
-
-```yaml
-node:
-  name: "Home Camera"
-
-cloud:
-  api_url: "https://your-backend.fly.dev"
-  heartbeat_interval: 30
-
-streaming:
-  fps: 30
-  jpeg_quality: 85
-  hls:
-    enabled: true
-    segment_duration: 2
-    playlist_size: 5
-    bitrate: "2000k"
-
-storage:
-  path: "./data"
-  max_size_gb: 64
-
-server:
-  port: 8080
-  bind: "0.0.0.0"
-
-logging:
-  level: "info"
+```bash
+opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
 ```
+
+### Security
+
+The API key is **encrypted at rest** using AES-256-GCM with a machine-derived key (SHA-256 of hostname + application salt). The database is not portable between machines — moving `node.db` to a different host will make the stored key unreadable.
 
 ---
 
-## Docker Reference
+## Docker
 
-### Build Image
-
-```bash
-docker build -t opensentry-cloudnode:latest .
-```
-
-### Run Container
+### Quick run
 
 ```bash
+docker build -t opensentry-cloudnode .
+
 docker run -d \
   --name opensentry-cloudnode \
   --device /dev/video0:/dev/video0 \
   -e OPENSENTRY_NODE_ID=your_node_id \
-  -e OPENSENTRY_API_KEY=org_sk_your_key \
-  -e OPENSENTRY_API_URL=https://your-backend.fly.dev \
+  -e OPENSENTRY_API_KEY=your_api_key \
+  -e OPENSENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
   -v ./data:/app/data \
-  opensentry-cloudnode:latest
+  opensentry-cloudnode
 ```
 
-### Multiple Cameras
+### Docker Compose
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+docker-compose up -d
+```
+
+### Multiple cameras
+
+Pass each device to the container:
 
 ```bash
 docker run -d \
   --device /dev/video0:/dev/video0 \
-  --device /dev/video1:/dev/video1 \
   --device /dev/video2:/dev/video2 \
-  ...
+  -e OPENSENTRY_NODE_ID=your_node_id \
+  -e OPENSENTRY_API_KEY=your_api_key \
+  -e OPENSENTRY_API_URL=https://your-backend.example.com \
+  -p 8080:8080 \
+  opensentry-cloudnode
 ```
-
----
-
-## API Endpoints (Node HTTP Server)
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/health` | GET | Health check |
-| `/hls/{camera_id}/stream.m3u8` | GET | HLS playlist for camera |
-| `/hls/{camera_id}/segment_{n}.ts` | GET | HLS video segment |
-| `/recordings` | GET | List recordings |
-| `/recordings/{path}` | GET | Download recording |
-| `/snapshots` | GET | List snapshots |
-| `/snapshots/{path}` | GET | Download snapshot |
-
----
-
-## HLS Streaming
-
-OpenSentry CloudNode uses **HTTP Live Streaming (HLS)** for video delivery:
-
-1. **FFmpeg** transcodes camera video into HLS segments (`.ts` files)
-2. **Playlist** (`stream.m3u8`) references the latest segments
-3. **HTTP Server** serves playlist and segments on port 8080
-4. **Frontend** (HLS.js) plays the stream in any browser
-
-### Stream URL Format
-
-```
-http://localhost:8080/hls/{camera_id}/stream.m3u8
-```
-
----
-
-## Dashboard TUI
-
-While running, the node displays a live terminal dashboard with camera status, upload stats, and a command bar.
-
-### Slash Commands
-
-Type `/` and press Enter to see available commands. Commands vary by page:
-
-**Main dashboard:**
-| Command | Description |
-|---------|-------------|
-| `/settings` | Open settings page |
-| `/status` | Show node status summary |
-| `/clear` | Clear the log |
-| `/quit` | Stop the node |
-
-**Settings page:**
-| Command | Description |
-|---------|-------------|
-| `/export-logs` | Save all logs to a timestamped file |
-| `/wipe` | Erase all stored data and reset the node |
-| `/reauth` | Clear credentials and re-run setup |
-| `/back` | Return to dashboard |
-
-Press `Esc` to go back from the settings page. Destructive commands (`/wipe`, `/reauth`) require a `confirm` argument (e.g. `/wipe confirm`).
-
----
-
-## Development
-
-### Prerequisites
-
-- Rust 1.70+ 
-- FFmpeg (for HLS generation)
-
-### Build
-
-```bash
-cargo build
-```
-
-### Run in dev mode
-
-```bash
-OPENSENTRY_NODE_ID=test \
-OPENSENTRY_API_KEY=org_sk_xxx \
-cargo run
-```
-
-### Run tests
-
-```bash
-cargo test
-```
-
-### Build for Raspberry Pi (ARM64)
-
-```bash
-cargo build --release --target aarch64-unknown-linux-gnu
-```
-
----
-
-## Troubleshooting
-
-### Windows (WSL2) Issues
-
-#### **USB Camera Not Detected in WSL2**
-
-**Windows 11 (Build 22000+):**
-USB devices are automatically attached to WSL2. If your camera isn't detected:
-
-1. Restart WSL2:
-   ```powershell
-   wsl --shutdown
-   ```
-
-2. Reopen WSL2 and check:
-   ```bash
-   ls -l /dev/video*
-   ```
-
-**Windows 10:**
-USB devices require `usbipd` to attach to WSL2:
-
-1. Install usbipd on Windows:
-   ```powershell
-   winget install usbipd
-   ```
-
-2. List USB devices:
-   ```powershell
-   usbipd list
-   ```
-
-3. Attach camera to WSL2:
-   ```powershell
-   usbipd bind --busid <BUSID>
-   usbipd wsl attach --busid <BUSID>
-   ```
-
-4. Verify in WSL2:
-   ```bash
-   ls -l /dev/video*
-   ```
-
-#### **Ubuntu Not Installed in WSL2**
-
-Run the setup script again, or install manually:
-
-```powershell
-wsl --install -d Ubuntu
-```
-
-Create a UNIX username and password when prompted.
-
-#### **WSL2 Network Issues**
-
-If CloudNode can't connect to the Command Center:
-
-1. Check WSL2 network:
-   ```bash
-   ping ulises-nonruinable-shapelessly.ngrok-free.dev
-   ```
-
-2. Use Windows host IP from WSL2:
-   ```bash
-   # In WSL2
-   export OPENSENTRY_API_URL=http://$(hostname).local:8000
-   ```
-
-### No cameras detected (Linux)
-
-Ensure your user has permission to access video devices:
-
-```bash
-sudo usermod -a -G video $USER
-# Log out and log back in
-```
-
-Verify device exists:
-```bash
-ls -l /dev/video*
-```
-
-Check permissions:
-```bash
-# Should show crw-rw---- video
-ls -l /dev/video0
-```
-
-### FFmpeg not found (native build)
-
-Install FFmpeg:
-
-```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt install ffmpeg
-
-# Fedora
-sudo dnf install ffmpeg
-
-# Arch Linux
-sudo pacman -S ffmpeg
-
-# macOS
-brew install ffmpeg
-```
-
-### Docker container can't access camera
-
-Make sure to pass the device:
-
-```bash
-docker run --device /dev/video0:/dev/video0 ...
-```
-
-For multiple cameras:
-```bash
-docker run \
-  --device /dev/video0:/dev/video0 \
-  --device /dev/video1:/dev/video1 \
-  ...
-```
-
-### HLS stream not playing
-
-1. Check FFmpeg is running:
-   ```bash
-   docker logs opensentry-cloudnode | grep FFmpeg
-   # or
-   ps aux | grep ffmpeg
-   ```
-
-2. Check HLS files exist:
-   ```bash
-   ls -l ./data/hls/
-   ```
-
-3. Verify HTTP server:
-   ```bash
-   curl http://localhost:8080/health
-   ```
-
-4. Check camera permissions:
-   ```bash
-   # Linux
-   ls -l /dev/video*
-   ```
-
-### "Permission denied" errors
-
-Add your user to the `video` group:
-
-```bash
-sudo usermod -a -G video $USER
-# Log out and log back in
-```
-
-### Connection refused to Command Center
-
-1. Verify API URL:
-   ```bash
-   curl https://your-backend.fly.dev/api/health
-   ```
-
-2. Check credentials: use the `/settings` command in the dashboard TUI to verify your Node ID and API URL.
-
-3. Re-authenticate: use `/reauth` from the settings page to clear credentials and re-run setup.
-
----
-
----
-
-## Updating
-
-To update CloudNode to the latest version:
-
-### **Windows (WSL2)**
-```powershell
-.\setup.ps1 -Update
-```
-
-### **Linux / macOS**
-```bash
-./setup.sh --update
-```
-
----
-
-## Uninstalling
-
-To uninstall CloudNode:
-
-### **Windows (WSL2)**
-```powershell
-.\uninstall.ps1
-```
-
-Options:
-- `-RemoveData`: Remove all data directories (recordings, snapshots, HLS)
-- `-RemoveImage`: Remove Docker image
-- `-RemoveWSL`: Remove Ubuntu from WSL2 (removes ALL WSL data)
-
-### **Linux / macOS**
-```bash
-./uninstall.sh
-```
-
-Options:
-- `--remove-data`: Remove all data directories
-- `--remove-image`: Remove Docker image
 
 ---
 
 ## Architecture
 
-**Linux / macOS:**
 ```
-┌─────────────────────────────────────┐
-│         Docker Container            │
-│  ┌───────────────────────────────┐  │
-│  │      CloudNode (Rust)        │  │
-│  │  ┌─────────┐   ┌───────────┐  │  │
-│  │  │ Camera  │   │   HLS     │  │  │
-│  │  │ Capture │ → │ Generator │  │  │
-│  │  └─────────┘   └───────────┘  │  │
-│  │  ┌───────────────────────────┐│  │
-│  │  │   HTTP Server (port 8080) ││  │
-│  │  └───────────────────────────┘│  │
-│  └───────────────────────────────┘  │
-│                                      │
-│  FFmpeg (bundled)                    │
-└─────────────────────────────────────┘
-         │
-         ↓ API requests
-    ┌────────────┐
-    │  Backend   │ (Command Center)
-    │  (Fly.io)  │
-    └────────────┘
-         │
-         ↓ HLS streaming
-    ┌────────────┐
-    │  Frontend  │ (Browser)
-    │  HLS.js    │
-    └────────────┘
+                  USB Cameras
+                      |
+              ┌───────┴───────┐
+              │   CloudNode   │
+              │               │
+              │  Camera       │
+              │  Detection ───┼──► FFmpeg (HLS transcoding)
+              │               │         |
+              │  Dashboard    │    .ts segments + .m3u8
+              │  (TUI)        │         |
+              │               │    ┌────┴─────┐
+              │  HTTP :8080 ◄─┼────┤ Uploader │
+              │               │    └────┬─────┘
+              │  WebSocket ◄──┼─┐       |
+              └───────────────┘ │       ▼
+                                │  Command Center
+                                └── (cloud API)
 ```
 
-**Windows (WSL2):**
-```
-┌─────────────────────────────────────────────┐
-│              Windows Host                    │
-│  ┌───────────────────────────────────────┐  │
-│  │         WSL2 (Ubuntu)                  │  │
-│  │  ┌─────────────────────────────────┐  │  │
-│  │  │   Docker Container               │  │  │
-│  │  │   ┌──────────────────────────┐  │  │  │
-│  │  │   │    CloudNode (Rust)     │  │  │  │
-│  │  │   │  ┌────────┐  ┌────────┐ │  │  │  │
-│  │  │   │  │Camera  │  │  HLS   │ │  │  │  │
-│  │  │   │  │Capture │→ │Generator│ │  │  │  │
-│  │  │   │  └────────┘  └────────┘ │  │  │  │
-│  │  │   │  ┌──────────────────────┐│  │  │  │
-│  │  │   │  │ HTTP Server :8080   ││  │  │  │
-│  │  │   │  └──────────────────────┘│  │  │  │
-│  │  │   └──────────────────────────┘  │  │  │
-│  │  │   FFmpeg (bundled)              │  │  │
-│  │  └─────────────────────────────────┘  │  │
-│  │                                        │  │
-│  │   USB Camera ←─(usbipd/WSL2 passthrough)│
-│  └───────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
-         │
-         ↓ API requests
-    ┌────────────┐
-    │  Backend   │ (Command Center)
-    │  (Fly.io)  │
-    └────────────┘
-         │
-         ↓ HLS streaming (localhost:8080)
-    ┌────────────┐
-    │  Frontend  │ (Browser)
-    │  HLS.js    │
-    └────────────┘
-```
+**Video pipeline:** Camera → FFmpeg subprocess → HLS segments (`.ts`) → uploaded to Command Center via presigned URLs.
+
+**Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs. Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
+
+**Hardware encoding:** At startup, CloudNode probes for a hardware encoder (NVENC, QSV, AMF) and caches the result in the database. Falls back to `libx264` if none is found.
 
 ---
 
-## Platform Support
+## API Endpoints
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| Linux (x86_64) | ✅ Supported | Primary platform |
-| Linux (ARM64) | ✅ Supported | Raspberry Pi 4+ |
-| Linux (ARM) | ✅ Supported | Raspberry Pi 3+ |
-| macOS (Intel) | ✅ Supported | Requires FFmpeg |
-| macOS (Apple Silicon) | ✅ Supported | Requires FFmpeg |
-| Windows 10 | ⚠️ Experimental | Requires usbipd for USB camera |
-| Windows 11 | ✅ Supported | WSL2 with automatic USB support |
+The node runs an HTTP server on port 8080:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /hls/{camera_id}/stream.m3u8` | HLS playlist |
+| `GET /hls/{camera_id}/segment_{n}.ts` | Video segment |
 
 ---
 
 ## Development
 
-### Project Structure
-
-```
-OpenSentry-CloudNode/
-├── setup.ps1              # Windows setup script
-├── setup.sh               # Linux/macOS setup script
-├── Cargo.toml             # Rust project configuration
-├── src/
-│   ├── main.rs            # Entry point (clap CLI)
-│   ├── dashboard.rs       # Live TUI dashboard with slash commands
-│   ├── camera/            # Camera detection and capture
-│   ├── config/            # Configuration loading (DB → YAML → env)
-│   ├── node/              # Node orchestration
-│   ├── server/            # HTTP server (warp)
-│   ├── streaming/         # HLS generation and upload
-│   ├── storage/           # SQLite database (snapshots, recordings, config)
-│   ├── setup/             # Interactive TUI setup wizard
-│   └── api/               # Cloud API + WebSocket client
-└── data/                  # Data directory (created at runtime)
-    ├── node.db            # SQLite database (config, snapshots, recordings)
-    └── hls/               # HLS segment cache (per-camera subdirectories)
-```
-
-### Building from Source
+### Build
 
 ```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run in development mode
-export OPENSENTRY_NODE_ID=test
-export OPENSENTRY_API_KEY=org_sk_xxx
-cargo run
+cargo build              # Debug
+cargo build --release    # Optimized
+cargo test               # Run tests
+cargo clippy             # Lint
+cargo fmt -- --check     # Format check
 ```
 
-### Cross-Compilation
+### Project structure
 
-Build for Raspberry Pi (ARM64):
+```
+src/
+├── main.rs              # CLI entry point (clap)
+├── dashboard.rs         # Live TUI dashboard
+├── api/                 # Cloud API client + WebSocket
+├── camera/              # Detection and capture (platform-specific)
+├── config/              # Config loading (DB → YAML → env → CLI)
+├── node/                # Orchestration and lifecycle
+├── server/              # HTTP server (warp)
+├── setup/               # Interactive setup wizard
+├── streaming/           # HLS generation and segment upload
+└── storage/             # SQLite database
+```
+
+### Cross-compilation
+
 ```bash
+# Raspberry Pi (ARM64)
 rustup target add aarch64-unknown-linux-gnu
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
 ---
 
-## License
+## Platform Notes
 
-This project is licensed under the **GNU General Public License v3.0** - see the [LICENSE](LICENSE) file for details.
+<details>
+<summary><strong>Linux</strong></summary>
 
-### Why GPL-3.0?
+Camera devices appear at `/dev/video*`. Add your user to the `video` group:
 
-OpenSentry CloudNode uses GPL-3.0 because:
+```bash
+sudo usermod -a -G video $USER
+# Log out and back in
+```
 
-- **Freedom Preservation**: Ensures users always have access to source code for the software running on their cameras
-- **Community Contributions**: Improvements must be shared back to the community when distributed
-- **Surveillance Transparency**: Users can inspect, modify, and verify what the software does with their video feeds
-- **Patent Protection**: Includes explicit patent grants, important for video/surveillance technology
+Install FFmpeg:
 
-### For Commercial Use
+```bash
+sudo apt install ffmpeg        # Ubuntu / Debian
+sudo dnf install ffmpeg        # Fedora
+sudo pacman -S ffmpeg          # Arch
+```
 
-If you need to use OpenSentry CloudNode in a commercial product that cannot comply with GPL-3.0, please contact SourceBox LLC for dual-licensing options.
+</details>
 
-### Contributing
+<details>
+<summary><strong>Windows</strong></summary>
 
-By contributing to this project, you agree that your contributions will be licensed under GPL-3.0.
+CloudNode runs natively on Windows using DirectShow. FFmpeg is downloaded automatically during setup to `./ffmpeg/bin/`.
+
+Camera names (e.g. `MEE USB Camera`, `Integrated Webcam`) are detected via DirectShow enumeration.
+
+</details>
+
+<details>
+<summary><strong>macOS</strong></summary>
+
+Install FFmpeg via Homebrew:
+
+```bash
+brew install ffmpeg
+```
+
+You may need to grant camera access in **System Settings > Privacy & Security > Camera**.
+
+</details>
 
 ---
 
-**[OpenSentry Command Center](https://github.com/SourceBox-LLC/OpenSentry-Command)** · Made with ❤️ by the OpenSentry Team
+## Troubleshooting
+
+<details>
+<summary><strong>No cameras detected</strong></summary>
+
+**Linux:** Verify device exists and permissions are correct:
+
+```bash
+ls -l /dev/video*
+# Should show crw-rw---- with group 'video'
+```
+
+Add your user to the video group if needed:
+
+```bash
+sudo usermod -a -G video $USER
+```
+
+**Windows:** Ensure the camera is not in use by another application (Zoom, Teams, etc.).
+
+</details>
+
+<details>
+<summary><strong>FFmpeg not found</strong></summary>
+
+**Windows:** Re-run `opensentry-cloudnode setup` — FFmpeg is downloaded automatically.
+
+**Linux / macOS:** Install FFmpeg using your package manager (see [Platform Notes](#platform-notes)).
+
+</details>
+
+<details>
+<summary><strong>HLS stream not playing</strong></summary>
+
+1. Verify the node is running: `curl http://localhost:8080/health`
+2. Check the dashboard for FFmpeg errors
+3. Confirm HLS files are being created in `data/hls/`
+4. Try `/export-logs` from the settings page for detailed diagnostics
+
+</details>
+
+<details>
+<summary><strong>Cannot connect to Command Center</strong></summary>
+
+1. Verify your API URL: `curl https://your-backend.example.com/api/health`
+2. Open `/settings` in the dashboard to confirm Node ID and API URL
+3. Use `/reauth confirm` from settings to re-enter credentials
+
+</details>
+
+<details>
+<summary><strong>Docker container can't access camera</strong></summary>
+
+Pass each camera device explicitly:
+
+```bash
+docker run --device /dev/video0:/dev/video0 ...
+```
+
+</details>
+
+---
+
+## License
+
+Licensed under the [GNU General Public License v3.0](LICENSE).
+
+CloudNode uses GPL-3.0 to ensure users can always inspect, modify, and verify what runs on their cameras. For commercial licensing, contact [SourceBox LLC](https://github.com/SourceBox-LLC).
+
+---
+
+<p align="center">
+  <a href="https://github.com/SourceBox-LLC/OpenSentry-Command">OpenSentry Command Center</a>
+  &middot;
+  Made by the OpenSentry Team
+</p>

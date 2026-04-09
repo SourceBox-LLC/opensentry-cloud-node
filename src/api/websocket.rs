@@ -26,6 +26,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use serde::{Deserialize, Serialize};
+use base64::prelude::*;
 use crate::dashboard::Dashboard;
 use crate::storage::NodeDatabase;
 
@@ -362,6 +363,9 @@ async fn cmd_take_snapshot(
     let timestamp = now.timestamp_millis();
     let size = data.len() as u64;
 
+    // Base64-encode the JPEG for transfer over WebSocket
+    let image_b64 = BASE64_STANDARD.encode(&data);
+
     db.save_snapshot(camera_id, &filename, timestamp, &data)
         .map_err(|e| format!("DB save error: {}", e))?;
 
@@ -371,6 +375,7 @@ async fn cmd_take_snapshot(
         "filename": filename,
         "size_bytes": size,
         "timestamp": timestamp,
+        "image_b64": image_b64,
     }))
 }
 

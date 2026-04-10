@@ -151,33 +151,3 @@ pub struct HeartbeatResponse {
     pub new_api_key: Option<String>,
 }
 
-fn default_upload_expiry() -> u32 {
-    300
-}
-
-/// Single URL entry in a batch response
-#[derive(Debug, Clone, Deserialize)]
-pub struct BatchUploadUrl {
-    /// Segment sequence number
-    pub sequence: u64,
-
-    /// Segment filename (e.g., "segment_00000.ts")
-    pub filename: String,
-
-    /// Presigned upload URL
-    pub upload_url: String,
-}
-
-/// Batch upload URLs response
-#[derive(Debug, Deserialize)]
-pub struct BatchUploadUrlsResponse {
-    /// Presigned URLs for segments
-    pub urls: Vec<BatchUploadUrl>,
-
-    /// Presigned URL for uploading the playlist directly to Tigris
-    pub playlist_upload_url: String,
-
-    /// URL expiry time in seconds
-    #[serde(default = "default_upload_expiry")]
-    pub expires_in: u32,
-}

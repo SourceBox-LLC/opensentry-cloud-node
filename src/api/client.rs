@@ -229,45 +229,35 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Get a batch of presigned upload URLs for segments + playlist.
-    /// One request covers ~60 seconds of streaming, eliminating per-segment round-trips.
-    pub async fn get_batch_upload_urls(
+    /// Push an HLS segment directly to the backend's in-memory cache.
+    /// Replaces the old Tigris presigned URL flow — no S3 involved.
+    pub async fn push_segment(
         &self,
         camera_id: &str,
-        start_sequence: u64,
-        count: u32,
-    ) -> Result<BatchUploadUrlsResponse> {
+        filename: &str,
+        data: bytes::Bytes,
+    ) -> Result<()> {
         let _node_id = self.node_id.as_ref()
             .ok_or_else(|| Error::Api("Node not registered".into()))?;
 
-        tracing::debug!(
-            "Requesting batch of {} upload URLs for camera {} starting at seq {}",
-            count, camera_id, start_sequence
-        );
-
-        let body = serde_json::json!({
-            "start_sequence": start_sequence,
-            "count": count,
-        });
-
         let response = self.client
-            .post(format!("{}/api/cameras/{}/upload-urls", self.base_url, camera_id))
+            .post(format!(
+                "{}/api/cameras/{}/push-segment?filename={}",
+                self.base_url, camera_id, filename
+            ))
             .header("X-Node-API-Key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
+            .header("Content-Type", "video/mp2t")
+            .body(data)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(Error::Api(format!("Get batch upload URLs failed ({}): {}", status, body)));
+            return Err(Error::Api(format!("Push segment failed ({}): {}", status, body)));
         }
 
-        let batch: BatchUploadUrlsResponse = response.json().await?;
-        tracing::info!("Got {} presigned URLs for camera {}", batch.urls.len(), camera_id);
-
-        Ok(batch)
+        Ok(())
     }
 
     /// Update the HLS playlist on the server

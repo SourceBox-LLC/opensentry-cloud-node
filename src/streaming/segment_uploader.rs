@@ -13,29 +13,16 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-//! Segment Uploader - Uploads HLS segments to cloud storage
+//! Segment Uploader - Pushes HLS segments to the backend
 //!
-//! Manages upload queue and coordinates with the API to get upload URLs.
-//! Uses a pooled HTTP client for connection reuse and retries transient errors.
+//! Reads segment files from disk and pushes them to the Command Center
+//! via POST /push-segment. Retries transient errors with exponential backoff.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::api::ApiClient;
 use crate::error::Result;
-
-/// Reusable HTTP client for uploading segments to presigned URLs.
-/// Shared across all uploads to leverage TCP connection pooling,
-/// avoiding the overhead of a new TLS handshake per segment.
-static UPLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(4)
-        .pool_idle_timeout(Duration::from_secs(60))
-        .tcp_keepalive(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("Failed to create upload HTTP client")
-});
 
 /// Upload task
 pub struct UploadTask {
@@ -52,20 +39,17 @@ pub struct UploadTask {
 pub struct UploaderConfig {
     /// Upload retry count
     pub retry_count: u32,
-    /// Upload timeout in seconds
-    pub timeout_seconds: u32,
 }
 
 impl Default for UploaderConfig {
     fn default() -> Self {
         Self {
             retry_count: 3,
-            timeout_seconds: 30,
         }
     }
 }
 
-/// Segment uploader
+/// Segment uploader — pushes segments to the backend's in-memory cache.
 pub struct SegmentUploader {
     config: UploaderConfig,
 }
@@ -76,12 +60,10 @@ impl SegmentUploader {
         Self { config }
     }
 
-    /// Upload a segment directly to a presigned URL (batch flow).
-    /// No per-segment backend call — the URL was pre-fetched in a batch.
-    /// Returns true if uploaded, false if skipped (too small).
-    pub async fn upload_segment_direct(&self, task: UploadTask, presigned_url: &str) -> Result<bool> {
+    /// Push a segment to the backend. Returns true if pushed, false if skipped (too small).
+    pub async fn push_segment(&self, task: UploadTask, api_client: &ApiClient) -> Result<bool> {
         tracing::debug!(
-            "Uploading segment {} for camera {} (direct)",
+            "Pushing segment {} for camera {}",
             task.sequence,
             task.camera_id
         );
@@ -99,18 +81,19 @@ impl SegmentUploader {
 
         tracing::debug!("Segment {} size: {} bytes", task.sequence, data.len());
 
+        let filename = format!("segment_{:05}.ts", task.sequence);
         let data_bytes: bytes::Bytes = data.into();
         let mut attempts = 0;
         let max_attempts = self.config.retry_count;
 
         loop {
-            match self.upload_to_storage(presigned_url, &data_bytes).await {
+            match api_client.push_segment(&task.camera_id, &filename, data_bytes.clone()).await {
                 Ok(()) => break,
                 Err(e) if Self::is_retryable(&e) && attempts < max_attempts => {
                     attempts += 1;
                     let delay_ms = 50 * (1u64 << attempts.min(2)); // 100, 200, 200ms
                     tracing::warn!(
-                        "Upload attempt {}/{} failed ({}), retrying in {}ms...",
+                        "Push attempt {}/{} failed ({}), retrying in {}ms...",
                         attempts, max_attempts, e, delay_ms,
                     );
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -120,7 +103,7 @@ impl SegmentUploader {
         }
 
         tracing::info!(
-            "Uploaded segment {} for camera {}",
+            "Pushed segment {} for camera {}",
             task.sequence,
             task.camera_id
         );
@@ -129,21 +112,16 @@ impl SegmentUploader {
     }
 
     /// Check if an error is retryable (transient network/server error).
-    /// Uses prefix matching on "Upload failed: NNN" to avoid false positives
-    /// from Tigris XML bodies that contain digits in RequestId fields.
     fn is_retryable(err: &crate::error::Error) -> bool {
         match err {
-            crate::error::Error::Streaming(msg) => {
-                // Extract the HTTP status code from the beginning of the error.
-                // Format: "Upload failed: 502 Bad Gateway" or similar.
+            crate::error::Error::Api(msg) => {
                 let retryable_prefixes = [
-                    "Upload failed: 408",
-                    "Upload failed: 411",
-                    "Upload failed: 429",
-                    "Upload failed: 500",
-                    "Upload failed: 502",
-                    "Upload failed: 503",
-                    "Upload failed: 504",
+                    "Push segment failed: 408",
+                    "Push segment failed: 429",
+                    "Push segment failed: 500",
+                    "Push segment failed: 502",
+                    "Push segment failed: 503",
+                    "Push segment failed: 504",
                 ];
                 retryable_prefixes.iter().any(|p| msg.starts_with(p))
             }
@@ -151,33 +129,6 @@ impl SegmentUploader {
             _ => false,
         }
     }
-
-    /// Upload to signed URL using pooled HTTP client.
-    /// Bytes::clone() is a cheap Arc ref-count bump, not a data copy.
-    async fn upload_to_storage(
-        &self,
-        url: &str,
-        data: &bytes::Bytes,
-    ) -> Result<()> {
-        let response = UPLOAD_CLIENT
-            .put(url)
-            .header("Content-Type", "video/mp2t")
-            .header("Content-Length", data.len())
-            .body(data.clone()) // Bytes::clone is O(1) - just bumps Arc refcount
-            .timeout(Duration::from_secs(self.config.timeout_seconds.min(10) as u64))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(crate::error::Error::Streaming(format!(
-                "Upload failed: {}",
-                response.status()
-            )));
-        }
-
-        Ok(())
-    }
-
 }
 
 #[cfg(test)]
@@ -188,7 +139,6 @@ mod tests {
     fn test_uploader_config_default() {
         let config = UploaderConfig::default();
         assert_eq!(config.retry_count, 3);
-        assert_eq!(config.timeout_seconds, 30);
     }
 
     #[test]

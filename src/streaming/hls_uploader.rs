@@ -15,14 +15,14 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! HLS Segment Uploader
 //!
-//! Watches HLS output directory and uploads new segments to cloud storage.
+//! Watches HLS output directory and pushes new segments to the backend.
 //! Maintains a rolling buffer locally while streaming to cloud.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 use crate::api::ApiClient;
 use crate::dashboard::{CameraStatus, Dashboard};
@@ -46,8 +46,6 @@ pub struct HlsUploaderConfig {
     pub output_dir: PathBuf,
     /// Upload retry count
     pub retry_count: u32,
-    /// Upload timeout in seconds
-    pub timeout_seconds: u32,
     /// Number of segments to keep locally after upload
     pub local_buffer_size: u32,
 }
@@ -58,19 +56,9 @@ impl HlsUploaderConfig {
             camera_id,
             output_dir,
             retry_count: 3,
-            timeout_seconds: 30,
             local_buffer_size: 5, // Keep 5 segments locally (~5 seconds with 1s segments)
         }
     }
-}
-
-/// Pre-fetched batch of presigned URLs for segment uploads.
-/// Eliminates per-segment backend round-trips — the #1 cause of the buffer wall.
-struct UrlPool {
-    /// Map of sequence number → presigned upload URL
-    urls: HashMap<u64, String>,
-    /// Next sequence to request when refilling
-    next_start_seq: u64,
 }
 
 /// HLS Segment Uploader
@@ -81,18 +69,11 @@ pub struct HlsUploader {
     last_uploaded_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Track whether codec has been detected
     codec_detected: Arc<std::sync::atomic::AtomicBool>,
-    /// Pre-fetched presigned URLs — shared across async tasks
-    url_pool: Arc<Mutex<Option<UrlPool>>>,
     /// Which camera IDs are currently recording (shared with WS command handler)
     recording_state: Arc<RwLock<HashSet<String>>>,
     /// SQLite database for storing recorded segments
     db: NodeDatabase,
 }
-
-/// How many URLs to request per batch
-const BATCH_SIZE: u32 = 30;
-/// Refill when fewer than this many URLs remain
-const REFILL_THRESHOLD: usize = 10;
 
 impl HlsUploader {
     /// Create a new HLS uploader
@@ -107,64 +88,8 @@ impl HlsUploader {
             api_client,
             last_uploaded_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             codec_detected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            url_pool: Arc::new(Mutex::new(None)),
             recording_state,
             db,
-        }
-    }
-
-    /// Fetch a batch of presigned URLs from the backend.
-    /// Called once on stream start, then again when running low.
-    async fn refill_url_pool(&self, start_seq: u64) -> Result<()> {
-        let batch = self.api_client
-            .get_batch_upload_urls(&self.config.camera_id, start_seq, BATCH_SIZE)
-            .await?;
-
-        let mut urls = HashMap::new();
-        let mut max_seq = start_seq;
-        for entry in &batch.urls {
-            urls.insert(entry.sequence, entry.upload_url.clone());
-            if entry.sequence >= max_seq {
-                max_seq = entry.sequence + 1;
-            }
-        }
-
-        let mut pool = self.url_pool.lock().await;
-        match pool.as_mut() {
-            Some(existing) => {
-                // Merge new URLs into existing pool (don't discard unused ones)
-                existing.urls.extend(urls);
-                existing.next_start_seq = max_seq;
-            }
-            None => {
-                *pool = Some(UrlPool {
-                    urls,
-                    next_start_seq: max_seq,
-                });
-            }
-        }
-
-        tracing::info!(
-            "URL pool refilled: {} URLs starting at seq {} for camera {}",
-            batch.urls.len(), start_seq, self.config.camera_id
-        );
-
-        Ok(())
-    }
-
-    /// Get the presigned URL for a given sequence number.
-    /// Returns None if the sequence isn't in the pool (triggers refill).
-    async fn take_url(&self, sequence: u64) -> Option<String> {
-        let mut pool = self.url_pool.lock().await;
-        pool.as_mut().and_then(|p| p.urls.remove(&sequence))
-    }
-
-    /// Check if the pool needs refilling
-    async fn pool_needs_refill(&self) -> (bool, u64) {
-        let pool = self.url_pool.lock().await;
-        match pool.as_ref() {
-            Some(p) => (p.urls.len() < REFILL_THRESHOLD, p.next_start_seq),
-            None => (true, 0),
         }
     }
 
@@ -254,32 +179,9 @@ impl HlsUploader {
                 let seq = *seq;
                 let segment_path = segment_path.clone();
 
-                // Ensure URL pool is filled before spawning
-                self.ensure_url_pool(seq).await;
-
-                // Get presigned URL now (needs &self which isn't Send)
-                let presigned_url = match self.take_url(seq).await {
-                    Some(url) => url,
-                    None => {
-                        tracing::warn!("URL pool empty for seq {}, forcing refill", seq);
-                        if let Err(e) = self.refill_url_pool(seq).await {
-                            dash.log_warn(format!("Refill failed for seq {}: {}", seq, e));
-                            continue;
-                        }
-                        match self.take_url(seq).await {
-                            Some(url) => url,
-                            None => {
-                                dash.log_warn(format!("No URL for seq {} after refill", seq));
-                                continue;
-                            }
-                        }
-                    }
-                };
-
                 // Clone everything needed for the background task
                 let uploader_config = UploaderConfig {
                     retry_count: self.config.retry_count,
-                    timeout_seconds: self.config.timeout_seconds,
                 };
                 let camera_id = self.config.camera_id.clone();
                 let last_uploaded = self.last_uploaded_seq.clone();
@@ -301,7 +203,7 @@ impl HlsUploader {
                 let sem = UPLOAD_SEMAPHORE.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
-                    let bg_uploader = SegmentUploader::new(uploader_config);
+                    let uploader = SegmentUploader::new(uploader_config);
                     let file_size = tokio::fs::metadata(&segment_path).await.map(|m| m.len()).unwrap_or(0);
 
                     let task = UploadTask {
@@ -310,12 +212,12 @@ impl HlsUploader {
                         sequence: seq,
                     };
 
-                    match bg_uploader.upload_segment_direct(task, &presigned_url).await {
+                    match uploader.push_segment(task, &api_client).await {
                         Ok(true) => {
                             let kb = file_size / 1024;
                             dash.record_upload(&camera_name, file_size);
                             dash.update_camera_status(&camera_name, CameraStatus::Streaming);
-                            dash.log_debug(format!("Segment {:05} uploaded ({} KB)", seq, kb));
+                            dash.log_debug(format!("Segment {:05} pushed ({} KB)", seq, kb));
 
                             // Codec detection (only first successful segment)
                             if !codec_detected.load(std::sync::atomic::Ordering::SeqCst) {
@@ -328,7 +230,7 @@ impl HlsUploader {
                                 }
                             }
 
-                            // Playlist upload (background, non-blocking)
+                            // Playlist push (background, non-blocking)
                             let api = api_client.clone();
                             let cam = cam_id_for_playlist;
                             let dir = output_dir;
@@ -337,7 +239,7 @@ impl HlsUploader {
                                 if let Ok(content) = tokio::fs::read_to_string(&playlist_path).await {
                                     if content.starts_with("#EXTM3U") && content.contains("#EXTINF") {
                                         if let Err(e) = api.update_playlist(&cam, &content).await {
-                                            tracing::warn!("Playlist upload failed: {}", e);
+                                            tracing::warn!("Playlist push failed: {}", e);
                                         }
                                     }
                                 }
@@ -373,7 +275,7 @@ impl HlsUploader {
                             tracing::debug!("Skipped segment {} (too small)", seq);
                         }
                         Err(e) => {
-                            dash.log_warn(format!("Segment {} upload failed: {}", seq, e));
+                            dash.log_warn(format!("Segment {} push failed: {}", seq, e));
                         }
                     }
                 });
@@ -382,19 +284,6 @@ impl HlsUploader {
             tokio::time::sleep(poll_interval).await;
         }
     }
-
-    /// Ensure the URL pool has enough presigned URLs for this sequence.
-    /// Fetches a new batch if pool is empty or running low.
-    async fn ensure_url_pool(&self, current_seq: u64) {
-        let (needs_refill, next_seq) = self.pool_needs_refill().await;
-        if needs_refill {
-            let start = if next_seq > 0 { next_seq } else { current_seq };
-            if let Err(e) = self.refill_url_pool(start).await {
-                tracing::warn!("Batch URL fetch failed: {}", e);
-            }
-        }
-    }
-
 }
 
 /// Extract sequence number from segment filename
@@ -404,7 +293,7 @@ fn extract_sequence_number(filename: &str) -> Option<u64> {
     if parts.len() != 2 {
         return None;
     }
-    
+
     let num_part = parts[1].trim_end_matches(".ts");
     num_part.parse().ok()
 }
@@ -431,7 +320,7 @@ mod tests {
     fn test_hls_uploader_config() {
         let config = HlsUploaderConfig::new("camera_123".into(), PathBuf::from("/data/hls/camera_123"));
         assert_eq!(config.camera_id, "camera_123");
-        assert_eq!(config.local_buffer_size, 3); // Default is 3 segments (~6 seconds with 2s segments)
+        assert_eq!(config.local_buffer_size, 5);
         assert_eq!(config.retry_count, 3);
     }
 }

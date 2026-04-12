@@ -87,10 +87,19 @@ impl NodeDatabase {
                  value TEXT NOT NULL
              );
 
+             CREATE TABLE IF NOT EXISTS logs (
+                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 timestamp TEXT    NOT NULL,
+                 level     TEXT    NOT NULL,
+                 message   TEXT    NOT NULL
+             );
+
              CREATE INDEX IF NOT EXISTS idx_snap_camera
                  ON snapshots(camera_id);
              CREATE INDEX IF NOT EXISTS idx_rec_camera_date
-                 ON recording_segments(camera_id, date);",
+                 ON recording_segments(camera_id, date);
+             CREATE INDEX IF NOT EXISTS idx_logs_timestamp
+                 ON logs(id DESC);",
         )
         .map_err(|e| Error::Storage(format!("DB init error: {}", e)))?;
 
@@ -300,6 +309,51 @@ impl NodeDatabase {
         Ok((total - freed, freed))
     }
 
+    // ── Logs ─────────────────────────────────────────────────────────────
+
+    /// Persist a single log entry.
+    pub fn save_log(&self, timestamp: &str, level: &str, message: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO logs (timestamp, level, message) VALUES (?1, ?2, ?3)",
+            params![timestamp, level, message],
+        )
+        .map_err(|e| Error::Storage(format!("Log insert error: {}", e)))?;
+        Ok(())
+    }
+
+    /// Load the most recent `limit` log entries (oldest first).
+    pub fn load_recent_logs(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        // Reverse so oldest is first (for VecDeque push_back ordering)
+        Ok(rows.into_iter().rev().collect())
+    }
+
+    /// Keep only the most recent `keep` log entries, delete the rest.
+    /// Returns the number of rows deleted.
+    pub fn prune_logs(&self, keep: usize) -> Result<u64> {
+        let conn = self.lock()?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?1)",
+                params![keep as i64],
+            )
+            .map_err(|e| Error::Storage(format!("Log prune error: {}", e)))?;
+        Ok(deleted as u64)
+    }
+
     // ── Config ───────────────────────────────────────────────────────────
 
     /// Store a config value (plaintext).
@@ -358,7 +412,7 @@ impl NodeDatabase {
     pub fn wipe_all(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute_batch(
-            "DELETE FROM snapshots; DELETE FROM recording_segments; DELETE FROM config; VACUUM;",
+            "DELETE FROM snapshots; DELETE FROM recording_segments; DELETE FROM logs; DELETE FROM config; VACUUM;",
         )
         .map_err(|e| Error::Storage(format!("Wipe error: {}", e)))?;
         Ok(())

@@ -25,8 +25,10 @@
 
 use clap::{Parser, Subcommand};
 use opensentry_cloudnode::{Config, Node, Result};
+use opensentry_cloudnode::logging::DashboardLayer;
 use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "opensentry-cloudnode")]
@@ -230,23 +232,14 @@ fn init_logging(log_level: &str) {
         _       => Level::INFO,
     };
 
-    // Write tracing output to a log file instead of stderr.
-    // This prevents raw tracing messages from leaking past the TUI.
-    let log_dir = std::path::Path::new("./data");
-    std::fs::create_dir_all(log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(log_dir, "cloudnode.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    // Route tracing events through DashboardLayer → TUI + SQLite.
+    // Before a Dashboard is installed via logging::set_dashboard(), events
+    // are silently discarded (startup messages use println! directly).
+    let filter = tracing_subscriber::filter::LevelFilter::from_level(level);
 
-    // Leak the guard so it lives for the process lifetime.
-    // Without this, the guard drops at end of this function and logs stop.
-    std::mem::forget(_guard);
-
-    FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_ansi(false)
-        .with_writer(non_blocking)
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(DashboardLayer)
         .init();
 }
 

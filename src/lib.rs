@@ -22,6 +22,7 @@ pub mod camera;
 pub mod config;
 pub mod dashboard;
 pub mod error;
+pub mod logging;
 pub mod server;
 pub mod storage;
 pub mod streaming;

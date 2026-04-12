@@ -187,7 +187,21 @@ impl DashboardState {
                 self.suppress_debug_until = None;
             }
         }
-        let entry = LogEntry::new(level, message);
+        let msg = message.into();
+
+        // Persist to database before creating the display entry
+        if let Some(ref db) = self.db {
+            let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+            let lvl = match level {
+                LogLevel::Info  => "INFO",
+                LogLevel::Warn  => "WARN",
+                LogLevel::Error => "ERROR",
+                LogLevel::Debug => "DEBUG",
+            };
+            let _ = db.save_log(&ts, lvl, &msg);
+        }
+
+        let entry = LogEntry::new(level, msg);
         self.logs.push_back(entry);
         while self.logs.len() > self.log_capacity {
             self.logs.pop_front();
@@ -273,6 +287,36 @@ impl Dashboard {
         if let Ok(mut s) = self.0.lock() {
             s.db = Some(db);
             s.hls_dir = Some(hls_dir);
+        }
+    }
+
+    /// Pre-populate the TUI log buffer with entries from the database so logs
+    /// survive restarts.
+    pub fn load_logs_from_db(&self) {
+        if let Ok(mut s) = self.0.lock() {
+            let db = match s.db {
+                Some(ref db) => db.clone(),
+                None => return,
+            };
+            let rows = match db.load_recent_logs(s.log_capacity) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            for (timestamp, level_str, message) in rows {
+                let level = match level_str.as_str() {
+                    "WARN"  => LogLevel::Warn,
+                    "ERROR" => LogLevel::Error,
+                    "DEBUG" => LogLevel::Debug,
+                    _       => LogLevel::Info,
+                };
+                // Use the stored timestamp's time portion for display
+                let time = if timestamp.len() >= 19 {
+                    timestamp[11..19].to_string()
+                } else {
+                    timestamp.clone()
+                };
+                s.logs.push_back(LogEntry { time, level, message });
+            }
         }
     }
 

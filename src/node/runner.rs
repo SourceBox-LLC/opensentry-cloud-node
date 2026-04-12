@@ -83,6 +83,11 @@ impl Node {
             heartbeat_interval: self.config.cloud.heartbeat_interval,
         });
         dash.set_db(self.db.clone(), self.hls_output_dir.clone());
+        dash.load_logs_from_db();
+
+        // Install dashboard into the tracing layer so all tracing::info!() etc.
+        // calls throughout the codebase flow into the TUI + SQLite.
+        crate::logging::set_dashboard(dash.clone());
 
         // ── 1. Detect cameras ────────────────────────────────────────────────
         dash.log_info("Detecting cameras…");
@@ -291,6 +296,8 @@ impl Node {
                             ret_dash.log_warn(format!("Retention check failed: {}", e));
                         }
                     }
+                    // Prune old log entries (keep last 10,000)
+                    let _ = ret_db.prune_logs(10_000);
                 }
             })
         };
@@ -331,12 +338,7 @@ impl Node {
         ws_handle.abort();
         retention_handle.abort();
 
-        // Export dashboard logs to file for debugging
-        let log_path = std::path::PathBuf::from("./data/dashboard.log");
-        dash.export_logs(&log_path);
-        println!("\n  {} {}", "Logs exported to".dimmed(), log_path.display().to_string().white());
-
-        println!("  {}", "CloudNode stopped.".yellow());
+        println!("\n  {}", "CloudNode stopped.".yellow());
 
         Ok(())
     }

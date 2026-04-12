@@ -70,15 +70,161 @@ pub fn run_setup() -> Result<bool> {
             eprintln!("\n  To run setup, open a terminal and run:");
             eprintln!("    opensentry-cloudnode.exe setup");
             eprintln!("\n  Config is stored in data/node.db (run setup to configure).");
-            
+
             // Pause on Windows so user sees the error before window closes
             #[cfg(target_os = "windows")]
             {
                 eprintln!("\n  Press Enter to exit...");
                 let _ = std::io::stdin().read_line(&mut String::new());
             }
-            
+
             std::process::exit(1);
         }
     }
+}
+
+/// Run non-interactive quick setup with pre-supplied credentials.
+///
+/// Validates credentials against Command Center, saves config to DB,
+/// auto-detects GPU encoder, and creates data directories — all without
+/// any user prompts. Designed to be invoked as:
+///
+///   opensentry-cloudnode setup --url <URL> --node-id <ID> --key <KEY>
+pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()> {
+    use colored::Colorize;
+
+    println!();
+    println!(
+        "  {} OpenSentry CloudNode — Quick Setup",
+        "⚡".cyan()
+    );
+    println!("  ────────────────────────────────────────");
+    println!();
+
+    // ── Validate inputs ──────────────────────────────────────────
+    if node_id.len() != 8 || !node_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("Invalid node ID: must be 8 hex characters (got '{}')", node_id);
+    }
+    let parts: Vec<&str> = api_key.split('-').collect();
+    if parts.len() != 5 {
+        anyhow::bail!("Invalid API key: must be UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)");
+    }
+    if !api_url.starts_with("http://") && !api_url.starts_with("https://") {
+        anyhow::bail!("Invalid URL: must start with http:// or https://");
+    }
+
+    // ── Validate connection ──────────────────────────────────────
+    print!("  Validating credentials... ");
+    let rt = tokio::runtime::Runtime::new()?;
+    let validation = rt.block_on(validator::validate_api_connection(api_url, node_id, api_key))?;
+
+    if !validation.is_valid {
+        println!("{}", "FAILED".red().bold());
+        if let Some(msg) = &validation.error_message {
+            for line in msg.lines() {
+                eprintln!("  {}", line);
+            }
+        }
+        std::process::exit(1);
+    }
+
+    let node_name = validation
+        .node_name
+        .as_deref()
+        .unwrap_or(node_id);
+    println!("{} ({})", "OK".green().bold(), node_name);
+
+    // ── Save config to database ──────────────────────────────────
+    print!("  Saving configuration...   ");
+    let output_dir = std::env::current_dir()?;
+    let db_path = output_dir.join("data").join("node.db");
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+
+    let db = crate::storage::NodeDatabase::new(&db_path)
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+
+    let app_config = crate::config::Config {
+        node: crate::config::NodeConfig {
+            name: crate::config::NodeConfig::default().name,
+            node_id: Some(node_id.to_string()),
+        },
+        cloud: crate::config::CloudConfig {
+            api_url: api_url.to_string(),
+            api_key: api_key.to_string(),
+            heartbeat_interval: 30,
+        },
+        ..Default::default()
+    };
+    app_config
+        .save_to_db(&db)
+        .map_err(|e| anyhow::anyhow!("Config save error: {}", e))?;
+    println!("{}", "OK".green().bold());
+
+    // ── Auto-detect GPU encoder ──────────────────────────────────
+    print!("  Detecting video encoder... ");
+
+    let ffmpeg_path = {
+        #[cfg(target_os = "windows")]
+        {
+            let local = output_dir.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            if local.exists() {
+                local.to_string_lossy().to_string()
+            } else {
+                "ffmpeg".to_string()
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            "ffmpeg".to_string()
+        }
+    };
+
+    let hw_encoder =
+        crate::streaming::hls_generator::HlsGenerator::detect_hw_encoder(&ffmpeg_path);
+
+    match &hw_encoder {
+        Some(enc) => {
+            let label = match enc.as_str() {
+                "h264_nvenc" => "NVIDIA NVENC (GPU)",
+                "h264_qsv" => "Intel Quick Sync (GPU)",
+                "h264_amf" => "AMD AMF (GPU)",
+                "h264_v4l2m2m" => "V4L2 M2M (Hardware)",
+                other => other,
+            };
+            db.set_config("encoder", enc)
+                .map_err(|e| anyhow::anyhow!("Config save error: {}", e))?;
+            println!("{}", label.green().bold());
+        }
+        None => {
+            db.set_config("encoder", "libx264")
+                .map_err(|e| anyhow::anyhow!("Config save error: {}", e))?;
+            println!("{}", "libx264 (CPU)".yellow());
+        }
+    }
+
+    // ── Create data directories ──────────────────────────────────
+    print!("  Creating directories...   ");
+    std::fs::create_dir_all(output_dir.join("data").join("hls"))?;
+    println!("{}", "OK".green().bold());
+
+    // ── Check FFmpeg availability ────────────────────────────────
+    let has_ffmpeg = platform::check_ffmpeg().unwrap_or(false);
+    if !has_ffmpeg {
+        println!();
+        println!(
+            "  {} FFmpeg not found — install it before starting.",
+            "⚠".yellow()
+        );
+        #[cfg(target_os = "linux")]
+        println!("    sudo apt install ffmpeg");
+        #[cfg(target_os = "macos")]
+        println!("    brew install ffmpeg");
+    }
+
+    // ── Done ─────────────────────────────────────────────────────
+    println!();
+    println!("  {} Setup complete — starting CloudNode...", "✓".green().bold());
+    println!();
+
+    Ok(())
 }

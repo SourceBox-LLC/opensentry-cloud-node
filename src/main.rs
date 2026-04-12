@@ -84,11 +84,19 @@ enum Commands {
         once: bool,
     },
     
-    /// Setup CloudNode interactively
+    /// Setup CloudNode (interactive wizard, or one-command with --url/--node-id/--key)
     Setup {
-        /// Run setup without interactive prompts (not yet implemented)
-        #[arg(long)]
-        non_interactive: bool,
+        /// Command Center URL
+        #[arg(long, env = "OPENSENTRY_API_URL")]
+        url: Option<String>,
+
+        /// Node ID from Command Center
+        #[arg(long, env = "OPENSENTRY_NODE_ID")]
+        node_id: Option<String>,
+
+        /// API key from Command Center
+        #[arg(long, env = "OPENSENTRY_API_KEY")]
+        key: Option<String>,
     },
     
     /// Uninstall CloudNode
@@ -138,7 +146,31 @@ fn main() -> Result<()> {
     };
 
     if needs_setup {
-        // Run TUI setup with logging completely suppressed.
+        // Check if this is a quick (non-interactive) setup with all args provided
+        let quick_args = match &args.command {
+            Some(Commands::Setup { url, node_id, key }) => {
+                match (url.as_deref(), node_id.as_deref(), key.as_deref()) {
+                    (Some(u), Some(n), Some(k)) => Some((u.to_string(), n.to_string(), k.to_string())),
+                    // Partial args — tell the user what's missing
+                    _ if url.is_some() || node_id.is_some() || key.is_some() => {
+                        eprintln!("Error: Quick setup requires all three flags: --url, --node-id, and --key");
+                        eprintln!("  Example: opensentry-cloudnode setup --url https://... --node-id abc12345 --key xxxxxxxx-...");
+                        std::process::exit(1);
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((url, node_id, key)) = quick_args {
+            // Non-interactive quick setup
+            init_logging(&args.log_level);
+            opensentry_cloudnode::setup::run_quick_setup(&url, &node_id, &key)?;
+            return run_cloudnode(None, None, None, args.once, args.config);
+        }
+
+        // Interactive TUI setup with logging completely suppressed.
         let auto_start = opensentry_cloudnode::setup::run_setup()?;
         dotenvy::dotenv().ok();
         if !auto_start {

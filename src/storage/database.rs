@@ -398,6 +398,14 @@ impl NodeDatabase {
         }
     }
 
+    /// Delete a config key from the database.
+    pub fn delete_config(&self, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM config WHERE key = ?1", params![key])
+            .map_err(|e| Error::Storage(format!("Config delete error: {}", e)))?;
+        Ok(())
+    }
+
     /// Check if any config values exist in the database.
     pub fn has_config(&self) -> bool {
         self.get_config("node_id")

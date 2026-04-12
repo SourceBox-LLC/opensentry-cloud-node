@@ -81,6 +81,9 @@ impl Node {
             encoder: self.config.streaming.encoder.clone(),
             hls_enabled: self.config.streaming.hls.enabled,
             heartbeat_interval: self.config.cloud.heartbeat_interval,
+            motion_enabled: self.config.motion.enabled,
+            motion_sensitivity: self.config.motion.sensitivity,
+            motion_cooldown: self.config.motion.cooldown_secs,
         });
         dash.set_db(self.db.clone(), self.hls_output_dir.clone());
         dash.load_logs_from_db();
@@ -160,6 +163,9 @@ impl Node {
             encoder: self.config.streaming.encoder.clone(),
             hls_enabled: self.config.streaming.hls.enabled,
             heartbeat_interval: self.config.cloud.heartbeat_interval,
+            motion_enabled: self.config.motion.enabled,
+            motion_sensitivity: self.config.motion.sensitivity,
+            motion_cooldown: self.config.motion.cooldown_secs,
         });
 
         for detected in detected_cameras {

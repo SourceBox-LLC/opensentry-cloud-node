@@ -125,6 +125,9 @@ pub struct SettingsInfo {
     pub encoder: String,
     pub hls_enabled: bool,
     pub heartbeat_interval: u64,
+    pub motion_enabled: bool,
+    pub motion_sensitivity: f64,
+    pub motion_cooldown: u64,
 }
 
 // ─── Shared dashboard state ──────────────────────────────────────────────────
@@ -436,6 +439,16 @@ impl Dashboard {
                 if s.hls_enabled { "enabled".bright_green().to_string() }
                 else { "disabled".bright_red().to_string() }));
 
+            // ── MOTION section
+            lines.push(String::new());
+            lines.push(settings_divider("MOTION", divider_w));
+            lines.push(format!("     {}   {}",
+                pad_right(&"Detection".white().to_string(), 9, kw),
+                if s.motion_enabled { "enabled".bright_green().to_string() }
+                else { "disabled".dimmed().to_string() }));
+            lines.push(settings_kv("Sensitivity", &format!("{:.1}", s.motion_sensitivity), kw));
+            lines.push(settings_kv("Cooldown", &format!("{} s", s.motion_cooldown), kw));
+
             // ── CAMERAS section
             lines.push(String::new());
             lines.push(settings_divider(
@@ -457,8 +470,9 @@ impl Dashboard {
             // ── ACTIONS section
             lines.push(String::new());
             lines.push(settings_divider("ACTIONS", divider_w));
-            lines.push(settings_action("/wipe", "Erase all data and reset this node"));
+            lines.push(settings_action("/set <key> <val>", "Change a setting"));
             lines.push(settings_action("/export-logs", "Save all logs to a file"));
+            lines.push(settings_action("/wipe", "Erase all data and reset this node"));
             lines.push(settings_action("/reauth", "Clear credentials and re-run setup"));
             lines.push(String::new());
 
@@ -648,28 +662,39 @@ impl Dashboard {
         io::stdout().flush().ok();
     }
 
-    /// Export all dashboard logs to a text file.
-    /// Called on shutdown so the user can share logs for debugging.
+    /// Export all logs to a text file.
+    /// Pulls from the SQLite database for a complete history, falling back to
+    /// the in-memory buffer if the DB is unavailable.
     pub fn export_logs(&self, path: &std::path::Path) {
         let state = match self.0.lock() {
             Ok(s) => s,
             Err(_) => return,
         };
 
-        let mut lines = Vec::with_capacity(state.logs.len() + 5);
-        lines.push(format!("OpenSentry CloudNode — Log Export"));
+        let mut lines = Vec::new();
+        lines.push("OpenSentry CloudNode — Log Export".to_string());
         lines.push(format!("Node: {}  |  API: {}", state.node_id, state.api_url));
         lines.push(format!("Total segments: {}  |  Uptime: {}", state.total_segments, state.uptime()));
         lines.push(String::new());
 
-        for entry in &state.logs {
-            let level = match entry.level {
-                LogLevel::Info  => "INFO ",
-                LogLevel::Warn  => "WARN ",
-                LogLevel::Error => "ERROR",
-                LogLevel::Debug => "DEBUG",
-            };
-            lines.push(format!("{} [{}] {}", entry.time, level, entry.message));
+        // Try to load the full log history from the database
+        let db_logs = state.db.as_ref().and_then(|db| db.load_recent_logs(10_000).ok());
+
+        if let Some(rows) = db_logs {
+            for (timestamp, level, message) in &rows {
+                lines.push(format!("{} [{}] {}", timestamp, level, message));
+            }
+        } else {
+            // Fallback: export in-memory buffer only
+            for entry in &state.logs {
+                let level = match entry.level {
+                    LogLevel::Info  => "INFO ",
+                    LogLevel::Warn  => "WARN ",
+                    LogLevel::Error => "ERROR",
+                    LogLevel::Debug => "DEBUG",
+                };
+                lines.push(format!("{} [{}] {}", entry.time, level, entry.message));
+            }
         }
 
         drop(state);
@@ -847,11 +872,15 @@ impl Dashboard {
                 if on_settings {
                     self.set_output(vec![
                         "Settings commands:".to_string(),
-                        "  /export-logs   Save logs to file".to_string(),
-                        "  /wipe          Erase all data".to_string(),
-                        "  /reauth        Reset credentials".to_string(),
-                        "  /back          Return to dashboard".to_string(),
-                        "  /quit          Stop the node".to_string(),
+                        "  /set <key> <value>   Change a setting".to_string(),
+                        "  /export-logs         Save logs to file".to_string(),
+                        "  /wipe                Erase all data".to_string(),
+                        "  /reauth              Reset credentials".to_string(),
+                        "  /back                Return to dashboard".to_string(),
+                        "  /quit                Stop the node".to_string(),
+                        String::new(),
+                        "Settings keys: fps, encoder, segment, bitrate,".to_string(),
+                        "  motion (on/off), sensitivity, cooldown".to_string(),
                     ]);
                 } else {
                     self.set_output(vec![
@@ -900,6 +929,98 @@ impl Dashboard {
                         format!("Uploaded: {}", bytes),
                         format!("Uptime:   {}", uptime),
                     ]);
+                }
+            }
+            "set" if on_settings => {
+                if args.len() < 2 {
+                    self.set_output(vec![
+                        "Usage: /set <key> <value>".to_string(),
+                        String::new(),
+                        "Keys:".to_string(),
+                        "  fps          Frames per second (1-60)".to_string(),
+                        "  encoder      Video encoder (libx264, h264_nvenc, …)".to_string(),
+                        "  segment      Segment duration in seconds".to_string(),
+                        "  bitrate      Encoding bitrate (e.g. 2500k)".to_string(),
+                        "  motion       on / off".to_string(),
+                        "  sensitivity  Motion threshold 0.0-1.0".to_string(),
+                        "  cooldown     Motion cooldown seconds".to_string(),
+                    ]);
+                } else {
+                    let key = args[0];
+                    let val = args[1..].join(" ");
+                    let (db_key, display_val, ok) = match key {
+                        "fps" => {
+                            match val.parse::<u32>() {
+                                Ok(v) if (1..=60).contains(&v) => ("fps", val.clone(), true),
+                                _ => ("", String::new(), false),
+                            }
+                        }
+                        "encoder" => ("encoder", val.clone(), true),
+                        "segment" => {
+                            match val.parse::<u32>() {
+                                Ok(v) if (1..=30).contains(&v) => ("segment_duration", val.clone(), true),
+                                _ => ("", String::new(), false),
+                            }
+                        }
+                        "bitrate" => ("bitrate", val.clone(), true),
+                        "motion" => {
+                            let enabled = matches!(val.as_str(), "on" | "true" | "1" | "yes");
+                            let disabled = matches!(val.as_str(), "off" | "false" | "0" | "no");
+                            if enabled || disabled {
+                                ("motion_enabled", (if enabled { "true" } else { "false" }).to_string(), true)
+                            } else {
+                                ("", String::new(), false)
+                            }
+                        }
+                        "sensitivity" => {
+                            match val.parse::<f64>() {
+                                Ok(v) if (0.0..=1.0).contains(&v) => ("motion_sensitivity", val.clone(), true),
+                                _ => ("", String::new(), false),
+                            }
+                        }
+                        "cooldown" => {
+                            match val.parse::<u64>() {
+                                Ok(_) => ("motion_cooldown", val.clone(), true),
+                                _ => ("", String::new(), false),
+                            }
+                        }
+                        _ => {
+                            self.set_output(vec![
+                                format!("Unknown setting: {}", key),
+                                "Type /set for a list of keys.".to_string(),
+                            ]);
+                            return;
+                        }
+                    };
+                    if !ok {
+                        self.set_output(vec![format!("Invalid value for {}: {}", key, val)]);
+                        return;
+                    }
+                    let saved = if let Ok(s) = self.0.lock() {
+                        if let Some(ref db) = s.db {
+                            db.set_config(db_key, &display_val).is_ok()
+                        } else { false }
+                    } else { false };
+                    if saved {
+                        // Update the in-memory SettingsInfo so it refreshes immediately
+                        if let Ok(mut s) = self.0.lock() {
+                            match key {
+                                "fps" => s.settings.fps = display_val.parse().unwrap_or(s.settings.fps),
+                                "encoder" => s.settings.encoder = display_val.clone(),
+                                "segment" => s.settings.segment_duration = display_val.parse().unwrap_or(s.settings.segment_duration),
+                                "motion" => s.settings.motion_enabled = display_val == "true",
+                                "sensitivity" => s.settings.motion_sensitivity = display_val.parse().unwrap_or(s.settings.motion_sensitivity),
+                                "cooldown" => s.settings.motion_cooldown = display_val.parse().unwrap_or(s.settings.motion_cooldown),
+                                _ => {}
+                            }
+                        }
+                        self.set_output(vec![
+                            format!("Set {} = {} (takes effect on next segment)", key, display_val),
+                        ]);
+                        self.log_info(format!("Setting changed: {} = {}", key, display_val));
+                    } else {
+                        self.set_output(vec!["Failed to save setting.".to_string()]);
+                    }
                 }
             }
             "export-logs" if on_settings => {
@@ -964,8 +1085,11 @@ impl Dashboard {
                 } else {
                     if let Ok(s) = self.0.lock() {
                         if let Some(ref db) = s.db {
-                            let _ = db.set_config("node_id", "");
-                            let _ = db.set_config("api_key", "");
+                            // Delete the config rows — can't use set_config("api_key", "")
+                            // because api_key is stored encrypted and loading would fail
+                            // trying to decrypt an empty plaintext string.
+                            let _ = db.delete_config("node_id");
+                            let _ = db.delete_config("api_key");
                         }
                     }
                     self.set_output(vec![

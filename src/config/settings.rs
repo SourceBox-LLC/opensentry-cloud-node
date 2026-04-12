@@ -27,6 +27,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub server: ServerConfig,
     pub logging: LoggingConfig,
+    pub motion: MotionConfig,
 }
 
 impl Default for Config {
@@ -43,6 +44,7 @@ impl Default for Config {
             storage: StorageConfig::default(),
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
+            motion: MotionConfig::default(),
         }
     }
 }
@@ -195,6 +197,29 @@ impl Default for StorageConfig {
         Self {
             path: "./data".to_string(),
             max_size_gb: 64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotionConfig {
+    /// Enable motion detection (on by default)
+    pub enabled: bool,
+
+    /// Scene-change threshold (0.0 – 1.0). Lower = more sensitive.
+    /// FFmpeg's scene score: 0.0 = identical frames, 1.0 = completely different.
+    pub sensitivity: f64,
+
+    /// Minimum seconds between motion events per camera
+    pub cooldown_secs: u64,
+}
+
+impl Default for MotionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sensitivity: 0.3,
+            cooldown_secs: 30,
         }
     }
 }

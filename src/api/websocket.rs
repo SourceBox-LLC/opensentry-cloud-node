@@ -19,16 +19,17 @@
 //! maintains the connection with auto-reconnect. Sends heartbeats over the
 //! socket and listens for commands from the backend.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use serde::{Deserialize, Serialize};
 use base64::prelude::*;
 use crate::dashboard::Dashboard;
 use crate::storage::NodeDatabase;
+use crate::streaming::hls_uploader::MotionEvent;
 
 /// JSON message sent/received over the WebSocket.
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,10 +58,15 @@ pub async fn run_ws_client(
     hls_base_dir: PathBuf,
     db: NodeDatabase,
     recording_state: Arc<RwLock<HashSet<String>>>,
+    mut motion_rx: tokio::sync::mpsc::Receiver<MotionEvent>,
+    motion_cooldown_secs: u64,
 ) {
     let ws_url = build_ws_url(&api_url, &api_key, &node_id);
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
+    // Per-camera cooldown tracking
+    let mut last_motion: HashMap<String, Instant> = HashMap::new();
+    let cooldown = Duration::from_secs(motion_cooldown_secs);
 
     loop {
         dash.log_info("WebSocket connecting…");
@@ -91,6 +97,41 @@ pub async fn run_ws_client(
                             if write.send(Message::Text(text)).await.is_err() {
                                 dash.log_warn("WebSocket send failed — reconnecting");
                                 break; // exit inner loop → reconnect
+                            }
+                        }
+
+                        // -- Motion event from uploader --
+                        Some(event) = motion_rx.recv() => {
+                            // Per-camera cooldown
+                            let now = Instant::now();
+                            if let Some(last) = last_motion.get(&event.camera_id) {
+                                if now.duration_since(*last) < cooldown {
+                                    continue; // still in cooldown
+                                }
+                            }
+                            last_motion.insert(event.camera_id.clone(), now);
+
+                            dash.log_info(format!(
+                                "Motion detected on {} (score {}%)",
+                                event.camera_id, event.score
+                            ));
+
+                            let msg = WsMessage {
+                                msg_type: "event".to_string(),
+                                id: None,
+                                command: Some("motion_detected".to_string()),
+                                payload: serde_json::json!({
+                                    "camera_id": event.camera_id,
+                                    "score": event.score,
+                                    "timestamp": event.timestamp,
+                                    "segment_seq": event.segment_seq,
+                                }),
+                            };
+                            if let Ok(text) = serde_json::to_string(&msg) {
+                                if write.send(Message::Text(text)).await.is_err() {
+                                    dash.log_warn("WebSocket send failed — reconnecting");
+                                    break;
+                                }
                             }
                         }
 

@@ -21,14 +21,24 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-
 use tokio::sync::Semaphore;
 
 use crate::api::ApiClient;
+use crate::config::MotionConfig;
 use crate::dashboard::{CameraStatus, Dashboard};
 use crate::error::Result;
 use crate::storage::NodeDatabase;
+use super::motion_detector;
 use super::segment_uploader::{SegmentUploader, UploadTask, UploaderConfig};
+
+/// Motion event emitted when scene change exceeds the configured threshold.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MotionEvent {
+    pub camera_id: String,
+    pub score: u32,       // 0-100 (normalised from 0.0-1.0)
+    pub timestamp: String, // ISO 8601
+    pub segment_seq: u64,
+}
 
 /// Maximum concurrent segment uploads. Prevents unbounded task spawning
 /// if uploads are slower than segment production (e.g., slow network).
@@ -73,6 +83,10 @@ pub struct HlsUploader {
     recording_state: Arc<RwLock<HashSet<String>>>,
     /// SQLite database for storing recorded segments
     db: NodeDatabase,
+    /// Motion detection configuration
+    motion_config: MotionConfig,
+    /// Channel to send motion events to the WebSocket client
+    motion_tx: tokio::sync::mpsc::Sender<MotionEvent>,
 }
 
 impl HlsUploader {
@@ -82,6 +96,8 @@ impl HlsUploader {
         api_client: ApiClient,
         recording_state: Arc<RwLock<HashSet<String>>>,
         db: NodeDatabase,
+        motion_config: MotionConfig,
+        motion_tx: tokio::sync::mpsc::Sender<MotionEvent>,
     ) -> Self {
         Self {
             config,
@@ -90,6 +106,8 @@ impl HlsUploader {
             codec_detected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             recording_state,
             db,
+            motion_config,
+            motion_tx,
         }
     }
 
@@ -195,6 +213,8 @@ impl HlsUploader {
                 let hls_output_dir = self.config.output_dir.clone();
                 let rec_state = self.recording_state.clone();
                 let db = self.db.clone();
+                let motion_cfg = self.motion_config.clone();
+                let motion_tx = self.motion_tx.clone();
 
                 // Spawn upload as a concurrent task so it doesn't block
                 // the next segment. This prevents one slow upload from
@@ -228,6 +248,25 @@ impl HlsUploader {
                                         dash.log_info("Codec reported to cloud");
                                     }
                                 }
+                            }
+
+                            // Motion detection (non-blocking)
+                            if motion_cfg.enabled {
+                                let seg = segment_path.clone();
+                                let cam_id_motion = camera_id.clone();
+                                let tx = motion_tx.clone();
+                                let threshold = motion_cfg.sensitivity;
+                                tokio::spawn(async move {
+                                    if let Some(score) = motion_detector::detect_motion(&seg, threshold).await {
+                                        let event = MotionEvent {
+                                            camera_id: cam_id_motion,
+                                            score: (score * 100.0).round() as u32,
+                                            timestamp: chrono::Utc::now().to_rfc3339(),
+                                            segment_seq: seq,
+                                        };
+                                        let _ = tx.send(event).await;
+                                    }
+                                });
                             }
 
                             // Playlist push (background, non-blocking)

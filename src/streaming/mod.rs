@@ -21,6 +21,7 @@
 pub mod codec_detector;
 pub mod hls_generator;
 pub mod hls_uploader;
+pub mod motion_detector;
 pub mod segment_uploader;
 
 pub use codec_detector::CodecInfo;

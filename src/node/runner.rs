@@ -119,6 +119,11 @@ impl Node {
         let recording_state: Arc<RwLock<HashSet<String>>> =
             Arc::new(RwLock::new(HashSet::new()));
 
+        // Motion event channel — uploaders send, WebSocket client receives
+        let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<
+            crate::streaming::hls_uploader::MotionEvent,
+        >(64);
+
         // Clean all HLS directories on startup so segment numbering resets fresh
         if let Ok(entries) = std::fs::read_dir(&self.hls_output_dir) {
             for entry in entries.flatten() {
@@ -213,7 +218,14 @@ impl Node {
                     // Build uploader with dashboard reference
                     let uploader_config = HlsUploaderConfig::new(camera_id.clone(), camera_hls_dir);
                     let cam_name = detected.name.clone();
-                    let uploader = HlsUploader::new(uploader_config, self.api_client.clone(), recording_state.clone(), self.db.clone());
+                    let uploader = HlsUploader::new(
+                        uploader_config,
+                        self.api_client.clone(),
+                        recording_state.clone(),
+                        self.db.clone(),
+                        self.config.motion.clone(),
+                        motion_tx.clone(),
+                    );
                     let dash_clone = dash.clone();
                     let camera_id_clone = camera_id.clone();
 
@@ -258,6 +270,7 @@ impl Node {
             let ws_hls_dir = self.hls_output_dir.clone();
             let ws_db = self.db.clone();
             let ws_rec_state = recording_state.clone();
+            let ws_motion_cooldown = self.config.motion.cooldown_secs;
             tokio::spawn(async move {
                 crate::api::websocket::run_ws_client(
                     api_url,
@@ -269,6 +282,8 @@ impl Node {
                     ws_hls_dir,
                     ws_db,
                     ws_rec_state,
+                    motion_rx,
+                    ws_motion_cooldown,
                 ).await;
             })
         };

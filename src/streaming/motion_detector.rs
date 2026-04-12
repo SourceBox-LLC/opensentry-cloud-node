@@ -21,34 +21,55 @@
 //! is flagged as containing motion and the peak score is returned.
 
 use std::path::Path;
+use std::time::Duration;
+
+/// Maximum time FFmpeg is allowed to run per segment before we give up.
+/// A 2-second HLS segment should analyse in well under 10 seconds even on
+/// slow hardware.  If FFmpeg hangs (corrupt file, device stall) we kill it.
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Analyse a `.ts` segment for motion using FFmpeg scene-change detection.
 ///
 /// Returns `Some(peak_score)` if any frame's scene score exceeds `threshold`,
-/// or `None` if there is no significant motion (or FFmpeg fails).
+/// or `None` if there is no significant motion (or FFmpeg fails/times out).
 pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
+    if !segment_path.exists() {
+        return None;
+    }
+
     let ffmpeg = find_ffmpeg();
     let threshold_str = format!("{:.4}", threshold);
 
     // Ask FFmpeg to select frames whose scene score exceeds the threshold and
     // print the metadata to stderr.  The `-f null -` output discards decoded
     // frames — we only care about the metadata lines.
-    let output = tokio::process::Command::new(&ffmpeg)
-        .args([
-            "-i",
-            &segment_path.to_string_lossy(),
-            "-vf",
-            &format!("select='gte(scene,{})',metadata=print", threshold_str),
-            "-an",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .ok()?;
+    let result = tokio::time::timeout(
+        FFMPEG_TIMEOUT,
+        tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-i",
+                &segment_path.to_string_lossy(),
+                "-vf",
+                &format!("select='gte(scene,{})',metadata=print", threshold_str),
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await;
+
+    let output = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(_)) => return None,   // FFmpeg failed to run
+        Err(_) => {
+            tracing::warn!("Motion detection timed out for {}", segment_path.display());
+            return None;
+        }
+    };
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     parse_peak_scene_score(&stderr)

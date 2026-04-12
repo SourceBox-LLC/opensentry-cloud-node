@@ -172,7 +172,6 @@ fn main() -> Result<()> {
 
         // Interactive TUI setup with logging completely suppressed.
         let auto_start = opensentry_cloudnode::setup::run_setup()?;
-        dotenvy::dotenv().ok();
         if !auto_start {
             println!("\n  Press Enter to start CloudNode...");
             let mut input = String::new();

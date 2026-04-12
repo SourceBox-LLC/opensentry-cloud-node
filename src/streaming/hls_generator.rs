@@ -692,8 +692,8 @@ mod tests {
     #[test]
     fn test_hls_config_default() {
         let config = HlsGeneratorConfig::default();
-        assert_eq!(config.segment_duration, 2);
-        assert_eq!(config.playlist_size, 10);
+        assert_eq!(config.segment_duration, 1);
+        assert_eq!(config.playlist_size, 15);
         assert_eq!(config.playlist_name, "stream.m3u8");
     }
 

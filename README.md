@@ -38,7 +38,7 @@ CloudNode runs on your local network, detects USB cameras, and streams live vide
 
 - A USB webcam
 - An [OpenSentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key
-- **Docker** (recommended) or **Rust 1.70+** with **FFmpeg**
+- **Docker** (recommended) or **Rust 1.80+** with **FFmpeg**
 
 ### Install
 
@@ -89,27 +89,31 @@ After setup, start the node:
 
 CloudNode runs a full-screen terminal dashboard showing camera status, upload progress, and live logs.
 
-Type `/` and press **Enter** to open the command menu.
+Type a command (e.g. `/settings`) and press **Enter**. Type `/help` to see available commands.
 
 **Main view:**
 
 | Command | Description |
 |---------|-------------|
+| `/help` (or `/` or `/?`) | Show available commands |
 | `/settings` | Open the settings page |
 | `/status` | Show node status summary |
-| `/clear` | Clear the log panel |
-| `/quit` | Stop the node and exit |
+| `/clear` (or `/cls`) | Clear the log panel |
+| `/quit` (or `/exit` or `/q`) | Stop the node and exit |
 
 **Settings page:**
 
 | Command | Description |
 |---------|-------------|
+| `/help` | Show settings commands |
+| `/set <key> <value>` | Change a setting (fps, encoder, segment_duration, bitrate, motion on/off, sensitivity, cooldown) |
 | `/export-logs` | Save logs to a timestamped file |
 | `/wipe confirm` | Erase all stored data and reset |
 | `/reauth confirm` | Clear credentials and re-run setup |
 | `/back` | Return to the dashboard |
+| `/quit` | Stop the node and exit |
 
-Press **Esc** to return from settings. Destructive commands require the `confirm` argument.
+Press **Esc** to return from settings. Destructive commands (`/wipe`, `/reauth`) require the `confirm` argument.
 
 ---
 
@@ -119,9 +123,9 @@ Press **Esc** to return from settings. Destructive commands require the `confirm
 
 CloudNode resolves configuration in this order (highest priority last):
 
-1. **SQLite database** (`data/node.db`) — created by setup wizard
-2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to DB on first load
-3. **Environment variables** — override any stored values
+1. **SQLite database** (`data/node.db`) — primary source, created by setup wizard
+2. **YAML file** (`config.yaml`) — legacy fallback, used only if DB has no config (auto-migrated to DB on first load). DB and YAML are mutually exclusive — YAML is never layered on top of DB.
+3. **Environment variables** — override any DB or YAML values
 4. **CLI flags** — highest priority
 
 ### Environment variables
@@ -134,12 +138,23 @@ Use environment variables to override database values without modifying the DB:
 | `OPENSENTRY_API_KEY` | API Key |
 | `OPENSENTRY_API_URL` | Command Center URL |
 | `OPENSENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
+| `OPENSENTRY_CONFIG` | Override config file location (default: `./config.yaml`) |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
-### CLI flags
+### CLI flags and subcommands
 
 ```bash
-opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
+# Subcommands
+opensentry-cloudnode run                     # Start the node (default)
+opensentry-cloudnode setup                   # Interactive setup wizard
+opensentry-cloudnode setup --url <URL> --node-id <ID> --key <KEY>  # Non-interactive setup
+opensentry-cloudnode uninstall               # Remove all stored data (--force to skip prompt)
+
+# Run flags (override DB/env values)
+opensentry-cloudnode run --node-id <ID> --api-key <KEY> --api-url <URL>
+opensentry-cloudnode run --config <path>     # Custom YAML config path (env: OPENSENTRY_CONFIG)
+opensentry-cloudnode run --once              # Run one cycle and exit (testing)
+opensentry-cloudnode run --log-level <level> # Log level (env: RUST_LOG)
 ```
 
 ### Security
@@ -213,7 +228,7 @@ docker run -d \
                                 └── (cloud API)
 ```
 
-**Video pipeline:** Camera → FFmpeg subprocess → HLS segments (`.ts`) → uploaded to Command Center via presigned URLs.
+**Video pipeline:** Camera → FFmpeg subprocess → HLS segments (`.ts`) → pushed directly to Command Center via `POST /api/cameras/{id}/push-segment`.
 
 **Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs. Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
 
@@ -230,6 +245,10 @@ The node runs an HTTP server on port 8080:
 | `GET /health` | Health check |
 | `GET /hls/{camera_id}/stream.m3u8` | HLS playlist |
 | `GET /hls/{camera_id}/segment_{n}.ts` | Video segment |
+| `GET /recordings/*` | Static file serving of recordings |
+| `GET /recordings/list` | JSON list of recording files |
+| `GET /snapshots/*` | Static file serving of snapshots |
+| `GET /snapshots/list` | JSON list of snapshot files |
 
 ---
 
@@ -250,15 +269,18 @@ cargo fmt -- --check     # Format check
 ```
 src/
 ├── main.rs              # CLI entry point (clap)
-├── dashboard.rs         # Live TUI dashboard
+├── lib.rs               # Library root with re-exports
+├── dashboard.rs         # Live TUI dashboard with slash commands
+├── error.rs             # Custom error types (thiserror)
+├── logging.rs           # Tracing layer forwarding to TUI dashboard
 ├── api/                 # Cloud API client + WebSocket
 ├── camera/              # Detection and capture (platform-specific)
 ├── config/              # Config loading (DB → YAML → env → CLI)
 ├── node/                # Orchestration and lifecycle
 ├── server/              # HTTP server (warp)
-├── setup/               # Interactive setup wizard
-├── streaming/           # HLS generation and segment upload
-└── storage/             # SQLite database
+├── setup/               # Interactive setup wizard (TUI, validation, recovery, animations)
+├── streaming/           # HLS generation, segment upload, motion detection, codec detection
+└── storage/             # SQLite database (encrypted config, snapshots, recordings)
 ```
 
 ### Cross-compilation

@@ -42,8 +42,13 @@ Runtime Dependencies:
 - uuid (MIT/Apache-2.0) - UUID generation
 - anyhow (MIT/Apache-2.0) - Error handling
 - thiserror (MIT/Apache-2.0) - Error derives
-- ratatui (MIT) - Terminal UI
 - crossterm (MIT) - Terminal control
+- rusqlite (MIT) - SQLite database
+- aes-gcm (MIT/Apache-2.0) - AES-256-GCM encryption
+- tokio-tungstenite (MIT) - WebSocket client
+- inquire (MIT) - Interactive prompts
+- indicatif (MIT) - Progress bars
+- colored (MPL-2.0) - Terminal colors
 - and others (see Cargo.toml for full list)
 
 All dependencies are compatible with GPL-3.0. Most use permissive licenses

@@ -31,16 +31,18 @@ Loading priority (in `Config::load()`):
 
 ```
 src/
-├── main.rs           # CLI entry point (clap)
-├── lib.rs            # Re-exports
-├── dashboard.rs      # Live TUI dashboard with slash commands
+├── main.rs           # CLI entry point (clap) — subcommands: run, setup, uninstall
+├── lib.rs            # Library root with re-exports
+├── dashboard.rs      # Live TUI dashboard with slash commands (/help, /settings, /set, /status, /clear, /quit)
+├── error.rs          # Custom error types (thiserror Error enum, Result alias)
+├── logging.rs        # Tracing layer that forwards log events into the TUI dashboard
 ├── api/              # Cloud API client (reqwest) + WebSocket
-│   ├── client.rs     # API communication
-│   ├── websocket.rs  # WebSocket client (commands from cloud)
+│   ├── client.rs     # API communication (register, push-segment, heartbeat)
+│   ├── websocket.rs  # WebSocket client (commands from cloud, auto-reconnect)
 │   └── types.rs      # Request/response types
 ├── camera/           # Camera detection & capture
 │   ├── detector.rs   # Auto-detect USB cameras
-│   ├── capture.rs    # Frame capture
+│   ├── capture.rs    # Frame capture (alternative capture approach)
 │   ├── platform/     # Platform-specific implementations
 │   │   ├── linux.rs  # Video4Linux2
 │   │   ├── windows.rs # DirectShow
@@ -48,21 +50,25 @@ src/
 │   └── types.rs      # Camera types
 ├── config/           # Configuration
 │   ├── mod.rs        # Config loader (DB → YAML → env → CLI)
-│   └── settings.rs   # Settings structs
+│   └── settings.rs   # Settings structs (StreamingConfig, HlsConfig, MotionConfig, etc.)
 ├── node/             # Main orchestrator
-│   └── runner.rs     # Node lifecycle
+│   └── runner.rs     # Node lifecycle (Node::new() → Node::run())
 ├── server/           # HTTP server (warp)
-│   └── http.rs       # Endpoints: /health, /hls/*
+│   └── http.rs       # Endpoints: /health, /hls/*, /recordings/*, /snapshots/*
 ├── setup/            # Interactive TUI setup wizard
-│   ├── mod.rs        # Setup flow
+│   ├── mod.rs        # Setup flow orchestration
+│   ├── tui.rs        # Terminal UI (crossterm + inquire)
 │   ├── platform.rs   # Platform detection
+│   ├── validator.rs  # Connection validation (API URL, Node ID, API Key)
 │   ├── recovery.rs   # Error recovery and user guidance
-│   └── tui.rs        # Terminal UI (crossterm + inquire)
+│   ├── animations.rs # Visual effects (confetti, rainbow gradients)
+│   └── ui.rs         # Terminal UI panel system (bordered panels, pill progress bars)
 ├── streaming/        # HLS generation
-│   ├── hls_generator.rs    # FFmpeg orchestration
+│   ├── hls_generator.rs    # FFmpeg orchestration (std::process::Command)
 │   ├── hls_uploader.rs     # Upload segments to cloud
 │   ├── segment_uploader.rs # Individual segment upload
-│   └── codec_detector.rs   # Video codec detection
+│   ├── codec_detector.rs   # Video codec detection (FFprobe + camera probing)
+│   └── motion_detector.rs  # Motion detection via FFmpeg scene-change analysis
 └── storage/          # SQLite-backed local storage
     └── database.rs   # NodeDatabase: snapshots, recordings, config (all BLOB/KV)
 ```
@@ -72,15 +78,15 @@ src/
 **Lifecycle**: `main.rs` → `Node::new()` → `Node::run()`
 
 **Node::run()** workflow:
-1. Create live TUI dashboard (raw mode, crossterm events)
+1. Create live TUI dashboard, configure settings, install into tracing layer
 2. Detect cameras (`camera::detect_cameras()`)
 3. Register with cloud API (`api_client.register()`)
-4. Detect hardware encoder once (NVENC/QSV/AMF), persist to DB
-5. Create HLS generator per camera (FFmpeg subprocess)
-6. Start HLS uploader tasks (segment upload + codec detection)
-7. Launch HTTP server (port 8080) + WebSocket client
-8. Start retention task (enforces `max_size_gb` via DB)
-9. Run dashboard render loop (blocks until `/quit` or Ctrl+C)
+4. Clean HLS directories, detect hardware encoder once (NVENC/QSV/AMF), persist to DB; then per camera: create HLS generator + start uploader task (with motion detection channel)
+5. Start HTTP server (port 8080) as a tokio task
+6. Start heartbeat loop (separate tokio task) + WebSocket client (separate tokio task)
+7. Start retention cleanup task (enforces `max_size_gb` via DB)
+8. Start dashboard render loop in a **background std::thread**
+9. Wait for shutdown signal (Ctrl+C or stop flag via `tokio::select!`) — this is the actual blocking point
 
 **Camera Capture**: Platform-specific
 - Linux: `/dev/video*` devices via v4l2
@@ -89,7 +95,7 @@ src/
 
 **HLS Generation**: FFmpeg subprocess transcoding camera → HLS segments
 - Output: `./data/hls/{camera_id}/stream.m3u8`
-- Segments: `segment_0.ts`, `segment_1.ts`, etc.
+- Segments: `segment_00000.ts`, `segment_00001.ts`, etc. (5-digit zero-padded)
 - HLS directories wiped on startup so segment numbering resets fresh
 - Encoder detected once at startup and shared across all cameras
 
@@ -100,15 +106,25 @@ src/
 - Retention enforced by `enforce_retention()` — oldest data deleted first
 
 **HTTP Server** (warp, port 8080):
-- `/health` - Health check
-- `/hls/{camera_id}/stream.m3u8` - HLS playlist
-- `/hls/{camera_id}/segment_{n}.ts` - Video segments
+- `GET /health` - Health check
+- `GET /hls/{camera_id}/stream.m3u8` - HLS playlist
+- `GET /hls/{camera_id}/segment_{n}.ts` - Video segments
+- `GET /recordings/*` - Static file serving of recordings
+- `GET /recordings/list` - JSON list of recording files
+- `GET /snapshots/*` - Static file serving of snapshots
+- `GET /snapshots/list` - JSON list of snapshot files
 
 **Dashboard TUI** (`dashboard.rs`):
 - Full-screen live dashboard with camera status, upload stats, log viewer
-- Slash command bar (`/help`, `/settings`, `/wipe`, `/export-logs`, `/reauth`, `/quit`)
-- Settings page with config display and action commands
+- **Main view commands:** `/help` (or `/` or `/?`), `/settings`, `/status`, `/clear` (or `/cls`), `/quit` (or `/exit` or `/q`)
+- **Settings view commands:** `/help`, `/set <key> <value>` (fps, encoder, segment_duration, bitrate, motion on/off, sensitivity, cooldown), `/export-logs`, `/wipe confirm`, `/reauth confirm`, `/back`, `/quit`
 - Raw mode input via crossterm events, `\x1B[nG` cursor positioning for right border
+
+**Motion Detection** (`streaming/motion_detector.rs`):
+- Analyzes HLS segments for scene changes using FFmpeg
+- Configured via `MotionConfig`: `enabled` (default true), `sensitivity` (default 0.3), `cooldown_secs` (default 30)
+- Motion events sent via channel to WebSocket client → forwarded to Command Center
+- Configurable at runtime via `/set motion on/off`, `/set sensitivity <value>`, `/set cooldown <secs>`
 
 ## Key Patterns
 
@@ -119,7 +135,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 **Async Runtime**: `tokio` throughout
 - All I/O operations are async
-- FFmpeg managed via `tokio::process::Command`
+- HLS FFmpeg managed via `std::process::Command` (synchronous subprocess)
+- Motion detection FFmpeg managed via `tokio::process::Command` (async)
 
 **Platform Abstraction**: Conditional compilation
 ```rust
@@ -144,8 +161,9 @@ mod windows;
 ## Testing
 
 **Unit Tests**: `cargo test`
-- Integration tests in `tests/integration.rs`
-- Uses `tokio-test` for async testing
+- Integration tests in `tests/integration.rs` (config loading, camera detection)
+- Inline unit test modules in: `hls_generator.rs`, `codec_detector.rs`, `motion_detector.rs`, `http.rs`, `capture.rs`, platform modules
+- `tokio-test` available as dev-dependency (used by inline async tests)
 
 **Manual Testing**:
 ```bash
@@ -168,8 +186,8 @@ docker run -d \
   opensentry-cloudnode:latest
 ```
 
-**Docker Compose**: `docker-compose up -d`
-- Requires `.env` file with credentials
+**Docker Compose**: `docker compose up -d` (or `docker-compose up -d`)
+- Set env vars via `.env` file or shell environment
 - Mounts `./data` for persistence
 
 ## Platform Notes
@@ -193,7 +211,7 @@ docker run -d \
 - `reqwest` - HTTP client
 - `serde`/`serde_json` - JSON serialization
 - `clap` - CLI parser
-- `tracing`/`tracing-subscriber`/`tracing-appender` - Logging
+- `tracing`/`tracing-subscriber` - Logging (custom `DashboardLayer` in `logging.rs`, no tracing-appender)
 - `crossterm` - Terminal raw mode and input events (dashboard TUI)
 - `inquire` - Interactive prompts (setup wizard)
 - `indicatif` - Progress bars (setup wizard)
@@ -207,6 +225,11 @@ docker run -d \
 - `uuid` - Unique identifiers
 - `sysinfo` - System information
 - `dotenvy` - Legacy .env file loading
+- `yaml-rust` - YAML config file parsing
+- `once_cell` - Global dashboard slot in `logging.rs`
+- `base64` - Snapshot image transfer over WebSocket
+- `bytes` - Byte buffer handling
+- `zip` - Archive extraction (FFmpeg auto-download on Windows)
 
 ## Code Conventions
 
@@ -215,4 +238,4 @@ docker run -d \
 - Async functions return `Result<T>`
 - Platform-specific code in `camera/platform/`
 - Re-exports in `lib.rs` for convenience
-- CLI commands handled in `main.rs` with subcommands
+- CLI subcommands in `main.rs`: `run` (start node), `setup` (interactive/non-interactive setup), `uninstall` (remove stored data)

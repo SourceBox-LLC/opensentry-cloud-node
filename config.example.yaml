@@ -27,18 +27,42 @@ cameras:
 streaming:
   # Target frames per second
   fps: 30
-  
+
   # JPEG quality (1-100)
   jpeg_quality: 85
 
-# Recording settings
-recording:
-  # Enable local recording
+  # Video encoder override (leave empty for auto-detection)
+  # Options: h264_nvenc, h264_qsv, h264_amf, h264_v4l2m2m, libx264
+  # encoder: ""
+
+  # HLS-specific settings
+  hls:
+    # Enable HLS streaming
+    enabled: true
+    # Segment duration in seconds
+    segment_duration: 1
+    # Number of segments to keep in playlist
+    playlist_size: 15
+    # Target bitrate (e.g. "2500k")
+    bitrate: "2500k"
+
+# Motion detection settings
+motion:
+  # Enable motion detection (default: true)
   enabled: true
-  
-  # Recording format: "mp4" or "mkv"
-  format: "mp4"
-  
+  # Sensitivity threshold 0.0-1.0 (default: 0.3)
+  sensitivity: 0.3
+  # Cooldown between events in seconds (default: 30)
+  cooldown_secs: 30
+
+# Recording settings
+# NOTE: Recording config is only loaded from the SQLite database (via setup wizard),
+# not from this YAML file. These values are shown for reference only.
+# recording:
+#   enabled: true
+#   format: "mp4"
+
+
 storage:
   # Base path for recordings and snapshots
   path: "./data"

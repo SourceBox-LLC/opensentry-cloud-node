@@ -119,7 +119,7 @@ impl Config {
             config.motion.enabled = v == "true";
         }
         if let Some(v) = db.get_config("motion_sensitivity")? {
-            config.motion.threshold = v.parse().unwrap_or(0.008);
+            config.motion.threshold = v.parse().unwrap_or(0.02);
         }
         if let Some(v) = db.get_config("motion_cooldown")? {
             config.motion.cooldown_secs = v.parse().unwrap_or(30);

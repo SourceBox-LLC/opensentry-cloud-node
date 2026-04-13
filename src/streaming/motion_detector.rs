@@ -95,14 +95,16 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
 
 /// Parse FFmpeg metadata output for the highest `lavfi.scene_score` value.
 ///
-/// FFmpeg prints lines like:
-///   `lavfi.scene_score=0.482361`
-/// We extract all of them and return the maximum.
+/// FFmpeg `metadata=print` outputs lines like:
+///   `[Parsed_metadata_3 @ 0x...] lavfi.scene_score=0.482361`
+/// We search for the `lavfi.scene_score=` substring anywhere in each line.
 fn parse_peak_scene_score(stderr: &str) -> Option<f64> {
+    const NEEDLE: &str = "lavfi.scene_score=";
     let mut peak: Option<f64> = None;
 
     for line in stderr.lines() {
-        if let Some(val_str) = line.strip_prefix("lavfi.scene_score=") {
+        if let Some(pos) = line.find(NEEDLE) {
+            let val_str = &line[pos + NEEDLE.len()..];
             if let Ok(score) = val_str.trim().parse::<f64>() {
                 peak = Some(peak.map_or(score, |p: f64| p.max(score)));
             }
@@ -118,13 +120,14 @@ mod tests {
 
     #[test]
     fn test_parse_peak_scene_score_found() {
+        // Real FFmpeg output has a [Parsed_metadata_N @ 0x...] prefix
         let stderr = "\
-frame:0    pts:0       pts_time:0
-lavfi.scene_score=0.123456
-frame:1    pts:3000    pts_time:0.033
-lavfi.scene_score=0.654321
-frame:2    pts:6000    pts_time:0.067
-lavfi.scene_score=0.234567";
+[Parsed_metadata_3 @ 0x1234] frame:0    pts:0       pts_time:0
+[Parsed_metadata_3 @ 0x1234] lavfi.scene_score=0.123456
+[Parsed_metadata_3 @ 0x1234] frame:1    pts:3000    pts_time:0.033
+[Parsed_metadata_3 @ 0x1234] lavfi.scene_score=0.654321
+[Parsed_metadata_3 @ 0x1234] frame:2    pts:6000    pts_time:0.067
+[Parsed_metadata_3 @ 0x1234] lavfi.scene_score=0.234567";
         assert_eq!(parse_peak_scene_score(stderr), Some(0.654321));
     }
 

@@ -407,7 +407,7 @@ impl HlsGenerator {
             "-hls_list_size",
             &self.config.playlist_size.to_string(),
             "-hls_flags",
-            "append_list+split_by_time",
+            "append_list",
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",

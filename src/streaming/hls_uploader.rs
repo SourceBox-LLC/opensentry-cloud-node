@@ -331,7 +331,7 @@ fn spawn_motion_detection(
     camera_id: String,
     seq: u64,
     motion_cfg: &MotionConfig,
-    tx: tokio::sync::mpsc::Sender<MotionEvent>,
+    _tx: tokio::sync::mpsc::Sender<MotionEvent>,
     last_motion: Arc<Mutex<Option<Instant>>>,
     api_client: ApiClient,
 ) {
@@ -355,21 +355,12 @@ fn spawn_motion_detection(
             let score_int = (score * 100.0).round() as u32;
             let timestamp = chrono::Utc::now().to_rfc3339();
 
-            // Primary delivery: HTTP POST (works without WebSocket)
+            // Deliver via HTTP POST (reliable, works without WebSocket)
             if let Err(e) = api_client.report_motion(
                 &camera_id, score_int, &timestamp, seq,
             ).await {
                 tracing::warn!("Motion HTTP report failed: {}", e);
             }
-
-            // Also send via channel for WebSocket dashboard log
-            let event = MotionEvent {
-                camera_id,
-                score: score_int,
-                timestamp,
-                segment_seq: seq,
-            };
-            let _ = tx.try_send(event);
         }
     });
 }

@@ -82,7 +82,7 @@ impl Node {
             hls_enabled: self.config.streaming.hls.enabled,
             heartbeat_interval: self.config.cloud.heartbeat_interval,
             motion_enabled: self.config.motion.enabled,
-            motion_sensitivity: self.config.motion.sensitivity,
+            motion_sensitivity: self.config.motion.threshold,
             motion_cooldown: self.config.motion.cooldown_secs,
         });
         dash.set_db(self.db.clone(), self.hls_output_dir.clone());
@@ -164,7 +164,7 @@ impl Node {
             hls_enabled: self.config.streaming.hls.enabled,
             heartbeat_interval: self.config.cloud.heartbeat_interval,
             motion_enabled: self.config.motion.enabled,
-            motion_sensitivity: self.config.motion.sensitivity,
+            motion_sensitivity: self.config.motion.threshold,
             motion_cooldown: self.config.motion.cooldown_secs,
         });
 
@@ -276,7 +276,6 @@ impl Node {
             let ws_hls_dir = self.hls_output_dir.clone();
             let ws_db = self.db.clone();
             let ws_rec_state = recording_state.clone();
-            let ws_motion_cooldown = self.config.motion.cooldown_secs;
             tokio::spawn(async move {
                 crate::api::websocket::run_ws_client(
                     api_url,
@@ -289,7 +288,6 @@ impl Node {
                     ws_db,
                     ws_rec_state,
                     motion_rx,
-                    ws_motion_cooldown,
                 ).await;
             })
         };

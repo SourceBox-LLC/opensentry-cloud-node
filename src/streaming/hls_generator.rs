@@ -116,23 +116,9 @@ impl HlsGenerator {
         })
     }
 
-    /// Find FFmpeg executable - check local path first, then system PATH
+    /// Find FFmpeg executable — delegates to the shared `streaming::find_ffmpeg`.
     pub fn find_ffmpeg() -> String {
-        #[cfg(target_os = "windows")]
-        {
-            // Check local ffmpeg directory (downloaded by setup)
-            if let Ok(cwd) = std::env::current_dir() {
-                let local_ffmpeg = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
-                if local_ffmpeg.exists() {
-                    tracing::debug!("Using FFmpeg from: {:?}", local_ffmpeg);
-                    return local_ffmpeg.to_string_lossy().to_string();
-                }
-            }
-        }
-
-        // Fall back to system PATH
-        tracing::debug!("Using FFmpeg from system PATH");
-        "ffmpeg".to_string()
+        super::find_ffmpeg()
     }
 
     /// Detect available hardware encoder by probing FFmpeg.

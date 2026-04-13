@@ -119,7 +119,7 @@ impl Config {
             config.motion.enabled = v == "true";
         }
         if let Some(v) = db.get_config("motion_sensitivity")? {
-            config.motion.sensitivity = v.parse().unwrap_or(0.3);
+            config.motion.threshold = v.parse().unwrap_or(0.3);
         }
         if let Some(v) = db.get_config("motion_cooldown")? {
             config.motion.cooldown_secs = v.parse().unwrap_or(30);
@@ -152,7 +152,7 @@ impl Config {
         db.set_config("server_port", &self.server.port.to_string())?;
         db.set_config("log_level", &self.logging.level)?;
         db.set_config("motion_enabled", if self.motion.enabled { "true" } else { "false" })?;
-        db.set_config("motion_sensitivity", &self.motion.sensitivity.to_string())?;
+        db.set_config("motion_sensitivity", &self.motion.threshold.to_string())?;
         db.set_config("motion_cooldown", &self.motion.cooldown_secs.to_string())?;
 
         // Encrypt the API key

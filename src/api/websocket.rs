@@ -19,10 +19,10 @@
 //! maintains the connection with auto-reconnect. Sends heartbeats over the
 //! socket and listens for commands from the backend.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use serde::{Deserialize, Serialize};
@@ -59,14 +59,10 @@ pub async fn run_ws_client(
     db: NodeDatabase,
     recording_state: Arc<RwLock<HashSet<String>>>,
     mut motion_rx: tokio::sync::mpsc::Receiver<MotionEvent>,
-    motion_cooldown_secs: u64,
 ) {
     let ws_url = build_ws_url(&api_url, &api_key, &node_id);
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
-    // Per-camera cooldown tracking
-    let mut last_motion: HashMap<String, Instant> = HashMap::new();
-    let cooldown = Duration::from_secs(motion_cooldown_secs);
 
     loop {
         dash.log_info("WebSocket connecting…");
@@ -100,17 +96,8 @@ pub async fn run_ws_client(
                             }
                         }
 
-                        // -- Motion event from uploader --
+                        // -- Motion event from uploader (cooldown already applied) --
                         Some(event) = motion_rx.recv() => {
-                            // Per-camera cooldown
-                            let now = Instant::now();
-                            if let Some(last) = last_motion.get(&event.camera_id) {
-                                if now.duration_since(*last) < cooldown {
-                                    continue; // still in cooldown
-                                }
-                            }
-                            last_motion.insert(event.camera_id.clone(), now);
-
                             dash.log_info(format!(
                                 "Motion detected on {} (score {}%)",
                                 event.camera_id, event.score
@@ -368,7 +355,7 @@ async fn cmd_take_snapshot(
     let temp_path = std::env::temp_dir()
         .join(format!("opensentry_snap_{}.jpg", camera_id));
 
-    let ffmpeg = find_ffmpeg();
+    let ffmpeg = crate::streaming::find_ffmpeg();
 
     let output = tokio::process::Command::new(&ffmpeg)
         .args([
@@ -437,20 +424,6 @@ fn find_latest_segment(dir: &Path) -> Option<PathBuf> {
         })
         .max_by_key(|(seq, _)| *seq)
         .map(|(_, path)| path)
-}
-
-/// Find FFmpeg executable — local bundled copy first, then system PATH.
-fn find_ffmpeg() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
-            if local.exists() {
-                return local.to_string_lossy().to_string();
-            }
-        }
-    }
-    "ffmpeg".to_string()
 }
 
 fn get_local_ip() -> Option<String> {

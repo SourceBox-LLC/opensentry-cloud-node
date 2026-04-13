@@ -37,7 +37,7 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
         return None;
     }
 
-    let ffmpeg = find_ffmpeg();
+    let ffmpeg = super::find_ffmpeg();
     let threshold_str = format!("{:.4}", threshold);
 
     // Ask FFmpeg to select frames whose scene score exceeds the threshold and
@@ -50,7 +50,7 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
                 "-i",
                 &segment_path.to_string_lossy(),
                 "-vf",
-                &format!("select='gte(scene,{})',metadata=print", threshold_str),
+                &format!("scale=320:180,select='gte(scene,{})',metadata=print", threshold_str),
                 "-an",
                 "-f",
                 "null",
@@ -58,6 +58,7 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .output(),
     )
     .await;
@@ -92,20 +93,6 @@ fn parse_peak_scene_score(stderr: &str) -> Option<f64> {
     }
 
     peak
-}
-
-/// Find FFmpeg executable — local bundled copy first, then system PATH.
-fn find_ffmpeg() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
-            if local.exists() {
-                return local.to_string_lossy().to_string();
-            }
-        }
-    }
-    "ffmpeg".to_string()
 }
 
 #[cfg(test)]

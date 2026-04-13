@@ -208,7 +208,7 @@ pub struct MotionConfig {
 
     /// Scene-change threshold (0.0 – 1.0). Lower = more sensitive.
     /// FFmpeg's scene score: 0.0 = identical frames, 1.0 = completely different.
-    pub sensitivity: f64,
+    pub threshold: f64,
 
     /// Minimum seconds between motion events per camera
     pub cooldown_secs: u64,
@@ -218,7 +218,7 @@ impl Default for MotionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            sensitivity: 0.3,
+            threshold: 0.3,
             cooldown_secs: 30,
         }
     }

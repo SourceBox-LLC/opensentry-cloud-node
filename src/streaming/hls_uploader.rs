@@ -20,7 +20,8 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use tokio::sync::Semaphore;
 
 use crate::api::ApiClient;
@@ -126,6 +127,8 @@ impl HlsUploader {
         let poll_interval = tokio::time::Duration::from_secs(1);
         let mut seen: HashSet<String> = HashSet::new();
         let mut stale_cycles: u32 = 0;
+        // Per-camera cooldown — this uploader is single-camera, so one Instant suffices
+        let last_motion: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
         loop {
             // Scan the output directory for new .ts segments
@@ -215,6 +218,7 @@ impl HlsUploader {
                 let db = self.db.clone();
                 let motion_cfg = self.motion_config.clone();
                 let motion_tx = self.motion_tx.clone();
+                let last_motion = last_motion.clone();
 
                 // Spawn upload as a concurrent task so it doesn't block
                 // the next segment. This prevents one slow upload from
@@ -250,21 +254,36 @@ impl HlsUploader {
                                 }
                             }
 
-                            // Motion detection (non-blocking)
+                            // Motion detection (non-blocking, with per-camera cooldown)
                             if motion_cfg.enabled {
                                 let seg = segment_path.clone();
                                 let cam_id_motion = camera_id.clone();
                                 let tx = motion_tx.clone();
-                                let threshold = motion_cfg.sensitivity;
+                                let threshold = motion_cfg.threshold;
+                                let cooldown = std::time::Duration::from_secs(motion_cfg.cooldown_secs);
+                                let last_ref = last_motion.clone();
                                 tokio::spawn(async move {
                                     if let Some(score) = motion_detector::detect_motion(&seg, threshold).await {
+                                        // Check cooldown before sending
+                                        let now = std::time::Instant::now();
+                                        let mut guard = last_ref.lock().unwrap();
+                                        if let Some(last) = *guard {
+                                            if now.duration_since(last) < cooldown {
+                                                return; // still in cooldown
+                                            }
+                                        }
+                                        *guard = Some(now);
+                                        drop(guard);
+
                                         let event = MotionEvent {
                                             camera_id: cam_id_motion,
                                             score: (score * 100.0).round() as u32,
                                             timestamp: chrono::Utc::now().to_rfc3339(),
                                             segment_seq: seq,
                                         };
-                                        let _ = tx.send(event).await;
+                                        if let Err(e) = tx.try_send(event) {
+                                            tracing::debug!("Motion channel full, dropping event: {}", e);
+                                        }
                                     }
                                 });
                             }

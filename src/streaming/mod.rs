@@ -32,3 +32,19 @@ pub use hls_uploader::HlsUploader;
 pub use hls_uploader::HlsUploaderConfig;
 pub use segment_uploader::SegmentUploader;
 pub use segment_uploader::UploaderConfig;
+
+/// Find FFmpeg executable — local bundled copy first, then system PATH.
+///
+/// Shared by hls_generator, motion_detector, and websocket snapshot handler.
+pub fn find_ffmpeg() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(cwd) = std::env::current_dir() {
+            let local = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            if local.exists() {
+                return local.to_string_lossy().to_string();
+            }
+        }
+    }
+    "ffmpeg".to_string()
+}

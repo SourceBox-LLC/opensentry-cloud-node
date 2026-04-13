@@ -24,9 +24,9 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Maximum time FFmpeg is allowed to run per segment before we give up.
-/// A 2-second HLS segment should analyse in well under 10 seconds even on
-/// slow hardware.  If FFmpeg hangs (corrupt file, device stall) we kill it.
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(10);
+/// With the 320x180 downscale, even a 2-second segment should analyse in
+/// well under 5 seconds.  If it takes longer, something is broken.
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Analyse a `.ts` segment for motion using FFmpeg scene-change detection.
 ///

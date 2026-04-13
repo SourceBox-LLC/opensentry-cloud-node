@@ -256,36 +256,14 @@ impl HlsUploader {
 
                             // Motion detection (non-blocking, with per-camera cooldown)
                             if motion_cfg.enabled {
-                                let seg = segment_path.clone();
-                                let cam_id_motion = camera_id.clone();
-                                let tx = motion_tx.clone();
-                                let threshold = motion_cfg.threshold;
-                                let cooldown = std::time::Duration::from_secs(motion_cfg.cooldown_secs);
-                                let last_ref = last_motion.clone();
-                                tokio::spawn(async move {
-                                    if let Some(score) = motion_detector::detect_motion(&seg, threshold).await {
-                                        // Check cooldown before sending
-                                        let now = std::time::Instant::now();
-                                        let mut guard = last_ref.lock().unwrap();
-                                        if let Some(last) = *guard {
-                                            if now.duration_since(last) < cooldown {
-                                                return; // still in cooldown
-                                            }
-                                        }
-                                        *guard = Some(now);
-                                        drop(guard);
-
-                                        let event = MotionEvent {
-                                            camera_id: cam_id_motion,
-                                            score: (score * 100.0).round() as u32,
-                                            timestamp: chrono::Utc::now().to_rfc3339(),
-                                            segment_seq: seq,
-                                        };
-                                        if let Err(e) = tx.try_send(event) {
-                                            tracing::debug!("Motion channel full, dropping event: {}", e);
-                                        }
-                                    }
-                                });
+                                spawn_motion_detection(
+                                    segment_path.clone(),
+                                    camera_id.clone(),
+                                    seq,
+                                    &motion_cfg,
+                                    motion_tx.clone(),
+                                    last_motion.clone(),
+                                );
                             }
 
                             // Playlist push (background, non-blocking)
@@ -342,6 +320,46 @@ impl HlsUploader {
             tokio::time::sleep(poll_interval).await;
         }
     }
+}
+
+/// Spawn a background task that runs FFmpeg scene-change detection on a
+/// segment and, if motion exceeds the threshold and the per-camera cooldown
+/// has elapsed, sends the event to the WebSocket client.
+fn spawn_motion_detection(
+    segment_path: PathBuf,
+    camera_id: String,
+    seq: u64,
+    motion_cfg: &MotionConfig,
+    tx: tokio::sync::mpsc::Sender<MotionEvent>,
+    last_motion: Arc<Mutex<Option<Instant>>>,
+) {
+    let threshold = motion_cfg.threshold;
+    let cooldown = std::time::Duration::from_secs(motion_cfg.cooldown_secs);
+
+    tokio::spawn(async move {
+        if let Some(score) = motion_detector::detect_motion(&segment_path, threshold).await {
+            // Check cooldown before sending
+            let now = Instant::now();
+            let mut guard = last_motion.lock().unwrap();
+            if let Some(last) = *guard {
+                if now.duration_since(last) < cooldown {
+                    return;
+                }
+            }
+            *guard = Some(now);
+            drop(guard);
+
+            let event = MotionEvent {
+                camera_id,
+                score: (score * 100.0).round() as u32,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                segment_seq: seq,
+            };
+            if let Err(e) = tx.try_send(event) {
+                tracing::debug!("Motion channel full, dropping event: {}", e);
+            }
+        }
+    });
 }
 
 /// Extract sequence number from segment filename

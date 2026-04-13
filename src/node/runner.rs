@@ -65,14 +65,8 @@ impl Node {
         })
     }
 
-    /// Run the node with live dashboard
-    pub async fn run(mut self) -> Result<()> {
-        // ── Create dashboard ────────────────────────────────────────────────
-        let node_id = self.config.node.node_id
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let dash = Dashboard::new(&node_id, &self.config.cloud.api_url);
-        dash.set_settings(crate::dashboard::SettingsInfo {
+    fn build_settings_info(&self) -> crate::dashboard::SettingsInfo {
+        crate::dashboard::SettingsInfo {
             node_name: self.config.node.name.clone(),
             storage_path: self.config.storage.path.clone(),
             max_size_gb: self.config.storage.max_size_gb,
@@ -84,7 +78,17 @@ impl Node {
             motion_enabled: self.config.motion.enabled,
             motion_sensitivity: self.config.motion.threshold,
             motion_cooldown: self.config.motion.cooldown_secs,
-        });
+        }
+    }
+
+    /// Run the node with live dashboard
+    pub async fn run(mut self) -> Result<()> {
+        // ── Create dashboard ────────────────────────────────────────────────
+        let node_id = self.config.node.node_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let dash = Dashboard::new(&node_id, &self.config.cloud.api_url);
+        dash.set_settings(self.build_settings_info());
         dash.set_db(self.db.clone(), self.hls_output_dir.clone());
         dash.load_logs_from_db();
 
@@ -154,19 +158,7 @@ impl Node {
         }
 
         // Update settings display with detected encoder
-        dash.set_settings(crate::dashboard::SettingsInfo {
-            node_name: self.config.node.name.clone(),
-            storage_path: self.config.storage.path.clone(),
-            max_size_gb: self.config.storage.max_size_gb,
-            segment_duration: self.config.streaming.hls.segment_duration,
-            fps: self.config.streaming.fps,
-            encoder: self.config.streaming.encoder.clone(),
-            hls_enabled: self.config.streaming.hls.enabled,
-            heartbeat_interval: self.config.cloud.heartbeat_interval,
-            motion_enabled: self.config.motion.enabled,
-            motion_sensitivity: self.config.motion.threshold,
-            motion_cooldown: self.config.motion.cooldown_secs,
-        });
+        dash.set_settings(self.build_settings_info());
 
         for detected in detected_cameras {
             let camera_id = camera_mapping.get(&detected.device_path)
@@ -192,6 +184,7 @@ impl Node {
 
                 let mut generator = HlsGenerator::new(hls_config)?;
 
+                let mut is_test_pattern = false;
                 let started = match generator.start_from_device(&detected.device_path) {
                     Ok(_) => {
                         dash.log_info(format!("Started HLS for {}", detected.name.cyan()));
@@ -207,6 +200,7 @@ impl Node {
                         ) {
                             Ok(_) => {
                                 dash.update_camera_status(&detected.name, CameraStatus::Streaming);
+                                is_test_pattern = true;
                                 true
                             }
                             Err(e2) => {
@@ -221,6 +215,14 @@ impl Node {
                 if started {
                     cameras_with_hls.push((camera_id.clone(), camera_hls_dir.clone()));
 
+                    // Disable motion detection on test-pattern streams —
+                    // scene changes on testsrc are meaningless.
+                    let mut motion_cfg = self.config.motion.clone();
+                    if is_test_pattern {
+                        motion_cfg.enabled = false;
+                        dash.log_info("Motion detection skipped on test-pattern stream");
+                    }
+
                     // Build uploader with dashboard reference
                     let uploader_config = HlsUploaderConfig::new(camera_id.clone(), camera_hls_dir);
                     let cam_name = detected.name.clone();
@@ -229,7 +231,7 @@ impl Node {
                         self.api_client.clone(),
                         recording_state.clone(),
                         self.db.clone(),
-                        self.config.motion.clone(),
+                        motion_cfg,
                         motion_tx.clone(),
                     );
                     let dash_clone = dash.clone();

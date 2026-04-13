@@ -218,7 +218,7 @@ impl Default for MotionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            threshold: 0.3,
+            threshold: 0.03,
             cooldown_secs: 30,
         }
     }

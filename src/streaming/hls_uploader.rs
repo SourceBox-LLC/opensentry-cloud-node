@@ -263,6 +263,7 @@ impl HlsUploader {
                                     &motion_cfg,
                                     motion_tx.clone(),
                                     last_motion.clone(),
+                                    api_client.clone(),
                                 );
                             }
 
@@ -332,32 +333,43 @@ fn spawn_motion_detection(
     motion_cfg: &MotionConfig,
     tx: tokio::sync::mpsc::Sender<MotionEvent>,
     last_motion: Arc<Mutex<Option<Instant>>>,
+    api_client: ApiClient,
 ) {
     let threshold = motion_cfg.threshold;
     let cooldown = std::time::Duration::from_secs(motion_cfg.cooldown_secs);
 
     tokio::spawn(async move {
         if let Some(score) = motion_detector::detect_motion(&segment_path, threshold).await {
-            // Check cooldown before sending
+            // Check cooldown before sending (scoped to drop guard before await)
             let now = Instant::now();
-            let mut guard = last_motion.lock().unwrap();
-            if let Some(last) = *guard {
-                if now.duration_since(last) < cooldown {
-                    return;
+            {
+                let mut guard = last_motion.lock().unwrap();
+                if let Some(last) = *guard {
+                    if now.duration_since(last) < cooldown {
+                        return;
+                    }
                 }
+                *guard = Some(now);
             }
-            *guard = Some(now);
-            drop(guard);
 
+            let score_int = (score * 100.0).round() as u32;
+            let timestamp = chrono::Utc::now().to_rfc3339();
+
+            // Primary delivery: HTTP POST (works without WebSocket)
+            if let Err(e) = api_client.report_motion(
+                &camera_id, score_int, &timestamp, seq,
+            ).await {
+                tracing::warn!("Motion HTTP report failed: {}", e);
+            }
+
+            // Also send via channel for WebSocket dashboard log
             let event = MotionEvent {
                 camera_id,
-                score: (score * 100.0).round() as u32,
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                score: score_int,
+                timestamp,
                 segment_seq: seq,
             };
-            if let Err(e) = tx.try_send(event) {
-                tracing::debug!("Motion channel full, dropping event: {}", e);
-            }
+            let _ = tx.try_send(event);
         }
     });
 }

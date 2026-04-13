@@ -260,6 +260,44 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Report a motion detection event to the backend via HTTP POST.
+    /// This is the reliable delivery path — works even when WebSocket is down.
+    pub async fn report_motion(
+        &self,
+        camera_id: &str,
+        score: u32,
+        timestamp: &str,
+        segment_seq: u64,
+    ) -> Result<()> {
+        let _node_id = self.node_id.as_ref()
+            .ok_or_else(|| Error::Api("Node not registered".into()))?;
+
+        let body = serde_json::json!({
+            "score": score,
+            "timestamp": timestamp,
+            "segment_seq": segment_seq,
+        });
+
+        let response = self.client
+            .post(format!(
+                "{}/api/cameras/{}/motion",
+                self.base_url, camera_id
+            ))
+            .header("X-Node-API-Key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api(format!("Report motion failed ({}): {}", status, body)));
+        }
+
+        Ok(())
+    }
+
     /// Update the HLS playlist on the server
     pub async fn update_playlist(&self, camera_id: &str, playlist_content: &str) -> Result<()> {
         let _node_id = self.node_id.as_ref()

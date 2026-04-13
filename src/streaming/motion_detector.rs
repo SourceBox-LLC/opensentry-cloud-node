@@ -38,11 +38,10 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
     }
 
     let ffmpeg = super::find_ffmpeg();
-    let threshold_str = format!("{:.4}", threshold);
 
-    // Ask FFmpeg to select frames whose scene score exceeds the threshold and
-    // print the metadata to stderr.  The `-f null -` output discards decoded
-    // frames — we only care about the metadata lines.
+    // Always extract ALL scene scores (threshold 0 in FFmpeg), then compare
+    // against the configured threshold in Rust.  This lets us log actual peak
+    // scores for debugging even when they fall below the trigger threshold.
     let result = tokio::time::timeout(
         FFMPEG_TIMEOUT,
         tokio::process::Command::new(&ffmpeg)
@@ -50,7 +49,7 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
                 "-i",
                 &segment_path.to_string_lossy(),
                 "-vf",
-                &format!("scale=320:180,fps=5,select='gte(scene,{})',metadata=print", threshold_str),
+                "scale=320:180,fps=5,select='gte(scene,0)',metadata=print",
                 "-an",
                 "-f",
                 "null",
@@ -73,7 +72,25 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
     };
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    parse_peak_scene_score(&stderr)
+    let peak = parse_peak_scene_score(&stderr);
+
+    match peak {
+        Some(score) if score >= threshold => {
+            tracing::info!(
+                "Motion detected: score={:.6} threshold={:.4} segment={}",
+                score, threshold, segment_path.display()
+            );
+            Some(score)
+        }
+        Some(score) => {
+            tracing::debug!(
+                "No motion: peak={:.6} < threshold={:.4} segment={}",
+                score, threshold, segment_path.display()
+            );
+            None
+        }
+        None => None,
+    }
 }
 
 /// Parse FFmpeg metadata output for the highest `lavfi.scene_score` value.

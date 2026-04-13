@@ -50,7 +50,7 @@ pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
                 "-i",
                 &segment_path.to_string_lossy(),
                 "-vf",
-                &format!("scale=320:180,select='gte(scene,{})',metadata=print", threshold_str),
+                &format!("scale=320:180,fps=5,select='gte(scene,{})',metadata=print", threshold_str),
                 "-an",
                 "-f",
                 "null",

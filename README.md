@@ -38,7 +38,7 @@ CloudNode runs on your local network, detects USB cameras, and streams live vide
 
 - A USB webcam
 - An [OpenSentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key
-- **Docker** (recommended) or **Rust 1.70+** with **FFmpeg**
+- **Docker** (recommended) or **Rust 1.75+** with **FFmpeg**
 
 ### Install
 
@@ -133,13 +133,32 @@ Use environment variables to override database values without modifying the DB:
 | `OPENSENTRY_NODE_ID` | Node ID |
 | `OPENSENTRY_API_KEY` | API Key |
 | `OPENSENTRY_API_URL` | Command Center URL |
+| `OPENSENTRY_CONFIG` | Path to an optional YAML config file (legacy fallback) |
 | `OPENSENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
-### CLI flags
+### CLI subcommands
 
 ```bash
-opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
+opensentry-cloudnode [SUBCOMMAND] [FLAGS]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| *(none)* / `run` | Start the node (default). Launches the setup wizard automatically if credentials are not yet configured. |
+| `setup` | Run the interactive setup wizard (camera detection, encoder probe, credential entry). |
+| `uninstall` | Remove the local `data/` directory, legacy `.env` file, and bundled `ffmpeg/` directory. Pass `--force` to skip the confirmation prompt. |
+
+Common flags (apply to `run` and the top-level invocation):
+
+```bash
+opensentry-cloudnode \
+  --node-id <ID> \
+  --api-key <KEY> \
+  --api-url <URL> \
+  --config <path/to/config.yaml> \
+  --log-level <trace|debug|info|warn|error> \
+  --once                          # run one cycle and exit (testing)
 ```
 
 ### Security
@@ -228,8 +247,12 @@ The node runs an HTTP server on port 8080:
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check |
-| `GET /hls/{camera_id}/stream.m3u8` | HLS playlist |
-| `GET /hls/{camera_id}/segment_{n}.ts` | Video segment |
+| `GET /hls/{camera_id}/stream.m3u8` | HLS playlist for a camera |
+| `GET /hls/{camera_id}/segment_{n}.ts` | HLS video segment |
+| `GET /recordings/{filename}` | Serve a recording file from `<storage.path>/recordings/` |
+| `GET /recordings/list` | JSON list of recording filenames (`.mp4`, `.mkv`) |
+| `GET /snapshots/{filename}` | Serve a snapshot file from `<storage.path>/snapshots/` |
+| `GET /snapshots/list` | JSON list of snapshot filenames (`.jpg`, `.jpeg`) |
 
 ---
 

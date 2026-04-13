@@ -27,18 +27,11 @@ cameras:
 streaming:
   # Target frames per second
   fps: 30
-  
-  # JPEG quality (1-100)
+
+  # JPEG quality (1-100) — used for snapshot capture
   jpeg_quality: 85
 
-# Recording settings
-recording:
-  # Enable local recording
-  enabled: true
-  
-  # Recording format: "mp4" or "mkv"
-  format: "mp4"
-  
+# Local storage
 storage:
   # Base path for recordings and snapshots
   path: "./data"

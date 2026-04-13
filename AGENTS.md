@@ -25,7 +25,12 @@ Loading priority (in `Config::load()`):
    - `OPENSENTRY_NODE_ID`, `OPENSENTRY_API_KEY`, `OPENSENTRY_API_URL`
    - `OPENSENTRY_ENCODER` — video encoder override (e.g. `h264_nvenc`)
    - `RUST_LOG` — log level
-4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`
+4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`, `--config`, `--log-level`, `--once`
+
+**CLI subcommands** (see `main.rs`):
+- *(none)* / `run` — start the node (default); auto-runs setup if credentials are missing
+- `setup [--non-interactive]` — run the interactive setup wizard
+- `uninstall [--force]` — remove `data/`, legacy `.env`, and bundled `ffmpeg/`
 
 ## Project Structure
 
@@ -52,7 +57,7 @@ src/
 ├── node/             # Main orchestrator
 │   └── runner.rs     # Node lifecycle
 ├── server/           # HTTP server (warp)
-│   └── http.rs       # Endpoints: /health, /hls/*
+│   └── http.rs       # Endpoints: /health, /hls/*, /recordings[/list], /snapshots[/list]
 ├── setup/            # Interactive TUI setup wizard
 │   ├── mod.rs        # Setup flow
 │   ├── platform.rs   # Platform detection
@@ -100,13 +105,17 @@ src/
 - Retention enforced by `enforce_retention()` — oldest data deleted first
 
 **HTTP Server** (warp, port 8080):
-- `/health` - Health check
-- `/hls/{camera_id}/stream.m3u8` - HLS playlist
-- `/hls/{camera_id}/segment_{n}.ts` - Video segments
+- `GET /health` - Health check
+- `GET /hls/{camera_id}/stream.m3u8` - HLS playlist
+- `GET /hls/{camera_id}/segment_{n}.ts` - Video segments
+- `GET /recordings/{filename}` - Serve a recording file from `<storage.path>/recordings/`
+- `GET /recordings/list` - JSON list of recording filenames (`.mp4`, `.mkv`)
+- `GET /snapshots/{filename}` - Serve a snapshot file from `<storage.path>/snapshots/`
+- `GET /snapshots/list` - JSON list of snapshot filenames (`.jpg`, `.jpeg`)
 
 **Dashboard TUI** (`dashboard.rs`):
 - Full-screen live dashboard with camera status, upload stats, log viewer
-- Slash command bar (`/help`, `/settings`, `/wipe`, `/export-logs`, `/reauth`, `/quit`)
+- Slash command bar — main view: `/help`, `/settings`, `/status`, `/clear`, `/quit`; settings page: `/export-logs`, `/wipe confirm`, `/reauth confirm`, `/back`
 - Settings page with config display and action commands
 - Raw mode input via crossterm events, `\x1B[nG` cursor positioning for right border
 

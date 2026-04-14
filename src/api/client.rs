@@ -76,7 +76,7 @@ impl ApiClient {
 
         let response = self.client
             .post(format!("{}/api/nodes/register", self.base_url))
-            .header("X-API-Key", &self.api_key)
+            .header("X-Node-API-Key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -123,7 +123,7 @@ impl ApiClient {
 
         let response = self.client
             .post(format!("{}/api/nodes/heartbeat", self.base_url))
-            .header("X-API-Key", &self.api_key)
+            .header("X-Node-API-Key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()

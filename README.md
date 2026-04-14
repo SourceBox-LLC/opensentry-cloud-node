@@ -264,15 +264,18 @@ These are intended for local consumption (e.g. `VITE_LOCAL_HLS=true` on the Comm
 
 **Outbound calls to Command Center** (via `reqwest`):
 
-| Endpoint | Header | Purpose |
-|----------|--------|---------|
-| `POST /api/nodes/register` | `X-API-Key` | Register node + cameras on startup |
-| `POST /api/nodes/heartbeat` | `X-API-Key` | Liveness (every 30s by default) |
-| `POST /api/cameras/{id}/codec` | `X-Node-API-Key` | Report detected video/audio codec |
-| `POST /api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | Push a `.ts` segment into the backend's in-memory cache |
-| `POST /api/cameras/{id}/playlist` | `X-Node-API-Key` | Update the rewritten HLS playlist |
-| `POST /api/cameras/{id}/motion` | `X-Node-API-Key` | Motion event fallback (used when WebSocket is down) |
-| `WS /ws/node?api_key=…&node_id=…` | query params | Bidirectional channel: heartbeat, commands, motion events |
+All authenticated outbound calls use the same header: **`X-Node-API-Key: <api_key>`**. The WebSocket is the only exception — it takes the key as a query parameter.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/nodes/validate` | Validate a `node_id` + API key pair before saving config (setup wizard) |
+| `POST /api/nodes/register` | Register node + cameras on startup |
+| `POST /api/nodes/heartbeat` | Liveness (every 30s by default) |
+| `POST /api/cameras/{id}/codec` | Report detected video/audio codec |
+| `POST /api/cameras/{id}/push-segment?filename=…` | Push a `.ts` segment into the backend's in-memory cache |
+| `POST /api/cameras/{id}/playlist` | Update the rewritten HLS playlist |
+| `POST /api/cameras/{id}/motion` | Motion event fallback (used when WebSocket is down) |
+| `WS /ws/node?api_key=…&node_id=…` | Bidirectional channel: heartbeat, commands, motion events (key passed as query param) |
 
 ---
 

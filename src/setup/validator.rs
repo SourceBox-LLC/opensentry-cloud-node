@@ -79,7 +79,7 @@ pub async fn validate_api_connection(
     
     let validate_response = client
         .post(&validate_url)
-        .header("X-API-Key", api_key)
+        .header("X-Node-API-Key", api_key)
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "node_id": node_id

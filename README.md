@@ -68,8 +68,8 @@ The installer downloads the latest release, checks for FFmpeg, and guides you th
 <summary><strong>Manual install (build from source)</strong></summary>
 
 ```bash
-git clone https://github.com/SourceBox-LLC/OpenSentry-CloudNode.git
-cd OpenSentry-CloudNode
+git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
+cd opensentry-cloud-node
 cargo build --release
 
 # Run the interactive setup wizard

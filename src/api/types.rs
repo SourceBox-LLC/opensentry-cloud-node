@@ -129,8 +129,16 @@ pub struct CameraStatus {
     /// Camera ID
     pub camera_id: String,
 
-    /// Camera status (online, offline, error)
+    /// Pipeline state: one of `starting`, `streaming`, `restarting`,
+    /// `failed`, `error`, `offline`. Replaces the hardcoded "streaming"
+    /// that used to make every node look healthy even with a dead
+    /// FFmpeg pipeline.
     pub status: String,
+
+    /// Human-readable failure reason for `restarting` / `failed` /
+    /// `error` states. `None` when healthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// Heartbeat response

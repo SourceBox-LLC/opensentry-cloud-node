@@ -90,6 +90,11 @@ impl LogEntry {
 #[derive(Clone)]
 pub struct CameraState {
     pub name: String,
+    /// Cloud-side camera_id (e.g. `<node_id>_<sanitized_device>`). Used when
+    /// the heartbeat needs to look up this camera's pipeline state by ID.
+    /// Empty string for cameras that haven't been registered with the cloud
+    /// yet (e.g. offline / detection-only rows in the TUI).
+    pub camera_id: String,
     pub resolution: String,
     pub video_codec: String,
     pub audio_codec: String,
@@ -100,10 +105,41 @@ pub struct CameraState {
 
 #[derive(Clone, PartialEq)]
 pub enum CameraStatus {
+    /// Pipeline is coming up — FFmpeg has been spawned but we haven't
+    /// confirmed segments are being produced.
     Starting,
+    /// Pipeline is healthy: FFmpeg alive, segments flowing.
     Streaming,
+    /// Legacy "something's wrong" bucket. Keep for backwards compat with
+    /// call sites that don't distinguish the new supervised states.
     Error(String),
+    /// Node thinks the camera exists but nothing is streaming from it.
     Offline,
+    /// FFmpeg just died and the supervisor is about to respawn it.
+    /// `attempt` is the number of restarts in the current sliding window.
+    Restarting { attempt: u32, last_error: String },
+    /// Supervisor hit the restart cap (too many crashes in a short window)
+    /// and gave up. The pipeline stays down until someone intervenes.
+    Failed { last_error: String },
+}
+
+impl CameraStatus {
+    /// Short status string + optional error message, for sending over the
+    /// wire to the backend heartbeat. Keeps the existing "streaming" /
+    /// "offline" vocabulary and adds "starting" / "restarting" / "failed"
+    /// for the supervised-pipeline states.
+    pub fn to_wire(&self) -> (&'static str, Option<String>) {
+        match self {
+            CameraStatus::Starting          => ("starting",  None),
+            CameraStatus::Streaming         => ("streaming", None),
+            CameraStatus::Offline           => ("offline",   None),
+            CameraStatus::Error(e)          => ("error",     Some(e.clone())),
+            CameraStatus::Restarting { last_error, .. }
+                                            => ("restarting", Some(last_error.clone())),
+            CameraStatus::Failed { last_error }
+                                            => ("failed",    Some(last_error.clone())),
+        }
+    }
 }
 
 // ─── Views & settings ───────────────────────────────────────────────────────
@@ -341,6 +377,40 @@ impl Dashboard {
         }
     }
 
+    /// Attach the cloud-assigned `camera_id` to a dashboard row (matched
+    /// by display name). Called once, right after cloud registration,
+    /// so downstream per-ID lookups can find this camera.
+    pub fn set_camera_id(&self, name: &str, camera_id: &str) {
+        if let Ok(mut s) = self.0.lock() {
+            if let Some(cam) = s.cameras.iter_mut().find(|c| c.name == name) {
+                cam.camera_id = camera_id.to_string();
+            }
+        }
+    }
+
+    /// Update a camera's pipeline status by its cloud-side camera_id.
+    /// Used by the supervisor loop where we have the camera_id on hand
+    /// but not necessarily the display name.
+    pub fn update_camera_status_by_id(&self, camera_id: &str, status: CameraStatus) {
+        if let Ok(mut s) = self.0.lock() {
+            if let Some(cam) = s.cameras.iter_mut().find(|c| c.camera_id == camera_id) {
+                cam.status = status;
+            }
+        }
+    }
+
+    /// Look up a camera's current status by cloud-side camera_id. Returns
+    /// `None` if no camera with that id is registered. Heartbeat builders
+    /// call this so they can send the real pipeline state instead of the
+    /// old hardcoded "streaming".
+    pub fn get_camera_status_by_id(&self, camera_id: &str) -> Option<CameraStatus> {
+        let s = self.0.lock().ok()?;
+        s.cameras
+            .iter()
+            .find(|c| c.camera_id == camera_id)
+            .map(|c| c.status.clone())
+    }
+
     pub fn record_upload(&self, camera_name: &str, bytes: u64) {
         if let Ok(mut s) = self.0.lock() {
             s.record_upload(camera_name, bytes);
@@ -459,6 +529,10 @@ impl Dashboard {
                     CameraStatus::Starting  => "starting".yellow().to_string(),
                     CameraStatus::Offline   => "offline".dimmed().to_string(),
                     CameraStatus::Error(e)  => truncate(e, 16).bright_red().to_string(),
+                    CameraStatus::Restarting { attempt, .. } =>
+                        format!("restarting ({})", attempt).yellow().to_string(),
+                    CameraStatus::Failed { last_error } =>
+                        format!("failed: {}", truncate(last_error, 10)).bright_red().to_string(),
                 };
                 lines.push(format!("     {}  {}  {}",
                     pad_right(&cam.name.white().to_string(), visible_len(&cam.name), kw),
@@ -516,6 +590,15 @@ impl Dashboard {
                         CameraStatus::Offline => "○ offline".dimmed().to_string(),
                         CameraStatus::Error(e) => {
                             format!("✗ {}", truncate(e, 18)).bright_red().to_string()
+                        }
+                        CameraStatus::Restarting { attempt, .. } => {
+                            format!("↻ restarting ({})", attempt).yellow().bold().to_string()
+                        }
+                        CameraStatus::Failed { last_error } => {
+                            format!("✗ failed: {}", truncate(last_error, 12))
+                                .bright_red()
+                                .bold()
+                                .to_string()
                         }
                     };
                     let codec = if cam.video_codec.is_empty() {

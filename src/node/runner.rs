@@ -31,7 +31,8 @@ use crate::camera::{self, DetectedCamera};
 use crate::api::ApiClient;
 use crate::storage::NodeDatabase;
 use crate::server::HttpServer;
-use crate::streaming::{HlsGenerator, HlsGeneratorConfig, HlsUploader, HlsUploaderConfig};
+use crate::streaming::{HlsGeneratorConfig, HlsUploader, HlsUploaderConfig};
+use crate::streaming::supervisor::{supervise_hls, PipelineSource, SupervisorConfig};
 use crate::dashboard::{CameraState, CameraStatus, Dashboard};
 
 /// Main node orchestrator
@@ -42,9 +43,11 @@ pub struct Node {
     db: NodeDatabase,
 }
 
-/// Running camera stream
+/// Handles for the per-camera tasks started at boot. The supervisor owns
+/// the FFmpeg child inside its task — unlike the pre-supervisor design
+/// there is no `HlsGenerator` to drop here.
 struct RunningStream {
-    generator: HlsGenerator,
+    supervisor_handle: tokio::task::JoinHandle<()>,
     upload_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -100,10 +103,11 @@ impl Node {
         dash.log_info("Detecting cameras…");
         let detected_cameras = self.detect_cameras(&dash).await?;
 
-        // Register cameras in dashboard
+        // Register cameras in dashboard (camera_id filled in post-registration)
         for cam in &detected_cameras {
             dash.add_camera(CameraState {
                 name: cam.name.clone(),
+                camera_id: String::new(),
                 resolution: format!("{}×{}", cam.preferred_resolution.0, cam.preferred_resolution.1),
                 video_codec: String::new(),
                 audio_codec: String::new(),
@@ -120,11 +124,23 @@ impl Node {
         let camera_mapping: HashMap<String, String> = registration.cameras;
         dash.log_info(format!("Registered as node {}", node_id.cyan().bold()));
 
+        // Attach cloud-assigned camera_id to each dashboard row so per-ID
+        // lookups (e.g. the heartbeat's real-status read) can find them.
+        for cam in &detected_cameras {
+            if let Some(cid) = camera_mapping.get(&cam.device_path) {
+                dash.set_camera_id(&cam.name, cid);
+            }
+        }
+
         // ── 3. Start HLS streams ──────────────────────────────────────────────
         let mut running_streams: Vec<RunningStream> = Vec::new();
         let mut cameras_with_hls: Vec<(String, PathBuf)> = Vec::new();
         let recording_state: Arc<RwLock<HashSet<String>>> =
             Arc::new(RwLock::new(HashSet::new()));
+
+        // Shared shutdown flag — set on Ctrl+C or /quit. Created here
+        // (not at section 7) so every supervisor task gets a clone.
+        let stop_flag = Arc::new(AtomicBool::new(false));
 
         // Motion event channel — uploaders send, WebSocket client receives
         let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<
@@ -182,69 +198,61 @@ impl Node {
                 hls_config.fps = self.config.streaming.fps;
                 hls_config.encoder = self.config.streaming.encoder.clone();
 
-                let mut generator = HlsGenerator::new(hls_config)?;
+                cameras_with_hls.push((camera_id.clone(), camera_hls_dir.clone()));
 
-                let mut is_test_pattern = false;
-                let started = match generator.start_from_device(&detected.device_path) {
-                    Ok(_) => {
-                        dash.log_info(format!("Started HLS for {}", detected.name.cyan()));
-                        dash.update_camera_status(&detected.name, CameraStatus::Streaming);
-                        true
+                // Start motion detection only on real-camera paths; we
+                // can't know for certain at this point whether the
+                // supervisor will end up falling back to a test pattern,
+                // but motion on testsrc is meaningless anyway and the
+                // uploader has its own cheap no-op when no frames arrive.
+                let motion_cfg = self.config.motion.clone();
+
+                // Build the uploader task (unchanged — it polls for
+                // segments on disk regardless of who's writing them).
+                let uploader_config = HlsUploaderConfig::new(camera_id.clone(), camera_hls_dir);
+                let cam_name = detected.name.clone();
+                let uploader = HlsUploader::new(
+                    uploader_config,
+                    self.api_client.clone(),
+                    recording_state.clone(),
+                    self.db.clone(),
+                    motion_cfg,
+                    motion_tx.clone(),
+                );
+                let dash_for_uploader = dash.clone();
+                let camera_id_for_uploader = camera_id.clone();
+                let upload_handle = tokio::spawn(async move {
+                    if let Err(e) = uploader.start_with_dashboard(
+                        dash_for_uploader, cam_name, camera_id_for_uploader,
+                    ).await {
+                        tracing::error!("HLS uploader error: {}", e);
                     }
-                    Err(e) => {
-                        dash.log_warn(format!("Camera {} failed ({}), using test pattern", detected.name, e));
-                        match generator.start_from_frames(
-                            self.config.streaming.hls.segment_duration * 100,
-                            self.config.streaming.hls.segment_duration * 75,
-                            self.config.streaming.fps,
-                        ) {
-                            Ok(_) => {
-                                dash.update_camera_status(&detected.name, CameraStatus::Streaming);
-                                is_test_pattern = true;
-                                true
-                            }
-                            Err(e2) => {
-                                dash.log_error(format!("Failed to start test pattern: {}", e2));
-                                dash.update_camera_status(&detected.name, CameraStatus::Error(e2.to_string()));
-                                false
-                            }
-                        }
-                    }
+                });
+
+                // Build and spawn the FFmpeg supervisor. It owns the
+                // HlsGenerator, starts FFmpeg, polls for exits, and
+                // restarts with backoff (or gives up → Failed). Replaces
+                // the fire-and-forget inline start that used to leave
+                // a crashed camera silently offline forever.
+                let sup_cfg = SupervisorConfig {
+                    hls_config,
+                    primary: PipelineSource::Device(detected.device_path.clone()),
+                    fallback: Some(PipelineSource::TestPattern(
+                        self.config.streaming.hls.segment_duration * 100,
+                        self.config.streaming.hls.segment_duration * 75,
+                        self.config.streaming.fps,
+                    )),
+                    camera_name: detected.name.clone(),
+                    camera_id: camera_id.clone(),
                 };
+                let dash_for_sup = dash.clone();
+                let stop_for_sup = stop_flag.clone();
+                let supervisor_handle = tokio::spawn(async move {
+                    supervise_hls(sup_cfg, dash_for_sup, stop_for_sup).await;
+                });
 
-                if started {
-                    cameras_with_hls.push((camera_id.clone(), camera_hls_dir.clone()));
-
-                    // Disable motion detection on test-pattern streams —
-                    // scene changes on testsrc are meaningless.
-                    let mut motion_cfg = self.config.motion.clone();
-                    if is_test_pattern {
-                        motion_cfg.enabled = false;
-                        dash.log_info("Motion detection skipped on test-pattern stream");
-                    }
-
-                    // Build uploader with dashboard reference
-                    let uploader_config = HlsUploaderConfig::new(camera_id.clone(), camera_hls_dir);
-                    let cam_name = detected.name.clone();
-                    let uploader = HlsUploader::new(
-                        uploader_config,
-                        self.api_client.clone(),
-                        recording_state.clone(),
-                        self.db.clone(),
-                        motion_cfg,
-                        motion_tx.clone(),
-                    );
-                    let dash_clone = dash.clone();
-                    let camera_id_clone = camera_id.clone();
-
-                    let upload_handle = tokio::spawn(async move {
-                        if let Err(e) = uploader.start_with_dashboard(dash_clone, cam_name, camera_id_clone).await {
-                            tracing::error!("HLS uploader error: {}", e);
-                        }
-                    });
-
-                    running_streams.push(RunningStream { generator, upload_handle });
-                }
+                dash.log_info(format!("Started supervised HLS for {}", detected.name.cyan()));
+                running_streams.push(RunningStream { supervisor_handle, upload_handle });
             }
         }
 
@@ -324,7 +332,7 @@ impl Node {
         };
 
         // ── 7. Start dashboard render loop in a background thread ─────────────
-        let stop_flag = Arc::new(AtomicBool::new(false));
+        // stop_flag was created earlier so supervisors could share it.
         let stop_clone = stop_flag.clone();
         let dash_clone = dash.clone();
         let render_thread = std::thread::spawn(move || {
@@ -350,9 +358,13 @@ impl Node {
         std::thread::sleep(Duration::from_millis(600));
         let _ = render_thread.join();
 
-        // Stop streams
+        // Stop streams. The supervisor tasks already saw `stop_flag` flip
+        // above and should be in the middle of killing FFmpeg cleanly
+        // (HlsGenerator::stop inside the supervisor's loop). We still
+        // abort() as a belt-and-suspenders backstop in case any task is
+        // wedged in a sleep / syscall we can't interrupt.
         for stream in running_streams {
-            drop(stream.generator);
+            stream.supervisor_handle.abort();
             stream.upload_handle.abort();
         }
         heartbeat_handle.abort();
@@ -415,14 +427,32 @@ impl Node {
             }
             let local_ip = get_local_ip();
 
-            // Report all cameras as "streaming" in each heartbeat
-            let camera_statuses: Vec<(String, String)> = camera_ids
-                .iter()
-                .map(|id| (id.clone(), "streaming".to_string()))
-                .collect();
-
             loop {
-                match client.heartbeat_with_retry(local_ip.as_deref(), camera_statuses.clone(), 3).await {
+                // Build a fresh snapshot each tick from the supervisor's
+                // reported state. Unknown IDs fall back to "streaming"
+                // so the backend doesn't see a suddenly-empty payload
+                // during the brief window between registration and the
+                // first supervisor status write.
+                let camera_statuses: Vec<crate::api::CameraStatus> = camera_ids
+                    .iter()
+                    .map(|id| match dash.get_camera_status_by_id(id) {
+                        Some(s) => {
+                            let (wire, err) = s.to_wire();
+                            crate::api::CameraStatus {
+                                camera_id: id.clone(),
+                                status: wire.to_string(),
+                                last_error: err,
+                            }
+                        }
+                        None => crate::api::CameraStatus {
+                            camera_id: id.clone(),
+                            status: "streaming".to_string(),
+                            last_error: None,
+                        },
+                    })
+                    .collect();
+
+                match client.heartbeat_with_retry(local_ip.as_deref(), camera_statuses, 3).await {
                     Ok(r) => {
                         if r.key_rotated {
                             if let Some(new_key) = r.new_api_key {

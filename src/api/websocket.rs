@@ -82,7 +82,7 @@ pub async fn run_ws_client(
                     tokio::select! {
                         // -- Heartbeat tick --
                         _ = heartbeat_ticker.tick() => {
-                            let msg = build_heartbeat(&camera_ids);
+                            let msg = build_heartbeat(&camera_ids, &dash);
                             let text = match serde_json::to_string(&msg) {
                                 Ok(t) => t,
                                 Err(e) => {
@@ -197,14 +197,35 @@ fn urlencoded(s: &str) -> String {
 }
 
 /// Build a heartbeat message.
-fn build_heartbeat(camera_ids: &[String]) -> WsMessage {
+///
+/// Pulls the real per-camera pipeline state from the dashboard
+/// (populated by the FFmpeg supervisor). If an ID hasn't been written
+/// to the dashboard yet — which can happen in the short window between
+/// registration and the supervisor's first successful start — we fall
+/// back to "streaming" so the backend doesn't see a suddenly-empty
+/// payload and treat the node as having no cameras.
+fn build_heartbeat(camera_ids: &[String], dash: &Dashboard) -> WsMessage {
     let cameras: Vec<serde_json::Value> = camera_ids
         .iter()
-        .map(|id| {
-            serde_json::json!({
+        .map(|id| match dash.get_camera_status_by_id(id) {
+            Some(s) => {
+                let (wire, err) = s.to_wire();
+                match err {
+                    Some(e) => serde_json::json!({
+                        "camera_id": id,
+                        "status": wire,
+                        "last_error": e,
+                    }),
+                    None => serde_json::json!({
+                        "camera_id": id,
+                        "status": wire,
+                    }),
+                }
+            }
+            None => serde_json::json!({
                 "camera_id": id,
-                "status": "streaming"
-            })
+                "status": "streaming",
+            }),
         })
         .collect();
 

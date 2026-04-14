@@ -100,19 +100,23 @@ impl ApiClient {
     /// Send heartbeat to cloud
     ///
     /// Should be called every 30 seconds to indicate node is still alive.
-    pub async fn heartbeat(&self, local_ip: Option<&str>, camera_statuses: Vec<(String, String)>) -> Result<HeartbeatResponse> {
+    /// Takes pre-built `CameraStatus` structs so callers can include the
+    /// pipeline's `last_error` when FFmpeg is restarting/failed — used to
+    /// be `Vec<(String, String)>` which forced a hardcoded "streaming".
+    pub async fn heartbeat(
+        &self,
+        local_ip: Option<&str>,
+        camera_statuses: Vec<CameraStatus>,
+    ) -> Result<HeartbeatResponse> {
         let node_id = self.node_id.as_ref()
             .ok_or_else(|| Error::Api("Node not registered".into()))?;
 
         tracing::debug!("Sending heartbeat for node {}", node_id);
 
-        let cameras: Option<Vec<CameraStatus>> = if camera_statuses.is_empty() {
+        let cameras = if camera_statuses.is_empty() {
             None
         } else {
-            Some(camera_statuses.into_iter().map(|(id, status)| CameraStatus {
-                camera_id: id,
-                status,
-            }).collect())
+            Some(camera_statuses)
         };
 
         let request = HeartbeatRequest {
@@ -156,7 +160,7 @@ impl ApiClient {
     pub async fn heartbeat_with_retry(
         &self,
         local_ip: Option<&str>,
-        camera_statuses: Vec<(String, String)>,
+        camera_statuses: Vec<CameraStatus>,
         max_retries: u32,
     ) -> Result<HeartbeatResponse> {
         let mut attempts = 0;

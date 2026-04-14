@@ -22,6 +22,14 @@
 
 CloudNode runs on your local network, detects USB cameras, and streams live video to the [OpenSentry Command Center](https://opensentry-command.fly.dev) via HLS. All configuration is stored locally in an encrypted SQLite database — no cloud dependency for setup.
 
+**What it does:**
+
+- Detects USB cameras and transcodes each to HLS using FFmpeg (with hardware acceleration when available)
+- Pushes 1-second `.ts` segments directly to Command Center's in-memory cache — no S3, no presigned URLs
+- Detects motion from FFmpeg scene-change analysis and reports events over WebSocket (with an HTTP fallback for reliability)
+- Stores recordings and snapshots locally in an encrypted SQLite database with automatic retention
+- Runs a live terminal dashboard with slash commands and log viewer
+
 **Supported platforms:**
 
 | Platform | Status | Camera API |
@@ -37,7 +45,7 @@ CloudNode runs on your local network, detects USB cameras, and streams live vide
 ### Prerequisites
 
 - A USB webcam
-- An [OpenSentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key
+- An [OpenSentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key (generated from the Settings page)
 - **Docker** (recommended) or **Rust 1.70+** with **FFmpeg**
 
 ### Install
@@ -60,8 +68,8 @@ The installer downloads the latest release, checks for FFmpeg, and guides you th
 <summary><strong>Manual install (build from source)</strong></summary>
 
 ```bash
-git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
-cd opensentry-cloud-node
+git clone https://github.com/SourceBox-LLC/OpenSentry-CloudNode.git
+cd OpenSentry-CloudNode
 cargo build --release
 
 # Run the interactive setup wizard
@@ -73,7 +81,7 @@ The setup wizard handles everything automatically:
 
 1. Detects your platform and connected cameras
 2. Downloads FFmpeg if needed (Windows)
-3. Prompts for your Node ID and API Key
+3. Prompts for your Node ID, API Key, and Command Center URL
 4. Detects the best available hardware encoder (NVENC, QSV, AMF)
 5. Encrypts and stores credentials locally in `data/node.db`
 
@@ -119,8 +127,8 @@ Press **Esc** to return from settings. Destructive commands require the `confirm
 
 CloudNode resolves configuration in this order (highest priority last):
 
-1. **SQLite database** (`data/node.db`) — created by setup wizard
-2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to DB on first load
+1. **SQLite database** (`data/node.db`) — created by the setup wizard, primary source of truth
+2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to the DB on first load
 3. **Environment variables** — override any stored values
 4. **CLI flags** — highest priority
 
@@ -141,6 +149,18 @@ Use environment variables to override database values without modifying the DB:
 ```bash
 opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
 ```
+
+### Motion detection
+
+Motion detection is on by default. CloudNode pipes each camera through a second FFmpeg process with `select='gt(scene,THRESHOLD)'` to score how much the frame changed; scores above the threshold emit a `motion_detected` event (over WebSocket, or `POST /api/cameras/{id}/motion` if the socket is down). Per-camera cooldown prevents flapping.
+
+Defaults (configurable via `config.yaml` `motion:` section):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `enabled` | `true` | Toggle motion detection |
+| `threshold` | `0.02` | Scene-change score (0.0 = identical, 1.0 = totally different) |
+| `cooldown_secs` | `30` | Minimum seconds between events per camera |
 
 ### Security
 
@@ -195,27 +215,32 @@ docker run -d \
 
 ```
                   USB Cameras
-                      |
-              ┌───────┴───────┐
-              │   CloudNode   │
-              │               │
-              │  Camera       │
-              │  Detection ───┼──► FFmpeg (HLS transcoding)
-              │               │         |
-              │  Dashboard    │    .ts segments + .m3u8
-              │  (TUI)        │         |
-              │               │    ┌────┴─────┐
-              │  HTTP :8080 ◄─┼────┤ Uploader │
-              │               │    └────┬─────┘
-              │  WebSocket ◄──┼─┐       |
-              └───────────────┘ │       ▼
-                                │  Command Center
-                                └── (cloud API)
+                      │
+              ┌───────┴─────────────────┐
+              │       CloudNode         │
+              │                         │
+              │  Camera detection ──────┼──► FFmpeg (HLS transcoding)
+              │                         │           │
+              │  Motion detector ───────┼────┐      ▼
+              │  (scene-change FFmpeg)  │    │   .ts + .m3u8
+              │                         │    │      │
+              │  Dashboard (TUI)        │    │      ▼
+              │                         │    │   ┌─────────────────┐
+              │  HTTP server :8080 ◄────┼────┼───│  SegmentUploader │──push─► Command Center
+              │  (local HLS + recs)     │    │   └─────────────────┘   (POST /push-segment)
+              │                         │    │
+              │  WebSocket client ◄─────┼────┘   motion event
+              │  (+ HTTP fallback)      │    ───────► POST /api/.../motion (if WS is down)
+              └─────────────────────────┘
 ```
 
-**Video pipeline:** Camera → FFmpeg subprocess → HLS segments (`.ts`) → uploaded to Command Center via presigned URLs.
+**Video pipeline:** Camera → FFmpeg subprocess → rolling HLS segments (`.ts`) → `SegmentUploader` pushes each segment to Command Center via `POST /api/cameras/{id}/push-segment` → backend caches in memory → browser fetches via same-origin proxy. **No S3, no presigned URLs.**
 
-**Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs. Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
+**Playlist:** Every time FFmpeg rewrites `stream.m3u8`, CloudNode also POSTs the playlist text to `POST /api/cameras/{id}/playlist` so the backend's rewritten (relative-URL) copy stays fresh.
+
+**Motion:** A second FFmpeg probe per camera emits scene-change scores. Above-threshold frames raise a `MotionEvent`, which is sent over the WebSocket (`/ws/node`) as an `event { command: "motion_detected" }`. If the socket is disconnected, the uploader falls back to `POST /api/cameras/{id}/motion`.
+
+**Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs (not exposed in open folders). Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
 
 **Hardware encoding:** At startup, CloudNode probes for a hardware encoder (NVENC, QSV, AMF) and caches the result in the database. Falls back to `libx264` if none is found.
 
@@ -223,13 +248,31 @@ docker run -d \
 
 ## API Endpoints
 
-The node runs an HTTP server on port 8080:
+The node runs an HTTP server on port 8080 for local access:
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Health check |
-| `GET /hls/{camera_id}/stream.m3u8` | HLS playlist |
-| `GET /hls/{camera_id}/segment_{n}.ts` | Video segment |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| GET | `/hls/{camera_id}/stream.m3u8` | HLS playlist (local) |
+| GET | `/hls/{camera_id}/segment_{n}.ts` | Video segment (local) |
+| GET | `/recordings/list` | JSON list of stored recording filenames |
+| GET | `/recordings/{file}` | Download a stored recording |
+| GET | `/snapshots/list` | JSON list of stored snapshot filenames |
+| GET | `/snapshots/{file}` | Download a stored snapshot |
+
+These are intended for local consumption (e.g. `VITE_LOCAL_HLS=true` on the Command Center frontend). In normal cloud operation the browser fetches video through the backend proxy, not directly from the node.
+
+**Outbound calls to Command Center** (via `reqwest`):
+
+| Endpoint | Header | Purpose |
+|----------|--------|---------|
+| `POST /api/nodes/register` | `X-API-Key` | Register node + cameras on startup |
+| `POST /api/nodes/heartbeat` | `X-API-Key` | Liveness (every 30s by default) |
+| `POST /api/cameras/{id}/codec` | `X-Node-API-Key` | Report detected video/audio codec |
+| `POST /api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | Push a `.ts` segment into the backend's in-memory cache |
+| `POST /api/cameras/{id}/playlist` | `X-Node-API-Key` | Update the rewritten HLS playlist |
+| `POST /api/cameras/{id}/motion` | `X-Node-API-Key` | Motion event fallback (used when WebSocket is down) |
+| `WS /ws/node?api_key=…&node_id=…` | query params | Bidirectional channel: heartbeat, commands, motion events |
 
 ---
 
@@ -249,16 +292,33 @@ cargo fmt -- --check     # Format check
 
 ```
 src/
-├── main.rs              # CLI entry point (clap)
-├── dashboard.rs         # Live TUI dashboard
-├── api/                 # Cloud API client + WebSocket
-├── camera/              # Detection and capture (platform-specific)
-├── config/              # Config loading (DB → YAML → env → CLI)
-├── node/                # Orchestration and lifecycle
-├── server/              # HTTP server (warp)
-├── setup/               # Interactive setup wizard
-├── streaming/           # HLS generation and segment upload
-└── storage/             # SQLite database
+├── main.rs               # CLI entry point (clap)
+├── lib.rs                # Library re-exports
+├── dashboard.rs          # Live TUI dashboard + slash commands
+├── error.rs              # Custom Error enum + Result type
+├── logging.rs            # tracing subscriber setup
+├── api/                  # Cloud API client + WebSocket
+│   ├── client.rs         # ApiClient — register, heartbeat, codec, push-segment, playlist, motion
+│   ├── websocket.rs      # WebSocket loop with auto-reconnect; sends motion events
+│   ├── types.rs          # Request/response types
+│   └── mod.rs
+├── camera/               # Detection and capture (platform-specific)
+│   ├── detector.rs       # Auto-detect USB cameras
+│   ├── capture.rs        # Frame capture
+│   ├── platform/         # Linux (v4l2) / Windows (DirectShow) / macOS (AVFoundation)
+│   └── types.rs
+├── config/               # Config loader (DB → YAML → env → CLI)
+├── node/                 # Orchestration and lifecycle
+│   └── runner.rs
+├── server/               # Local HTTP server (warp) — health, HLS, recordings, snapshots
+├── setup/                # Interactive TUI setup wizard (crossterm + inquire)
+├── streaming/            # HLS pipeline
+│   ├── hls_generator.rs   # FFmpeg subprocess per camera (HLS muxer)
+│   ├── hls_uploader.rs    # Watches HLS dir, hands segments to SegmentUploader, updates playlist, drives motion events
+│   ├── segment_uploader.rs# Posts each .ts to POST /push-segment with retry
+│   ├── motion_detector.rs # Parallel FFmpeg scene-change scorer
+│   └── codec_detector.rs  # FFprobe-based codec detection
+└── storage/              # SQLite-backed local storage (BLOBs + config)
 ```
 
 ### Cross-compilation
@@ -354,7 +414,8 @@ sudo usermod -a -G video $USER
 1. Verify the node is running: `curl http://localhost:8080/health`
 2. Check the dashboard for FFmpeg errors
 3. Confirm HLS files are being created in `data/hls/`
-4. Try `/export-logs` from the settings page for detailed diagnostics
+4. Watch the dashboard log for `Pushed segment …` lines — those mean segments are reaching the backend
+5. Try `/export-logs` from the settings page for detailed diagnostics
 
 </details>
 
@@ -364,6 +425,15 @@ sudo usermod -a -G video $USER
 1. Verify your API URL: `curl https://your-backend.example.com/api/health`
 2. Open `/settings` in the dashboard to confirm Node ID and API URL
 3. Use `/reauth confirm` from settings to re-enter credentials
+
+</details>
+
+<details>
+<summary><strong>Motion events not firing</strong></summary>
+
+1. Check that `motion.enabled` is `true` (default)
+2. Lower `motion.threshold` (default `0.02`) if the scene is dim / low-contrast
+3. The dashboard logs `Motion detected on <camera> (score N%)` when an event fires
 
 </details>
 

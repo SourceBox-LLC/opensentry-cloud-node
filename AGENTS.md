@@ -79,6 +79,8 @@ src/
 │   └── recovery.rs     # Error recovery and user guidance
 ├── streaming/          # HLS pipeline
 │   ├── hls_generator.rs    # FFmpeg subprocess per camera (HLS muxer)
+│   ├── supervisor.rs       # Polls FFmpeg every 2s, respawns with exponential backoff
+│   │                       # (1s→30s), reports Streaming/Restarting/Failed into Dashboard
 │   ├── hls_uploader.rs     # Watches HLS dir, drives playlist updates + motion event channel
 │   ├── segment_uploader.rs # Posts each .ts to POST /push-segment with retry/backoff
 │   ├── motion_detector.rs  # Parallel FFmpeg scene-change scorer
@@ -100,7 +102,7 @@ src/
 2. Detect cameras (`camera::detect_cameras()`)
 3. Register with Command Center (`api_client.register()`)
 4. Detect hardware encoder once (NVENC/QSV/AMF), persist to DB
-5. Create HLS generator per camera (FFmpeg subprocess)
+5. Spawn an FFmpeg **supervisor** per camera (`streaming/supervisor.rs`) that owns the `HlsGenerator`, polls the child every 2s, respawns it with exponential backoff (1s → 2s → 4s → … capped at 30s) when it dies, and trips the camera into `Failed` state if the backoff window sees 5+ crashes in 60s. Each transition (`Starting` / `Streaming` / `Restarting { reason }` / `Failed { reason }`) is pushed into the `Dashboard` so the heartbeat / WS messages carry the real pipeline state (with `last_error`) rather than the old hardcoded `"streaming"`.
 6. Spawn HLS uploader tasks (segment push + playlist update + codec detection)
 7. Spawn motion detector per camera (second FFmpeg probe for scene-change scoring)
 8. Launch local HTTP server (port 8080) + WebSocket client
@@ -182,8 +184,8 @@ All outbound calls use `ApiClient` in `src/api/client.rs`:
 
 | Method | Path | Header | Body | When |
 |--------|------|--------|------|------|
-| POST | `/api/nodes/register` | `X-API-Key` | `RegisterRequest` JSON | Startup |
-| POST | `/api/nodes/heartbeat` | `X-API-Key` | `HeartbeatRequest` JSON | Every `heartbeat_interval` s (fallback path; WS heartbeat is primary) |
+| POST | `/api/nodes/register` | `X-Node-API-Key` | `RegisterRequest` JSON | Startup |
+| POST | `/api/nodes/heartbeat` | `X-Node-API-Key` | `HeartbeatRequest` JSON (includes per-camera `CameraStatus { camera_id, status, last_error }` with real pipeline state) | Every `heartbeat_interval` s (fallback path; WS heartbeat is primary) |
 | POST | `/api/cameras/{id}/codec` | `X-Node-API-Key` | `{video_codec, audio_codec}` JSON | After first segment or codec change |
 | POST | `/api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | raw `.ts` bytes (`video/mp2t`) | Every segment |
 | POST | `/api/cameras/{id}/playlist` | `X-Node-API-Key` | playlist text (`text/plain`) | Every playlist rewrite |

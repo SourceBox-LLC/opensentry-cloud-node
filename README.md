@@ -244,6 +244,8 @@ docker run -d \
 
 **Hardware encoding:** At startup, CloudNode probes for a hardware encoder (NVENC, QSV, AMF) and caches the result in the database. Falls back to `libx264` if none is found.
 
+**FFmpeg supervisor:** Each camera's FFmpeg pipeline is wrapped in a supervisor (`streaming/supervisor.rs`) that polls the child every 2 seconds. If FFmpeg exits (disk full, V4L2 disconnect, segment-writer failure, etc.) the supervisor respawns it with exponential backoff — 1s → 2s → 4s → … capped at 30s. A pipeline that crashes 5+ times inside a 60-second window is flagged `Failed` and stops retrying, so a permanently broken camera can't spin forever. Real pipeline state (`starting` / `streaming` / `restarting` / `failed`) is reported on every heartbeat (HTTP and WebSocket) together with the human-readable failure reason, which is what the Command Center dashboard surfaces — it replaces the legacy hardcoded `"streaming"` status that used to make every node look healthy regardless of what FFmpeg was doing.
+
 ---
 
 ## API Endpoints
@@ -317,6 +319,7 @@ src/
 ├── setup/                # Interactive TUI setup wizard (crossterm + inquire)
 ├── streaming/            # HLS pipeline
 │   ├── hls_generator.rs   # FFmpeg subprocess per camera (HLS muxer)
+│   ├── supervisor.rs      # Polls FFmpeg, respawns with exponential backoff, reports real pipeline state
 │   ├── hls_uploader.rs    # Watches HLS dir, hands segments to SegmentUploader, updates playlist, drives motion events
 │   ├── segment_uploader.rs# Posts each .ts to POST /push-segment with retry
 │   ├── motion_detector.rs # Parallel FFmpeg scene-change scorer

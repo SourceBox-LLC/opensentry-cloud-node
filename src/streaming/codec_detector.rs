@@ -33,6 +33,12 @@ pub struct CodecInfo {
 }
 
 /// FFprobe stream information
+///
+/// `coded_width`/`coded_height` are fallbacks for ffprobe builds that omit
+/// `width`/`height` on segments with partially malformed SPS — seen in the
+/// wild with the Raspberry Pi's `h264_v4l2m2m` encoder, which writes
+/// `level_idc=0` and sometimes confuses older ffprobe builds into reporting
+/// only one of the two pairs.
 #[derive(Debug, Deserialize)]
 struct FFprobeStream {
     codec_name: Option<String>,
@@ -40,6 +46,8 @@ struct FFprobeStream {
     level: Option<i32>,
     width: Option<i32>,
     height: Option<i32>,
+    coded_width: Option<i32>,
+    coded_height: Option<i32>,
 }
 
 /// FFprobe output structure
@@ -138,7 +146,18 @@ fn to_hls_codec_string(
                 _ => None,
             };
 
-            let effective_level = match (level, resolution_level) {
+            // A reported level below 10 is not a valid H.264 level — it's
+            // almost certainly the `h264_v4l2m2m` malformed-SPS case where
+            // the Pi's hardware encoder writes `level_idc=0`. Discard it
+            // and rely on resolution (or a safe fallback) instead. v0.1.4
+            // only rescued us when width/height WERE available; if the
+            // same malformed SPS also confused ffprobe into reporting no
+            // dimensions, the `(Some(0), None) => 0` arm below passed the
+            // garbage through untouched and we shipped `avc1.42e00a` for
+            // real 1080p streams — spinner-forever in the browser.
+            let sane_level = level.filter(|&l| l >= 10);
+
+            let effective_level = match (sane_level, resolution_level) {
                 (Some(l), Some(min)) if l >= min => l,
                 (Some(l), Some(min)) => {
                     tracing::warn!(
@@ -152,8 +171,29 @@ fn to_hls_codec_string(
                     min
                 }
                 (Some(l), None) => l,
-                (None, Some(min)) => min,
-                (None, None) => 30,
+                (None, Some(min)) => {
+                    if level == Some(0) || level.map_or(false, |l| l < 10) {
+                        tracing::warn!(
+                            "[Codec] FFprobe reported invalid H.264 level={:?} — using resolution-derived level {}",
+                            level,
+                            min
+                        );
+                    }
+                    min
+                }
+                (None, None) => {
+                    // No usable level AND no resolution. Pick 3.0 — it's
+                    // the smallest level that can decode up to 720×576,
+                    // which is big enough that we won't hard-fail on
+                    // typical webcam output, and small enough that most
+                    // decoders accept it without complaint. Better to
+                    // understate than to overstate.
+                    tracing::warn!(
+                        "[Codec] FFprobe returned no usable level or dimensions (reported level={:?}) — falling back to 3.0",
+                        level
+                    );
+                    30
+                }
             };
 
             let level_hex = normalize_h264_level(effective_level);
@@ -218,7 +258,10 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
             "-select_streams",
             "v:0", // First video stream
             "-show_entries",
-            "stream=codec_name,profile,level,width,height",
+            // `coded_width`/`coded_height` are fallbacks for ffprobe builds
+            // that omit `width`/`height` when the SPS is partially garbage
+            // (seen on Pi h264_v4l2m2m output with level_idc=0).
+            "stream=codec_name,profile,level,width,height,coded_width,coded_height",
             "-of",
             "json",
             segment_path_str,
@@ -249,13 +292,23 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
         .as_ref()
         .ok_or(Error::Storage("Video stream has no codec_name".into()))?;
 
+    // Prefer `width`/`height`; fall back to `coded_width`/`coded_height`
+    // when ffprobe omits the primary pair. Both are dimensions in pixels;
+    // coded_* is the pre-crop size written in the SPS, so it can be a few
+    // pixels larger than the display size, but for level-derivation purposes
+    // (which buckets by total pixel count) they're interchangeable.
+    let effective_width = video_stream.width.or(video_stream.coded_width);
+    let effective_height = video_stream.height.or(video_stream.coded_height);
+
     tracing::info!(
-        "[Codec] Video stream: codec={}, profile={:?}, level={:?}, size={:?}x{:?}",
+        "[Codec] Video stream: codec={}, profile={:?}, level={:?}, size={:?}x{:?} (coded {:?}x{:?})",
         video_codec_name,
         video_stream.profile,
         video_stream.level,
         video_stream.width,
-        video_stream.height
+        video_stream.height,
+        video_stream.coded_width,
+        video_stream.coded_height
     );
 
     // Convert to HLS codec string
@@ -263,8 +316,8 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
         video_codec_name,
         video_stream.profile.as_deref(),
         video_stream.level,
-        video_stream.width,
-        video_stream.height,
+        effective_width,
+        effective_height,
     );
 
     // Run FFprobe to get audio stream info
@@ -524,6 +577,34 @@ mod tests {
         assert_eq!(
             to_hls_codec_string("h264", Some("Baseline"), None, None, None),
             "avc1.42e01e" // Level 3.0 — old behavior preserved
+        );
+    }
+
+    /// Regression #2: v0.1.4 shipped a partial fix that only upgraded the
+    /// level when ffprobe reported BOTH `level=0` AND valid dimensions.
+    /// On some Pi segments the same malformed SPS confused ffprobe into
+    /// reporting `level=0` AND no dimensions — the `(Some(0), None) => 0`
+    /// arm passed the garbage through and we still shipped `avc1.42e00a`
+    /// for real 1080p streams. This test locks in that a `level=0` report
+    /// with no dimensions falls back to safe level 3.0 instead of
+    /// rounding 0 → 10.
+    #[test]
+    fn test_h264_level_zero_no_resolution_falls_back_to_safe_level() {
+        // Level 0 is invalid — must NOT be normalized to level 10 (1.0).
+        // With no resolution to floor against, fall back to 3.0.
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Baseline"), Some(0), None, None),
+            "avc1.42e01e" // Level 3.0, NOT avc1.42e00a
+        );
+    }
+
+    #[test]
+    fn test_h264_sub_valid_level_no_resolution_falls_back_to_safe_level() {
+        // Any level < 10 is garbage (valid H.264 levels start at 10).
+        // Must not be rounded by normalize_h264_level.
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Main"), Some(5), None, None),
+            "avc1.4da01e" // Level 3.0
         );
     }
 }

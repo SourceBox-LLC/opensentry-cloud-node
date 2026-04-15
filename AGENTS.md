@@ -25,7 +25,13 @@ Loading priority (in `Config::load()`):
    - `OPENSENTRY_NODE_ID`, `OPENSENTRY_API_KEY`, `OPENSENTRY_API_URL`
    - `OPENSENTRY_ENCODER` — video encoder override (e.g. `h264_nvenc`)
    - `RUST_LOG` — log level
-4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`
+4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`, `--config`, `--log-level`, `--once`
+
+**Subcommands** (`src/main.rs`):
+- *(none / default)* — starts the node, or launches setup if no credentials are stored
+- `run` — explicit start command; accepts the same `--node-id` / `--api-key` / `--api-url` / `--once` flags
+- `setup` — interactive TUI setup wizard (`--non-interactive` flag is declared but not yet implemented)
+- `uninstall` — removes `.env`, `data/`, and `ffmpeg/` (use `--force` to skip confirmation)
 
 ## Project Structure
 
@@ -48,16 +54,20 @@ src/
 │   └── types.rs      # Camera types
 ├── config/           # Configuration
 │   ├── mod.rs        # Config loader (DB → YAML → env → CLI)
-│   └── settings.rs   # Settings structs
+│   └── settings.rs   # Settings structs (incl. HlsConfig)
+├── error.rs          # Custom Error enum (thiserror)
 ├── node/             # Main orchestrator
 │   └── runner.rs     # Node lifecycle
 ├── server/           # HTTP server (warp)
-│   └── http.rs       # Endpoints: /health, /hls/*
+│   └── http.rs       # Endpoints: /health, /hls/*, /recordings, /snapshots
 ├── setup/            # Interactive TUI setup wizard
 │   ├── mod.rs        # Setup flow
 │   ├── platform.rs   # Platform detection
 │   ├── recovery.rs   # Error recovery and user guidance
-│   └── tui.rs        # Terminal UI (crossterm + inquire)
+│   ├── tui.rs        # Terminal UI (crossterm + inquire)
+│   ├── animations.rs # Terminal animations / progress effects
+│   ├── ui.rs         # Shared UI helpers and widgets
+│   └── validator.rs  # Input validation for setup prompts
 ├── streaming/        # HLS generation
 │   ├── hls_generator.rs    # FFmpeg orchestration
 │   ├── hls_uploader.rs     # Upload segments to cloud
@@ -75,7 +85,7 @@ src/
 1. Create live TUI dashboard (raw mode, crossterm events)
 2. Detect cameras (`camera::detect_cameras()`)
 3. Register with cloud API (`api_client.register()`)
-4. Detect hardware encoder once (NVENC/QSV/AMF), persist to DB
+4. Detect hardware encoder once (NVENC/QSV/AMF/V4L2M2M → libx264 fallback), persist to DB
 5. Create HLS generator per camera (FFmpeg subprocess)
 6. Start HLS uploader tasks (segment upload + codec detection)
 7. Launch HTTP server (port 8080) + WebSocket client
@@ -100,9 +110,13 @@ src/
 - Retention enforced by `enforce_retention()` — oldest data deleted first
 
 **HTTP Server** (warp, port 8080):
-- `/health` - Health check
-- `/hls/{camera_id}/stream.m3u8` - HLS playlist
-- `/hls/{camera_id}/segment_{n}.ts` - Video segments
+- `GET /health` - Health check
+- `GET /hls/{camera_id}/stream.m3u8` - HLS playlist
+- `GET /hls/{camera_id}/segment_{n}.ts` - Video segments
+- `GET /recordings/...` - Serves files from `<storage>/recordings/`
+- `GET /recordings/list` - JSON list of recording filenames (`.mp4`, `.mkv`)
+- `GET /snapshots/...` - Serves files from `<storage>/snapshots/`
+- `GET /snapshots/list` - JSON list of snapshot filenames (`.jpg`, `.jpeg`)
 
 **Dashboard TUI** (`dashboard.rs`):
 - Full-screen live dashboard with camera status, upload stats, log viewer
@@ -182,7 +196,7 @@ docker run -d \
 - FFmpeg auto-downloaded during setup
 - Camera names: `MEE USB Camera`, `Integrated Webcam`, etc.
 
-**macOS**: Untested (AVFoundation)
+**macOS**: Experimental (AVFoundation)
 - Requires FFmpeg: `brew install ffmpeg`
 - May need camera permission in System Preferences
 

@@ -74,7 +74,7 @@ The setup wizard handles everything automatically:
 1. Detects your platform and connected cameras
 2. Downloads FFmpeg if needed (Windows)
 3. Prompts for your Node ID and API Key
-4. Detects the best available hardware encoder (NVENC, QSV, AMF)
+4. Detects the best available hardware encoder at startup (NVENC, QSV, AMF, V4L2M2M)
 5. Encrypts and stores credentials locally in `data/node.db`
 
 After setup, start the node:
@@ -133,14 +133,29 @@ Use environment variables to override database values without modifying the DB:
 | `OPENSENTRY_NODE_ID` | Node ID |
 | `OPENSENTRY_API_KEY` | API Key |
 | `OPENSENTRY_API_URL` | Command Center URL |
+| `OPENSENTRY_CONFIG` | Path to a YAML config file (legacy fallback) |
 | `OPENSENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
-### CLI flags
+### CLI flags & subcommands
 
 ```bash
-opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
+# Start the node (default)
+opensentry-cloudnode [--node-id <ID>] [--api-key <KEY>] [--api-url <URL>] \
+                    [--config <PATH>] [--log-level <LEVEL>] [--once]
+
+# Or use an explicit subcommand
+opensentry-cloudnode run --node-id <ID> --api-key <KEY> --api-url <URL>
+
+# Launch the interactive setup wizard
+opensentry-cloudnode setup
+
+# Remove .env, data/, and bundled ffmpeg/ directories
+opensentry-cloudnode uninstall [--force]
 ```
+
+`--once` runs a single detection/upload cycle and exits (useful for testing).
+`--config <PATH>` (or `OPENSENTRY_CONFIG`) points to a YAML config file.
 
 ### Security
 
@@ -217,7 +232,7 @@ docker run -d \
 
 **Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs. Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
 
-**Hardware encoding:** At startup, CloudNode probes for a hardware encoder (NVENC, QSV, AMF) and caches the result in the database. Falls back to `libx264` if none is found.
+**Hardware encoding:** At startup, CloudNode probes for a hardware encoder in this order — NVENC (NVIDIA), QSV (Intel Quick Sync), AMF (AMD), V4L2M2M (Raspberry Pi / ARM SoCs) — and caches the result in the database. Falls back to `libx264` software encoding if none is available.
 
 ---
 
@@ -230,6 +245,10 @@ The node runs an HTTP server on port 8080:
 | `GET /health` | Health check |
 | `GET /hls/{camera_id}/stream.m3u8` | HLS playlist |
 | `GET /hls/{camera_id}/segment_{n}.ts` | Video segment |
+| `GET /recordings/...` | Serves files from `<storage>/recordings/` |
+| `GET /recordings/list` | JSON list of `.mp4` / `.mkv` recordings |
+| `GET /snapshots/...` | Serves files from `<storage>/snapshots/` |
+| `GET /snapshots/list` | JSON list of `.jpg` / `.jpeg` snapshots |
 
 ---
 

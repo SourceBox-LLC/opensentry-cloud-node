@@ -27,9 +27,29 @@ cameras:
 streaming:
   # Target frames per second
   fps: 30
-  
+
   # JPEG quality (1-100)
   jpeg_quality: 85
+
+  # Video encoder override. Leave empty ("") to auto-detect the best available
+  # hardware encoder (h264_nvenc, h264_qsv, h264_amf, h264_v4l2m2m) and fall
+  # back to software (libx264). Can also be overridden via the
+  # OPENSENTRY_ENCODER environment variable.
+  encoder: ""
+
+  # HLS streaming settings
+  hls:
+    # Enable HLS streaming output
+    enabled: true
+
+    # Segment duration in seconds
+    segment_duration: 1
+
+    # Number of segments kept in the rolling playlist
+    playlist_size: 15
+
+    # Target video bitrate (e.g. "2500k", "1500k")
+    bitrate: "2500k"
 
 # Recording settings
 recording:

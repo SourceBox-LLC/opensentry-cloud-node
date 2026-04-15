@@ -18,10 +18,15 @@ RUN cargo build --release
 # Runtime stage
 FROM alpine:3.19
 
-# Install FFmpeg for HLS generation and libv4l for USB cameras
+# Install FFmpeg for HLS generation and v4l-utils for USB camera
+# diagnostics (v4l2-ctl).  We don't link libv4l — the Linux camera
+# code uses raw v4l2 ioctls via libc — but the `v4l-utils` package is
+# handy inside the container for `docker exec … v4l2-ctl --list-devices`
+# when a user reports "camera not detected" in a containerized deploy.
+# Alpine has no `libv4l` package; the shared libraries live inside
+# `v4l-utils-libs` which is pulled in transitively by `v4l-utils`.
 RUN apk add --no-cache \
     ffmpeg \
-    libv4l \
     v4l-utils
 
 # Create non-root user

@@ -20,6 +20,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::sync::Semaphore;
@@ -118,15 +119,28 @@ impl HlsUploader {
     /// `ReadDirectoryChangesW` backend on Windows silently stops delivering
     /// events after ~95 segments, even though FFmpeg keeps producing them.
     /// Polling every second is simple, reliable, and adds at most 1s latency.
+    ///
+    /// `stall_flag` is raised when the pipeline has gone quiet for long
+    /// enough that we suspect FFmpeg has wedged (not crashed — crashes
+    /// are handled by the supervisor via `try_wait`).  The supervisor
+    /// watches this flag and kills the child so the normal restart path
+    /// fires.  Without it, a wedged-but-alive FFmpeg produces no segments
+    /// indefinitely and the camera goes dark in the UI with no recovery.
     pub async fn start_with_dashboard(
         self,
         dash: Dashboard,
         camera_name: String,
         _camera_id: String,
+        stall_flag: Arc<AtomicBool>,
     ) -> Result<()> {
         let poll_interval = tokio::time::Duration::from_secs(1);
         let mut seen: HashSet<String> = HashSet::new();
         let mut stale_cycles: u32 = 0;
+        // Stall threshold in poll cycles (1s each).  10s already flips
+        // the dashboard to Error; we wait until 20s before asking the
+        // supervisor to kill FFmpeg so a brief V4L2 hiccup doesn't
+        // trigger a spurious restart storm.
+        const STALL_KILL_CYCLES: u32 = 20;
         // Per-camera cooldown — this uploader is single-camera, so one Instant suffices
         let last_motion: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
@@ -187,6 +201,25 @@ impl HlsUploader {
                         "No segments (camera disconnected?)".into()
                     ));
                 }
+                // At STALL_KILL_CYCLES seconds of silence, raise the
+                // stall flag so the supervisor kills FFmpeg.  We DON'T
+                // re-raise on every subsequent cycle — the supervisor's
+                // own 2s poll + kill + restart will clear this within a
+                // few seconds, and we want the stall_cycles counter to
+                // keep climbing so we can log escalating messages later
+                // if the restart itself fails to recover.
+                if stale_cycles == STALL_KILL_CYCLES {
+                    dash.log_warn(format!(
+                        "Pipeline wedged for {}s — asking supervisor to restart FFmpeg",
+                        STALL_KILL_CYCLES
+                    ));
+                    tracing::warn!(
+                        "Raising stall flag for camera {} after {}s of no segments",
+                        self.config.camera_id,
+                        STALL_KILL_CYCLES
+                    );
+                    stall_flag.store(true, Ordering::Relaxed);
+                }
             } else {
                 if stale_cycles >= 10 {
                     // We were stale but segments resumed — camera reconnected
@@ -194,6 +227,10 @@ impl HlsUploader {
                     dash.update_camera_status(&camera_name, CameraStatus::Streaming);
                 }
                 stale_cycles = 0;
+                // Any new segment implies the pipeline is healthy —
+                // clear the stall flag so a historical kill request
+                // doesn't fire after a natural recovery.
+                stall_flag.store(false, Ordering::Relaxed);
             }
 
             for (seq, segment_path) in &new_segments {

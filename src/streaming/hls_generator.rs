@@ -376,8 +376,15 @@ impl HlsGenerator {
         }
     }
 
-    /// Start HLS generation from a video device
-    pub fn start_from_device(&mut self, device_path: &str) -> Result<()> {
+    /// Start HLS generation from a video device.
+    ///
+    /// Returns the encoder name that was actually selected (e.g.
+    /// `"h264_v4l2m2m"`, `"libx264"`), so the caller can surface it to
+    /// the operator.  Selecting the right encoder is the single biggest
+    /// determinant of whether a Pi / NUC / old workstation can stream
+    /// two cameras without thermal throttling, and we want that choice
+    /// visible without having to `docker logs` the container.
+    pub fn start_from_device(&mut self, device_path: &str) -> Result<String> {
         if self.running.load(Ordering::SeqCst) {
             return Err(crate::error::Error::Streaming("Already running".into()));
         }
@@ -506,11 +513,17 @@ impl HlsGenerator {
         self.ffmpeg_process = Some(child);
         self._stderr_thread = Some(stderr_thread);
 
-        Ok(())
+        // Return the encoder that was actually chosen — hw name if we
+        // picked hardware, else the software fallback.
+        Ok(hw_encoder.unwrap_or_else(|| "libx264".to_string()))
     }
 
-    /// Start HLS generation from raw frames (for test patterns)
-    pub fn start_from_frames(&mut self, width: u32, height: u32, fps: u32) -> Result<()> {
+    /// Start HLS generation from raw frames (for test patterns).
+    ///
+    /// Returns the encoder name for symmetry with [`start_from_device`];
+    /// the test-pattern path always uses `libx264` since there's no real
+    /// camera to feed a hardware encoder.
+    pub fn start_from_frames(&mut self, width: u32, height: u32, fps: u32) -> Result<String> {
         if self.running.load(Ordering::SeqCst) {
             return Err(crate::error::Error::Streaming("Already running".into()));
         }
@@ -592,7 +605,7 @@ impl HlsGenerator {
         self.ffmpeg_process = Some(child);
         self._stderr_thread = Some(stderr_thread);
 
-        Ok(())
+        Ok("libx264".to_string())
     }
 
     /// Stop HLS generation

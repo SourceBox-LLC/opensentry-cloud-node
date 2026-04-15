@@ -23,6 +23,12 @@
 //!   * bails (→ `Failed`) after too many restarts in a 60s window, so a
 //!     permanently broken camera / FFmpeg config / disk-full situation
 //!     doesn't spin forever
+//!   * watches the uploader's `stall_flag` and kills a wedged-but-alive
+//!     FFmpeg so it routes through the same restart path.  Without this,
+//!     a pipeline that stops producing segments but keeps the child
+//!     process alive (V4L2 deadlock, thermal throttle below real-time,
+//!     USB bandwidth starvation) would sit wedged forever and `try_wait`
+//!     would never return an exit status to trip the restart loop.
 //!   * pushes `CameraStatus::Streaming / Restarting / Failed` into the
 //!     Dashboard so the WS + HTTP heartbeats report real pipeline state
 //!     instead of the old hardcoded `"streaming"`.
@@ -84,6 +90,10 @@ pub struct SupervisorConfig {
     pub fallback: Option<PipelineSource>,
     pub camera_name: String,
     pub camera_id: String,
+    /// Shared with the uploader.  The uploader raises this flag after
+    /// ~20s of no new segments; the supervisor sees it, kills FFmpeg,
+    /// and the existing crash path restarts it.
+    pub stall_flag: Arc<AtomicBool>,
 }
 
 /// Supervise a single camera's HLS pipeline.
@@ -102,6 +112,7 @@ pub async fn supervise_hls(
         fallback,
         camera_name,
         camera_id,
+        stall_flag,
     } = cfg;
 
     // Which source we're currently trying. Starts as `primary`; if that
@@ -135,6 +146,16 @@ pub async fn supervise_hls(
         };
 
         let start_result = start_with(&mut generator, &active_source);
+
+        // Clear any stall flag left over from a previous incarnation —
+        // otherwise the uploader's own 20s clock (still running) would
+        // race against a flag we meant for the prior FFmpeg.
+        stall_flag.store(false, Ordering::Relaxed);
+
+        let encoder = match &start_result {
+            Ok(enc) => enc.clone(),
+            Err(_) => String::new(),
+        };
 
         if let Err(e) = start_result {
             let err = format!("FFmpeg start failed: {}", e);
@@ -177,6 +198,28 @@ pub async fn supervise_hls(
         dash.update_camera_status_by_id(&camera_id, CameraStatus::Streaming);
         let alive_since = Instant::now();
 
+        // Surface the encoder choice to the TUI on every (re)start.
+        // Operators debugging thermal / CPU issues need this visible at
+        // a glance — it was previously only in the tracing log which
+        // nobody sees unless they tail journalctl.  Warn loudly when
+        // software encoding is selected on ARM (Raspberry Pi etc.):
+        // libx264 + two 720p30 streams can easily pin a Pi 4 CPU into
+        // thermal throttling, which then surfaces as exactly the wedge
+        // this supervisor is designed to recover from.
+        if !encoder.is_empty() {
+            dash.log_info(format!(
+                "[{}] FFmpeg running (encoder: {})",
+                camera_name, encoder
+            ));
+            if encoder == "libx264" && cfg!(target_arch = "aarch64") {
+                dash.log_warn(format!(
+                    "[{}] Software encoder on ARM — high CPU; consider \
+                     passing /dev/video10 to the container for h264_v4l2m2m",
+                    camera_name
+                ));
+            }
+        }
+
         // ── Poll until FFmpeg exits or we're told to stop ──────────────
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -188,6 +231,25 @@ pub async fn supervise_hls(
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;
+
+            // If the uploader detected a wedge, kill FFmpeg so the
+            // next `check_process` call returns an exit status and
+            // routes through the existing restart path.  We swap
+            // rather than load to ensure a single kill even if the
+            // uploader somehow re-raises before the child dies.
+            if stall_flag.swap(false, Ordering::Relaxed) {
+                dash.log_warn(format!(
+                    "[{}] supervisor: pipeline stalled — killing FFmpeg",
+                    camera_name
+                ));
+                tracing::warn!(
+                    "Supervisor killing wedged FFmpeg for camera {}",
+                    camera_id
+                );
+                let _ = generator.stop();
+                // Fall through to check_process — it'll pick up the
+                // exit status on this or the next poll tick.
+            }
 
             let Some(status) = generator.check_process() else {
                 // Still running — keep polling.
@@ -247,7 +309,7 @@ pub async fn supervise_hls(
 fn start_with(
     generator: &mut HlsGenerator,
     source: &PipelineSource,
-) -> crate::error::Result<()> {
+) -> crate::error::Result<String> {
     match source {
         PipelineSource::Device(path) => generator.start_from_device(path),
         PipelineSource::TestPattern(w, h, fps) => generator.start_from_frames(*w, *h, *fps),

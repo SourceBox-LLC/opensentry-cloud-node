@@ -224,11 +224,22 @@ impl Node {
                     motion_cfg,
                     motion_tx.clone(),
                 );
+                // Shared between uploader and supervisor.  The uploader
+                // sets it after ~20s of no new segments; the supervisor
+                // watches it and kills FFmpeg so the restart path fires.
+                // Without this, a wedged-but-alive FFmpeg (V4L2 deadlock,
+                // thermal throttle, USB starvation) would leave the
+                // camera dark in the UI forever since try_wait() only
+                // trips on process exit.
+                let stall_flag = Arc::new(AtomicBool::new(false));
+
                 let dash_for_uploader = dash.clone();
                 let camera_id_for_uploader = camera_id.clone();
+                let stall_for_uploader = stall_flag.clone();
                 let upload_handle = tokio::spawn(async move {
                     if let Err(e) = uploader.start_with_dashboard(
                         dash_for_uploader, cam_name, camera_id_for_uploader,
+                        stall_for_uploader,
                     ).await {
                         tracing::error!("HLS uploader error: {}", e);
                     }
@@ -249,6 +260,7 @@ impl Node {
                     )),
                     camera_name: detected.name.clone(),
                     camera_id: camera_id.clone(),
+                    stall_flag: stall_flag.clone(),
                 };
                 let dash_for_sup = dash.clone();
                 let stop_for_sup = stop_flag.clone();

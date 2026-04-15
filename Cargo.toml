@@ -78,7 +78,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 aes-gcm = "0.10"
 sha2 = "0.10"
 rand = "0.8"
-hostname = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

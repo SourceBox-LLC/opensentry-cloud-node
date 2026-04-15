@@ -50,4 +50,10 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # Volume for persistence
 VOLUME ["/app/data"]
 
+# Tell CloudNode where to persist its fallback machine-ID when /etc/machine-id
+# isn't bind-mounted from the host. The ID lives in the volume so it survives
+# container rebuilds. For stronger encryption (key tied to host, not data
+# volume), run with `-v /etc/machine-id:/etc/machine-id:ro`.
+ENV OPENSENTRY_DATA_DIR=/app/data
+
 ENTRYPOINT ["opensentry-cloudnode"]

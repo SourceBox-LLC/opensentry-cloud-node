@@ -164,7 +164,11 @@ Defaults (configurable via `config.yaml` `motion:` section):
 
 ### Security
 
-The API key is **encrypted at rest** using AES-256-GCM with a machine-derived key (SHA-256 of hostname + application salt). The database is not portable between machines — moving `node.db` to a different host will make the stored key unreadable.
+The API key is **encrypted at rest** using AES-256-GCM with a machine-derived key (SHA-256 of the OS machine identifier + application salt). CloudNode reads the identifier from `/etc/machine-id` on Linux, `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` on Windows, and `IOPlatformUUID` on macOS — values that are set once at OS install time, unique per host, and not user-modifiable. Moving `node.db` to a different host makes the stored key unreadable.
+
+DBs written by older CloudNode versions that derived the key from the hostname are transparently re-encrypted with the new machine-ID-derived key on first load.
+
+**Docker:** Alpine-based images don't ship with `/etc/machine-id`, so CloudNode generates a per-container ID on first run and stores it inside the mounted data volume (`$OPENSENTRY_DATA_DIR/.machine-id`). The ID persists across container rebuilds because it lives in the volume. For stronger encryption — a key tied to the host rather than the data volume — run the container with `-v /etc/machine-id:/etc/machine-id:ro`.
 
 ---
 

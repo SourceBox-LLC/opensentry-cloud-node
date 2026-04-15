@@ -16,7 +16,7 @@ cargo run -- setup       # Force-run the setup wizard
 
 ## Configuration
 
-Config is stored in a **SQLite database** (`data/node.db`). The API key is encrypted at rest using AES-256-GCM with a machine-derived key (SHA-256 of hostname + application salt). The DB is not portable between machines.
+Config is stored in a **SQLite database** (`data/node.db`). The API key is encrypted at rest using AES-256-GCM with a machine-derived key — SHA-256 of the OS machine identifier (`/etc/machine-id` on Linux, `MachineGuid` registry key on Windows, `IOPlatformUUID` on macOS) + an application salt. The DB is not portable between machines. DBs written by older CloudNode versions (hostname-derived key) are transparently migrated to the machine-ID-derived key on first decrypt.
 
 Loading priority (in `Config::load()`):
 
@@ -159,7 +159,7 @@ FFmpeg subprocess transcoding camera → HLS segments:
 SQLite database (`data/node.db`):
 - Snapshots and recordings stored as BLOBs (not exposed in open folders)
 - Config stored as key-value pairs in a `config` table
-- API key encrypted with AES-256-GCM (machine-derived key from hostname)
+- API key encrypted with AES-256-GCM using a key derived from the OS machine ID (`/etc/machine-id` / `MachineGuid` / `IOPlatformUUID`)
 - Retention enforced by `enforce_retention()` — oldest data deleted first when `storage.max_size_gb` is exceeded
 
 ### Local HTTP server (warp, port 8080)
@@ -293,8 +293,7 @@ docker run -d \
 | `inquire` / `indicatif` | Interactive prompts + progress bars (setup wizard) |
 | `colored` | ANSI color formatting |
 | `rusqlite` (bundled) | SQLite database |
-| `aes-gcm` / `sha2` / `rand` | AES-256-GCM encryption for API key at rest |
-| `hostname` | Machine-derived encryption key |
+| `aes-gcm` / `sha2` / `rand` | AES-256-GCM encryption for API key at rest (key derived from OS machine ID) |
 | `bytes` | Zero-copy buffers for segment upload |
 | `base64` | Snapshot image transfer over WebSocket |
 | `chrono` | Timestamps |

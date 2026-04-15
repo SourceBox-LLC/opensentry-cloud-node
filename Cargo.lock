@@ -1402,6 +1402,7 @@ dependencies = [
  "futures-util",
  "indicatif",
  "inquire",
+ "libc",
  "once_cell",
  "percent-encoding",
  "rand",

@@ -16,14 +16,132 @@
 //! Linux camera detection using v4l2 API
 //!
 //! Scans for USB cameras on Linux systems by checking /dev/video* devices.
+//!
+//! ## Why this is more than "list /dev/videoN"
+//!
+//! On modern Linux kernels (≥5.x), each UVC USB camera registers
+//! **multiple** `/dev/videoN` nodes — typically one for video capture
+//! and a sibling node for V4L2 metadata (`V4L2_CAP_META_CAPTURE`).
+//! Some drivers register even more (e.g. a separate node for the
+//! ISP/encoder pipeline).  The result is that a single physical
+//! camera can appear as 2–4 device nodes.
+//!
+//! If we naively treat every `/dev/videoN` as a camera and hand it to
+//! FFmpeg, the metadata-only nodes blow up at stream-start with
+//! cryptic exit codes (231, 240) because there's no video stream
+//! there to read — see the production incident on the Raspberry Pi
+//! where 2 physical USB cameras showed up as 4 entries with half of
+//! them stuck in `failed: FFmpeg`.
+//!
+//! Two filters fix it:
+//!   1. Run `VIDIOC_QUERYCAP` on each node and require the
+//!      `V4L2_CAP_VIDEO_CAPTURE` bit — this excludes metadata nodes.
+//!   2. Dedupe by `bus_info` (USB bus path) so multiple capture-capable
+//!      nodes belonging to the same physical camera collapse to one
+//!      entry — the kernel orders these such that the lowest videoN
+//!      is the canonical capture device.
 
+use std::collections::HashSet;
 use std::fs;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use super::CameraDetector;
 use crate::camera::types::CameraCapabilities;
 use crate::camera::DetectedCamera;
 use crate::error::Result;
+
+// ── V4L2 ioctl primitives ──────────────────────────────────────────
+//
+// We deliberately don't pull in the `v4l` crate for one ioctl — the
+// surface here is small and stable (the v4l2_capability struct hasn't
+// changed since kernel 1.4).
+//
+// The VIDIOC_QUERYCAP ioctl number is architecture-independent: the
+// `_IOR('V', 0, struct v4l2_capability)` macro encodes only the
+// direction (READ=2), type ('V'=0x56), nr (0), and struct size (104),
+// which evaluate the same on x86_64, aarch64, and armv7.
+
+/// `V4L2_CAP_VIDEO_CAPTURE` from <linux/videodev2.h>.  Set when a
+/// device node can produce a single-planar video capture stream.
+const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
+
+/// `_IOR('V', 0, struct v4l2_capability)` — query device capabilities.
+/// Same value across all Linux architectures we ship to (x86_64,
+/// aarch64, armv7).
+const VIDIOC_QUERYCAP: libc::c_ulong = 0x8068_5600;
+
+/// Mirrors `struct v4l2_capability` from <linux/videodev2.h>.  Layout
+/// is part of the kernel uABI and stable since v4l2 1.4.  104 bytes
+/// on every architecture.
+#[repr(C)]
+struct V4l2Capability {
+    driver: [u8; 16],
+    card: [u8; 32],
+    bus_info: [u8; 32],
+    version: u32,
+    capabilities: u32,
+    device_caps: u32,
+    reserved: [u32; 3],
+}
+
+/// Result of a `VIDIOC_QUERYCAP` probe — the per-node capability mask
+/// plus the USB bus path we use to dedupe multi-node cameras.
+struct V4l2Caps {
+    /// Effective per-node capabilities (device_caps if the driver
+    /// reports it, otherwise the legacy device-wide `capabilities`).
+    capabilities: u32,
+    /// USB bus path (e.g. "usb-0000:01:00.0-1.2"), used as the dedup
+    /// key.  Empty for non-USB drivers, in which case dedup is a no-op
+    /// for that node.
+    bus_info: String,
+}
+
+/// Open `device_path` and run `VIDIOC_QUERYCAP` on it.
+///
+/// We use `device_caps` (V4L2 1.4+) when the driver fills it because
+/// it's the *per-node* capability set — exactly the discriminator we
+/// need to skip metadata-only sibling nodes.  Older drivers leave
+/// `device_caps == 0` and only fill the union-across-nodes
+/// `capabilities` field; we fall back to it then.
+fn query_v4l2_caps(device_path: &str) -> Result<V4l2Caps> {
+    let file = std::fs::File::open(device_path).map_err(|e| {
+        crate::error::Error::Camera(format!("Cannot open {}: {}", device_path, e))
+    })?;
+
+    // SAFETY: `cap` is plain old data and the kernel will fully
+    // populate it on success.  Zero-init is correct for V4L2 — the
+    // ioctl writes the whole struct, never reads.
+    let mut cap: V4l2Capability = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            VIDIOC_QUERYCAP,
+            &mut cap as *mut V4l2Capability as *mut libc::c_void,
+        )
+    };
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(crate::error::Error::Camera(format!(
+            "VIDIOC_QUERYCAP({}) failed: {}",
+            device_path, err
+        )));
+    }
+
+    let effective = if cap.device_caps != 0 {
+        cap.device_caps
+    } else {
+        cap.capabilities
+    };
+
+    // bus_info comes back NUL-terminated inside a fixed 32-byte buffer
+    // — trim at the first NUL before going through utf8 conversion or
+    // we'll carry trailing garbage into the dedup key.
+    let bus_end = cap.bus_info.iter().position(|&b| b == 0).unwrap_or(cap.bus_info.len());
+    let bus_info = String::from_utf8_lossy(&cap.bus_info[..bus_end]).into_owned();
+
+    Ok(V4l2Caps { capabilities: effective, bus_info })
+}
 
 pub struct LinuxDetector;
 
@@ -36,19 +154,75 @@ impl LinuxDetector {
 impl CameraDetector for LinuxDetector {
     fn detect_cameras(&self) -> Result<Vec<DetectedCamera>> {
         let mut cameras = Vec::new();
+        // Dedup key: kernel `bus_info` string from VIDIOC_QUERYCAP.
+        // First node we see for a given physical camera wins; later
+        // nodes belonging to the same camera (metadata sibling, ISP
+        // pipeline, etc.) are skipped silently.
+        let mut seen_bus_info: HashSet<String> = HashSet::new();
 
         tracing::info!("Scanning for USB cameras on Linux (v4l2)...");
 
-        for i in 0..10u32 {
+        // Bumped from 0..10 to 0..32 because a system with two USB
+        // cameras already reaches /dev/video3 once metadata siblings
+        // are included; a hub plus a built-in webcam plus an HDMI
+        // capture card will easily push past 10.  Existence check is
+        // a single statx — the upper bound is essentially free.
+        for i in 0..32u32 {
             let path = format!("/dev/video{}", i);
 
             if !Path::new(&path).exists() {
                 continue;
             }
 
+            // Filter 1: must support V4L2_CAP_VIDEO_CAPTURE.  This
+            // alone excludes the metadata-only sibling nodes that
+            // every UVC camera registers on modern kernels.
+            let v4l_caps = match query_v4l2_caps(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Open/ioctl failure — could be permissions
+                    // (user not in `video` group), the device just
+                    // got unplugged, or the driver doesn't support
+                    // QUERYCAP.  Skip with a debug log; aborting the
+                    // whole scan would lose the cameras we *can* read.
+                    tracing::debug!("{}: skipping ({})", path, e);
+                    continue;
+                }
+            };
+
+            if v4l_caps.capabilities & V4L2_CAP_VIDEO_CAPTURE == 0 {
+                tracing::debug!(
+                    "{}: not a video capture device (caps=0x{:08x}), skipping",
+                    path, v4l_caps.capabilities
+                );
+                continue;
+            }
+
+            // Filter 2: dedup by bus_info.  A single physical camera
+            // can expose more than one capture-capable node (e.g. an
+            // ISP variant alongside the raw sensor) — without this,
+            // those would all show up as separate cameras and FFmpeg
+            // would race to open the same hardware.
+            //
+            // Empty bus_info (rare — non-USB virtual devices) is
+            // treated as unique so we don't accidentally dedup
+            // unrelated v4l2loopback / vivid devices into one.
+            if !v4l_caps.bus_info.is_empty()
+                && !seen_bus_info.insert(v4l_caps.bus_info.clone())
+            {
+                tracing::debug!(
+                    "{}: duplicate node for camera at bus '{}' (already enumerated), skipping",
+                    path, v4l_caps.bus_info
+                );
+                continue;
+            }
+
             match probe_camera(&path) {
                 Ok(camera) => {
-                    tracing::info!("Detected camera: {} at {}", camera.name, camera.device_path);
+                    tracing::info!(
+                        "Detected camera: {} at {} (bus={})",
+                        camera.name, camera.device_path, v4l_caps.bus_info
+                    );
                     cameras.push(camera);
                 }
                 Err(e) => {
@@ -66,17 +240,15 @@ impl CameraDetector for LinuxDetector {
     }
 }
 
-/// Probe a single camera device for information
+/// Probe a single camera device for descriptive metadata.
+///
+/// Capture-vs-metadata classification and physical-camera dedup
+/// both happen in [`LinuxDetector::detect_cameras`] before this is
+/// called — so by the time we get here, the device is already known
+/// to support `V4L2_CAP_VIDEO_CAPTURE` and to be a unique camera.
 fn probe_camera(device_path: &str) -> Result<DetectedCamera> {
     // Get camera name from sysfs
     let name = get_device_name(device_path)?;
-
-    // Check if this is a video capture device (not just a metadata device)
-    if !is_capture_device(device_path)? {
-        return Err(crate::error::Error::Camera(
-            "Not a video capture device".into(),
-        ));
-    }
 
     // Try common resolutions to find supported ones
     let supported_resolutions = get_supported_resolutions(device_path);
@@ -119,28 +291,13 @@ fn get_device_name(device_path: &str) -> Result<String> {
     Ok(name)
 }
 
-/// Check if device is a video capture device
-fn is_capture_device(device_path: &str) -> Result<bool> {
-    // Linux V4L2 capability: device_caps & V4L2_CAP_VIDEO_CAPTURE
-    // For now, assume it is if we can read basic info
-    let video_num = device_path
-        .trim_start_matches("/dev/video")
-        .parse::<u32>()
-        .map_err(|_| crate::error::Error::Camera("Invalid device path".into()))?;
-
-    let caps_path = format!("/sys/class/video4linux/video{}/dev_caps", video_num);
-
-    match fs::read_to_string(&caps_path) {
-        Ok(content) => {
-            // Check if it's a capture device
-            Ok(content.contains("capture"))
-        }
-        Err(_) => {
-            // If we can't read caps, assume it's valid
-            Ok(true)
-        }
-    }
-}
+// Note: the previous sysfs-based `is_capture_device` (which read
+// `/sys/class/video4linux/videoN/dev_caps` and looked for the literal
+// string "capture") was removed.  That file isn't a stable kernel
+// export — when missing it silently fell through to `Ok(true)` and
+// accepted every node, including the metadata sibling, which is what
+// caused the duplicate-camera bug on the Pi.  The real check now
+// lives in `query_v4l2_caps` and runs against `VIDIOC_QUERYCAP`.
 
 /// Get supported resolutions for a camera
 fn get_supported_resolutions(_device_path: &str) -> Vec<(u32, u32)> {
@@ -180,6 +337,32 @@ fn check_hardware_encoding(_device_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kernel uABI for `struct v4l2_capability` is 104 bytes:
+    /// 16 + 32 + 32 + 4 + 4 + 4 + 12.  If anyone touches the struct
+    /// definition above and the size moves, VIDIOC_QUERYCAP's ioctl
+    /// number (encoded with size=104) becomes wrong and the ioctl
+    /// will silently fail with EINVAL on some kernels — or worse,
+    /// scribble past the buffer.  Lock it down.
+    #[test]
+    fn v4l2_capability_struct_matches_kernel_uabi() {
+        assert_eq!(std::mem::size_of::<V4l2Capability>(), 104);
+    }
+
+    /// Sanity-check the VIDIOC_QUERYCAP magic number — derived
+    /// from `_IOR('V', 0, struct v4l2_capability)`:
+    ///   dir(2) << 30 | size(104) << 16 | type(0x56) << 8 | nr(0)
+    /// = 0x80685600.
+    #[test]
+    fn vidioc_querycap_value_is_correct() {
+        let dir: u64 = 2;
+        let size: u64 = std::mem::size_of::<V4l2Capability>() as u64;
+        let typ: u64 = b'V' as u64;
+        let nr: u64 = 0;
+        let expected = (dir << 30) | (size << 16) | (typ << 8) | nr;
+        assert_eq!(VIDIOC_QUERYCAP as u64, expected);
+        assert_eq!(VIDIOC_QUERYCAP as u64, 0x8068_5600);
+    }
 
     #[test]
     fn test_detect_cameras_runs() {

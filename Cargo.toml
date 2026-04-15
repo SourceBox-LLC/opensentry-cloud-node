@@ -79,6 +79,12 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 rand = "0.8"
 
+# Raw V4L2 ioctl on Linux (camera capability detection).  Already pulled
+# in transitively by tokio/reqwest, but we declare it directly so the
+# unsafe ioctl call in src/camera/platform/linux.rs has a stable surface.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio-test = "0.4"
 

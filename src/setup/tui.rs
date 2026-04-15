@@ -127,15 +127,21 @@ fn check_prerequisites() -> Result<PlatformInfo> {
     flush();
     panel_check(&format!("Platform: {}", platform.display()));
 
-    // Camera
+    // Camera — Pi USB enumeration can lag up to ~10s after boot, so we
+    // probe repeatedly instead of giving up on the first empty result.
+    // Total budget is ~15s; on Windows the first probe almost always wins.
     panel_spinner_row(&spinner.advance(), "Detecting cameras...");
     flush();
     thread::sleep(Duration::from_millis(300));
-    let cameras = crate::camera::detect_cameras()?;
+    let cameras = detect_cameras_with_retry(&mut spinner, &platform)?;
     print!("\r");
     flush();
     if cameras.is_empty() {
         panel_error("No cameras detected — connect a USB camera and restart");
+        if platform.is_linux {
+            panel_sub("On Raspberry Pi, check: ls /dev/video* and v4l2-ctl --list-devices");
+            panel_sub("Add your user to the 'video' group if permissions are the issue");
+        }
         panel_blank();
         panel_bottom();
         std::process::exit(1);
@@ -162,8 +168,18 @@ fn check_prerequisites() -> Result<PlatformInfo> {
         } else {
             panel_check("FFmpeg: installed");
         }
+    } else if platform.is_windows {
+        // Windows auto-downloads a bundled ffmpeg later in the wizard
+        // (see `download_ffmpeg_with_progress`). Linux/macOS don't have
+        // that path — say so explicitly so a Pi user doesn't sit waiting
+        // for a download that never fires.
+        panel_warn("FFmpeg not found — will be downloaded automatically");
+    } else if platform.is_linux {
+        panel_warn("FFmpeg not found — install with: sudo apt install ffmpeg");
+    } else if platform.is_macos {
+        panel_warn("FFmpeg not found — install with: brew install ffmpeg");
     } else {
-        panel_warn("FFmpeg not found — will be downloaded automatically (Windows)");
+        panel_warn("FFmpeg not found — install via your system package manager");
     }
 
     // Network
@@ -179,6 +195,60 @@ fn check_prerequisites() -> Result<PlatformInfo> {
     println!();
 
     Ok(platform)
+}
+
+/// Probe for cameras repeatedly while the spinner animates.
+///
+/// Why this exists: on a Raspberry Pi booted directly into the setup
+/// wizard, USB camera enumeration can lag several seconds behind
+/// userspace — the kernel is still binding the uvcvideo driver while
+/// we're already calling `v4l2-ctl --list-devices`. A single-shot probe
+/// wrongly reports "no cameras" and hard-exits. On Windows the first
+/// probe essentially always succeeds, so a short retry there is a
+/// no-op in practice.
+///
+/// Budget:
+/// - Linux: ~15s total (50 attempts × ~300ms) — covers boot-time USB
+///   enumeration even on slow SD cards.
+/// - Windows/macOS: ~2s total (6 attempts × ~300ms) — belt-and-braces
+///   against a transiently busy DirectShow / AVFoundation enumerator.
+fn detect_cameras_with_retry(
+    spinner: &mut Spinner,
+    platform: &PlatformInfo,
+) -> Result<Vec<crate::camera::DetectedCamera>> {
+    let max_attempts = if platform.is_linux { 50 } else { 6 };
+
+    for attempt in 0..max_attempts {
+        // Any probe error (e.g. v4l2-ctl missing) is surfaced immediately
+        // — retrying won't conjure a tool that isn't installed.
+        let cameras = crate::camera::detect_cameras()?;
+        if !cameras.is_empty() {
+            return Ok(cameras);
+        }
+
+        // Don't sleep after the final attempt.
+        if attempt + 1 == max_attempts {
+            break;
+        }
+
+        // Keep the spinner animating with a hint so the operator knows
+        // we're waiting on them, not hung. Hint only fires on Linux
+        // where the wait is long enough to notice.
+        let hint = if platform.is_linux && attempt >= 3 {
+            "Detecting cameras... (waiting for USB enumeration)"
+        } else {
+            "Detecting cameras..."
+        };
+        panel_spinner_row(&spinner.advance(), hint);
+        flush();
+        thread::sleep(Duration::from_millis(300));
+        // Rewind so the next row replaces the spinner in place.
+        print!("\r");
+        flush();
+    }
+
+    // Exhausted budget — caller handles the empty-result UX.
+    Ok(Vec::new())
 }
 
 // ─── Step 2: Configure ───────────────────────────────────────────────────────

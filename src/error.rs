@@ -33,6 +33,18 @@ pub enum Error {
     #[error("API error: {0}")]
     Api(String),
 
+    /// HTTP error from the backend where we know the exact status code.
+    ///
+    /// Callers that want to make retry decisions (is this a 429 we should
+    /// back off on, or a 403 we should give up on?) should prefer this
+    /// variant over the stringly-typed ``Api``.  Parsing status out of a
+    /// human-readable message is fragile — see the commit that introduced
+    /// this variant for the bug that motivated it (push-segment retries
+    /// silently never firing because the matcher looked for "failed: 429"
+    /// and the producer emitted "failed (429):").
+    #[error("API error ({status}): {message}")]
+    ApiStatus { status: u16, message: String },
+
     #[error("HTTP server error: {0}")]
     Server(String),
 

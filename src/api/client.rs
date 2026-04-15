@@ -238,8 +238,12 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Push an HLS segment directly to the backend's in-memory cache.
-    /// Replaces the old Tigris presigned URL flow — no S3 involved.
+    /// Push an HLS segment to the backend's in-memory cache where the
+    /// browser picks it up via the same-origin proxy.
+    ///
+    /// Returns ``Err(Error::ApiStatus)`` on any non-2xx response so the
+    /// caller (``SegmentUploader``) can make retry decisions on the numeric
+    /// status rather than string-matching the error message.
     pub async fn push_segment(
         &self,
         camera_id: &str,
@@ -261,9 +265,12 @@ impl ApiClient {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(Error::Api(format!("Push segment failed ({}): {}", status, body)));
+            return Err(Error::ApiStatus {
+                status,
+                message: format!("Push segment failed: {}", body),
+            });
         }
 
         Ok(())

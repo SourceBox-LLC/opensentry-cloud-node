@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::api::ApiClient;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Upload task
 pub struct UploadTask {
@@ -43,9 +43,10 @@ pub struct UploaderConfig {
 
 impl Default for UploaderConfig {
     fn default() -> Self {
-        Self {
-            retry_count: 3,
-        }
+        // Four attempts gives us a ~3.75s total budget — long enough for a
+        // Fly.io machine cold-start (which is typically 1-2s) without
+        // building a per-camera backlog at the 1s segment cadence.
+        Self { retry_count: 4 }
     }
 }
 
@@ -83,7 +84,7 @@ impl SegmentUploader {
 
         let filename = format!("segment_{:05}.ts", task.sequence);
         let data_bytes: bytes::Bytes = data.into();
-        let mut attempts = 0;
+        let mut attempts = 0u32;
         let max_attempts = self.config.retry_count;
 
         loop {
@@ -91,7 +92,7 @@ impl SegmentUploader {
                 Ok(()) => break,
                 Err(e) if Self::is_retryable(&e) && attempts < max_attempts => {
                     attempts += 1;
-                    let delay_ms = 50 * (1u64 << attempts.min(2)); // 100, 200, 200ms
+                    let delay_ms = Self::backoff_ms(attempts);
                     tracing::warn!(
                         "Push attempt {}/{} failed ({}), retrying in {}ms...",
                         attempts, max_attempts, e, delay_ms,
@@ -111,21 +112,33 @@ impl SegmentUploader {
         Ok(true)
     }
 
+    /// Backoff schedule: 250 → 500 → 1000 → 2000ms, capped at 2s.
+    ///
+    /// Long enough to ride out a Fly cold-start but short enough that
+    /// four attempts total under 4s — we'd rather drop a segment than
+    /// let a per-camera queue grow at 1 segment/second.
+    fn backoff_ms(attempt: u32) -> u64 {
+        let base = 250u64;
+        base.saturating_mul(1u64 << (attempt.saturating_sub(1)).min(3))
+            .min(2_000)
+    }
+
     /// Check if an error is retryable (transient network/server error).
-    fn is_retryable(err: &crate::error::Error) -> bool {
+    ///
+    /// Matches on the numeric HTTP status from ``Error::ApiStatus``.  The
+    /// previous implementation did prefix-string matching against the
+    /// human-readable error message and silently broke when the producer's
+    /// format changed — see the ``ApiStatus`` docstring.
+    fn is_retryable(err: &Error) -> bool {
         match err {
-            crate::error::Error::Api(msg) => {
-                let retryable_prefixes = [
-                    "Push segment failed: 408",
-                    "Push segment failed: 429",
-                    "Push segment failed: 500",
-                    "Push segment failed: 502",
-                    "Push segment failed: 503",
-                    "Push segment failed: 504",
-                ];
-                retryable_prefixes.iter().any(|p| msg.starts_with(p))
-            }
-            crate::error::Error::HttpClient(_) => true, // reqwest errors (timeouts, connection resets)
+            Error::ApiStatus { status, .. } => matches!(
+                *status,
+                // Request timeout / rate limit / 5xx family — all transient.
+                408 | 429 | 500 | 502 | 503 | 504,
+            ),
+            // reqwest transport failures (DNS, TCP reset, TLS handshake,
+            // read timeout) — almost always worth one more attempt.
+            Error::HttpClient(_) => true,
             _ => false,
         }
     }
@@ -138,7 +151,7 @@ mod tests {
     #[test]
     fn test_uploader_config_default() {
         let config = UploaderConfig::default();
-        assert_eq!(config.retry_count, 3);
+        assert_eq!(config.retry_count, 4);
     }
 
     #[test]
@@ -150,5 +163,51 @@ mod tests {
         };
         assert_eq!(task.camera_id, "camera_123");
         assert_eq!(task.sequence, 42);
+    }
+
+    // ── Retry classification ────────────────────────────────────────
+
+    #[test]
+    fn retryable_for_backend_429() {
+        let e = Error::ApiStatus { status: 429, message: "rate limit".into() };
+        assert!(SegmentUploader::is_retryable(&e));
+    }
+
+    #[test]
+    fn retryable_for_all_5xx_and_408() {
+        for status in [408u16, 429, 500, 502, 503, 504] {
+            let e = Error::ApiStatus { status, message: "x".into() };
+            assert!(SegmentUploader::is_retryable(&e), "status {status} should retry");
+        }
+    }
+
+    #[test]
+    fn not_retryable_for_client_errors() {
+        // 401/403 mean the node's key is wrong — retrying won't help.
+        // 400/404 mean the request is malformed — ditto.
+        for status in [400u16, 401, 403, 404, 422] {
+            let e = Error::ApiStatus { status, message: "x".into() };
+            assert!(!SegmentUploader::is_retryable(&e), "status {status} should NOT retry");
+        }
+    }
+
+    #[test]
+    fn plain_api_error_not_retryable() {
+        // A stringly-typed error (non-HTTP) shouldn't be retried blindly.
+        let e = Error::Api("Node not registered".into());
+        assert!(!SegmentUploader::is_retryable(&e));
+    }
+
+    // ── Backoff schedule ────────────────────────────────────────────
+
+    #[test]
+    fn backoff_schedule_doubles_and_caps() {
+        assert_eq!(SegmentUploader::backoff_ms(1), 250);
+        assert_eq!(SegmentUploader::backoff_ms(2), 500);
+        assert_eq!(SegmentUploader::backoff_ms(3), 1_000);
+        assert_eq!(SegmentUploader::backoff_ms(4), 2_000);
+        // Cap holds even if a future dev bumps the retry count.
+        assert_eq!(SegmentUploader::backoff_ms(5), 2_000);
+        assert_eq!(SegmentUploader::backoff_ms(99), 2_000);
     }
 }

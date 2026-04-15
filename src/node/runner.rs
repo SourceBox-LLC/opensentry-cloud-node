@@ -93,6 +93,11 @@ impl Node {
         let dash = Dashboard::new(&node_id, &self.config.cloud.api_url);
         dash.set_settings(self.build_settings_info());
         dash.set_db(self.db.clone(), self.hls_output_dir.clone());
+        // Pass the API client so `/wipe confirm` can ask the backend
+        // to delete our node record before we erase local state.
+        // Without this the backend would keep the node row forever as
+        // "offline" and happily re-pair on the next setup run.
+        dash.set_api_client(self.api_client.clone());
         dash.load_logs_from_db();
 
         // Install dashboard into the tracing layer so all tracing::info!() etc.

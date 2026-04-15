@@ -46,6 +46,7 @@ use crossterm::{
     terminal,
 };
 
+use crate::api::ApiClient;
 use crate::storage::NodeDatabase;
 
 // ─── Box drawing ────────────────────────────────────────────────────────────
@@ -193,6 +194,9 @@ pub struct DashboardState {
     pub db: Option<NodeDatabase>,
     /// HLS output directory (for cleanup on /wipe)
     pub hls_dir: Option<PathBuf>,
+    /// API client (for /wipe backend decommission).  Optional because
+    /// dashboards created in test-mode / `run_once` don't have one.
+    pub api_client: Option<ApiClient>,
 }
 
 impl DashboardState {
@@ -213,6 +217,7 @@ impl DashboardState {
             settings: SettingsInfo::default(),
             db: None,
             hls_dir: None,
+            api_client: None,
         }
     }
 
@@ -326,6 +331,16 @@ impl Dashboard {
         if let Ok(mut s) = self.0.lock() {
             s.db = Some(db);
             s.hls_dir = Some(hls_dir);
+        }
+    }
+
+    /// Inject the API client so `/wipe confirm` can call the backend's
+    /// `POST /api/nodes/self/decommission` before scrubbing local state.
+    /// Optional — if no client is set, `/wipe` falls back to the
+    /// local-only behaviour (data wiped, backend entry left as stale).
+    pub fn set_api_client(&self, api_client: ApiClient) {
+        if let Ok(mut s) = self.0.lock() {
+            s.api_client = Some(api_client);
         }
     }
 
@@ -546,7 +561,10 @@ impl Dashboard {
             lines.push(settings_divider("ACTIONS", divider_w));
             lines.push(settings_action("/set <key> <val>", "Change a setting"));
             lines.push(settings_action("/export-logs", "Save all logs to a file"));
-            lines.push(settings_action("/wipe", "Erase all data and reset this node"));
+            lines.push(settings_action(
+                "/wipe",
+                "Unpair from Command Center and erase all local data",
+            ));
             lines.push(settings_action("/reauth", "Clear credentials and re-run setup"));
             lines.push(String::new());
 
@@ -957,7 +975,7 @@ impl Dashboard {
                         "Settings commands:".to_string(),
                         "  /set <key> <value>   Change a setting".to_string(),
                         "  /export-logs         Save logs to file".to_string(),
-                        "  /wipe                Erase all data".to_string(),
+                        "  /wipe                Unpair & erase all data".to_string(),
                         "  /reauth              Reset credentials".to_string(),
                         "  /back                Return to dashboard".to_string(),
                         "  /quit                Stop the node".to_string(),
@@ -1120,35 +1138,89 @@ impl Dashboard {
                 let confirm = args.first().copied() == Some("confirm");
                 if !confirm {
                     self.set_output(vec![
-                        "This will permanently delete ALL stored data:".to_string(),
-                        "  - Snapshots, recordings, config".to_string(),
+                        "This will permanently delete ALL data and unpair from Command Center:"
+                            .to_string(),
+                        "  - Tell the backend to delete this node's record".to_string(),
+                        "  - Local snapshots, recordings, config".to_string(),
                         "  - HLS segment cache".to_string(),
+                        String::new(),
+                        "The node will shut down. Run setup again with a NEW".to_string(),
+                        "node ID / API key from Command Center to re-pair.".to_string(),
                         String::new(),
                         "Type /wipe confirm to proceed.".to_string(),
                     ]);
                 } else {
-                    let result = if let Ok(s) = self.0.lock() {
-                        let mut ok = true;
-                        if let Some(ref db) = s.db {
-                            if let Err(e) = db.wipe_all() {
-                                self.log_error(format!("DB wipe failed: {}", e));
-                                ok = false;
-                            }
+                    // Snapshot what we need out of the lock before doing
+                    // anything blocking — we can't hold the Mutex across
+                    // the tokio Runtime::block_on call below.
+                    let (api_client, db, hls_dir) = match self.0.lock() {
+                        Ok(s) => (s.api_client.clone(), s.db.clone(), s.hls_dir.clone()),
+                        Err(_) => {
+                            self.set_output(vec!["Wipe failed — state lock poisoned.".to_string()]);
+                            return;
                         }
-                        if let Some(ref hls) = s.hls_dir {
-                            if hls.exists() {
-                                let _ = std::fs::remove_dir_all(hls);
-                            }
-                        }
-                        ok
-                    } else {
-                        false
                     };
-                    if result {
-                        self.set_output(vec![
-                            "All data erased. Shutting down…".to_string(),
-                            "Run setup again to reconfigure.".to_string(),
-                        ]);
+
+                    // ── Step 1: tell the backend to delete our node record ──
+                    // Done first so a successful unpair is logged *before*
+                    // we erase the credentials we'd need to retry.
+                    // Failure is non-fatal: the operator already confirmed
+                    // the destructive action, so we proceed with the local
+                    // wipe either way and surface the outcome.
+                    let backend_outcome: Result<(), String> = if let Some(client) = api_client {
+                        // Dashboard runs on its own std::thread, not a tokio
+                        // task, so spinning up a throwaway current-thread
+                        // runtime here is safe and cheap.
+                        match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(rt) => rt
+                                .block_on(client.decommission())
+                                .map_err(|e| e.to_string()),
+                            Err(e) => Err(format!("runtime init failed: {}", e)),
+                        }
+                    } else {
+                        // Test-mode / run_once path — no client to call.
+                        // Treat as "skipped" rather than "failed" in the UI.
+                        Err("no API client configured".to_string())
+                    };
+
+                    // ── Step 2: local wipe (always runs) ───────────────────
+                    let mut local_ok = true;
+                    if let Some(ref db) = db {
+                        if let Err(e) = db.wipe_all() {
+                            self.log_error(format!("DB wipe failed: {}", e));
+                            local_ok = false;
+                        }
+                    }
+                    if let Some(ref hls) = hls_dir {
+                        if hls.exists() {
+                            let _ = std::fs::remove_dir_all(hls);
+                        }
+                    }
+
+                    // ── Step 3: report and shut down ──────────────────────
+                    if local_ok {
+                        let mut output = Vec::new();
+                        match &backend_outcome {
+                            Ok(()) => {
+                                output.push("Backend unpaired ✓".to_string());
+                                self.log_warn("Node decommissioned on backend");
+                            }
+                            Err(e) => {
+                                output.push(format!("Backend unpair failed: {}", e));
+                                output.push(
+                                    "  (node record may still exist in Command Center — "
+                                        .to_string(),
+                                );
+                                output.push("   delete it manually from the dashboard)".to_string());
+                                self.log_warn(format!("Backend decommission failed: {}", e));
+                            }
+                        }
+                        output.push("All local data erased. Shutting down…".to_string());
+                        output.push("Run setup again to pair a new node.".to_string());
+                        self.set_output(output);
                         self.log_warn("Data wiped — shutting down");
                         stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     } else {

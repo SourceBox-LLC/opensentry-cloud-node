@@ -307,6 +307,39 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Decommission this node server-side (node-initiated factory reset).
+    ///
+    /// Called by `/wipe confirm` in the TUI before the local wipe runs.
+    /// The backend identifies us by API key (same auth as heartbeat/push)
+    /// and deletes the `CameraNode` row, cascading to cameras and any
+    /// in-memory segment cache.
+    ///
+    /// Deliberately has no retry logic — the caller wants a quick
+    /// thumbs-up/thumbs-down so they can either report "backend
+    /// unpaired" or "backend unreachable, wiped local only" in the same
+    /// TUI frame. Retrying here would just delay the inevitable local
+    /// wipe (which the operator already confirmed).
+    pub async fn decommission(&self) -> Result<()> {
+        let response = self
+            .client
+            .post(format!("{}/api/nodes/self/decommission", self.base_url))
+            .header("X-Node-API-Key", &self.api_key)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api(format!(
+                "Decommission failed ({}): {}",
+                status, body
+            )));
+        }
+
+        tracing::info!("Node decommissioned on backend");
+        Ok(())
+    }
+
     /// Update the HLS playlist on the server
     pub async fn update_playlist(&self, camera_id: &str, playlist_content: &str) -> Result<()> {
         let _node_id = self.node_id.as_ref()

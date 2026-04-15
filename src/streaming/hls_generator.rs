@@ -350,6 +350,15 @@ impl HlsGenerator {
             return Err(crate::error::Error::Streaming("Already running".into()));
         }
 
+        // Pre-flight: confirm the device actually exists before we hand
+        // it to FFmpeg.  FFmpeg's failure mode on a missing /dev/videoN
+        // is a cryptic async death 500ms after spawn — catching it here
+        // turns that into an actionable error at the call site, and
+        // prevents the `running` flag from being set on a doomed start.
+        // Windows/macOS branches of this helper are no-ops since their
+        // "device paths" aren't filesystem entries.
+        crate::camera::validate_device_available(device_path)?;
+
         self.running.store(true, Ordering::SeqCst);
 
         let playlist_path = self.config.output_dir.join(&self.config.playlist_name);

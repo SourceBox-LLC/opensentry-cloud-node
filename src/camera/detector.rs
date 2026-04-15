@@ -21,7 +21,9 @@
 use super::types::CameraCapabilities;
 use crate::error::Result;
 
-pub use crate::camera::platform::{create_detector, is_valid_device_path, CameraDetector};
+pub use crate::camera::platform::{
+    create_detector, is_valid_device_path, validate_device_available, CameraDetector,
+};
 
 /// Information about a detected camera
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -120,5 +122,55 @@ mod tests {
             assert!(is_valid_device_path("1"));
             assert!(!is_valid_device_path("invalid"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_device_available_missing_path_reports_not_found() {
+        // A path we're confident will never exist — the message must
+        // steer the operator toward USB / WSL passthrough, not some
+        // generic "IO error".  The specific check here is that the
+        // "not found" branch produced the message, not the permissions
+        // branch.
+        let result = validate_device_available("/dev/definitely-not-a-real-video-device-12345");
+        let err = result.expect_err("missing device must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "expected 'not found' guidance, got: {msg}"
+        );
+        assert!(
+            msg.contains("USB") || msg.contains("WSL"),
+            "expected USB/WSL guidance, got: {msg}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_device_available_rejects_non_char_device() {
+        // A regular file at a path shouldn't be accepted as a v4l2
+        // device — FFmpeg would happily try to open it as a media
+        // file and fail in confusing ways.
+        let tmp = std::env::temp_dir().join("opensentry_test_not_a_video_device");
+        std::fs::write(&tmp, b"this is not a video device").unwrap();
+        let result = validate_device_available(tmp.to_str().unwrap());
+        std::fs::remove_file(&tmp).ok();
+
+        let err = result.expect_err("regular file must be rejected");
+        assert!(
+            err.to_string().contains("not a character device"),
+            "expected char-device rejection, got: {err}"
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn test_validate_device_available_is_noop_on_non_linux() {
+        // DShow names and AVFoundation indices have no filesystem
+        // presence to probe — the validator must pass through without
+        // touching the disk.
+        assert!(validate_device_available("Integrated Camera").is_ok());
+        assert!(validate_device_available("0").is_ok());
+        assert!(validate_device_available("").is_ok());
     }
 }

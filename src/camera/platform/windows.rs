@@ -142,23 +142,11 @@ impl CameraDetector for WindowsDetector {
 }
 
 impl WindowsDetector {
-    /// Find FFmpeg executable - check local path first, then system PATH
+    /// Find FFmpeg executable — delegates to the shared
+    /// `streaming::find_ffmpeg` so detection and runtime use the same
+    /// search order (bundled ./ffmpeg/bin/ffmpeg.exe, then PATH).
     fn find_ffmpeg(&self) -> String {
-        // Check local ffmpeg directory (downloaded by setup)
-        let local_ffmpeg = std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.join("ffmpeg").join("bin").join("ffmpeg.exe"));
-
-        if let Some(path) = local_ffmpeg {
-            if path.exists() {
-                tracing::debug!("Using FFmpeg from: {:?}", path);
-                return path.to_string_lossy().to_string();
-            }
-        }
-
-        // Fall back to system PATH
-        tracing::debug!("Using FFmpeg from system PATH");
-        "ffmpeg".to_string()
+        crate::streaming::find_ffmpeg()
     }
 }
 

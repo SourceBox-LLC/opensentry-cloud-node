@@ -865,18 +865,11 @@ fn download_ffmpeg_with_progress() -> Result<()> {
     Ok(())
 }
 
-/// Find FFmpeg path for setup probing (same logic as HlsGenerator::find_ffmpeg)
+/// Find FFmpeg path for setup probing — delegates to the shared
+/// `streaming::find_ffmpeg` so the setup detection matches what the
+/// running node will actually use (including Linux/macOS fallback paths).
 fn find_ffmpeg_for_setup() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
-            if local.exists() {
-                return local.to_string_lossy().to_string();
-            }
-        }
-    }
-    "ffmpeg".to_string()
+    crate::streaming::find_ffmpeg()
 }
 
 /// Save a config key-value pair to the SQLite database.

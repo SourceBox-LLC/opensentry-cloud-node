@@ -235,36 +235,15 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
     })
 }
 
-/// Find FFprobe executable
-///
-/// Order of precedence:
-/// 1. Local ffmpeg/bin/ffprobe.exe (Windows)
-/// 2. System PATH
+/// Find FFprobe — delegates to the shared `streaming::find_ffprobe` so
+/// bundled paths and platform-aware fallbacks stay in one place.
 fn find_ffprobe() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        // Check local ffmpeg directory (downloaded by setup)
-        let local_ffprobe = "./ffmpeg/bin/ffprobe.exe";
-        if std::path::Path::new(local_ffprobe).exists() {
-            tracing::debug!("[Codec] Using local FFprobe: {}", local_ffprobe);
-            return local_ffprobe.to_string();
-        }
-    }
-
-    // Use system FFprobe
-    "ffprobe".to_string()
+    super::find_ffprobe()
 }
 
-/// Find FFmpeg executable
+/// Find FFmpeg — delegates to the shared `streaming::find_ffmpeg`.
 fn find_ffmpeg() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        let local_ffmpeg = "./ffmpeg/bin/ffmpeg.exe";
-        if std::path::Path::new(local_ffmpeg).exists() {
-            return local_ffmpeg.to_string();
-        }
-    }
-    "ffmpeg".to_string()
+    super::find_ffmpeg()
 }
 
 /// Detect codec by capturing a single frame from camera during setup

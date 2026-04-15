@@ -34,18 +34,72 @@ pub use hls_uploader::HlsUploaderConfig;
 pub use segment_uploader::SegmentUploader;
 pub use segment_uploader::UploaderConfig;
 
-/// Find FFmpeg executable — local bundled copy first, then system PATH.
+/// Find FFmpeg executable — local bundled copy first, then common install
+/// paths, then system PATH.
+///
+/// The PATH fallback is the traditional behaviour, but under a restricted
+/// environment (e.g. a systemd unit where PATH=/usr/bin) bare `ffmpeg`
+/// resolution can fail even when ffmpeg is installed at `/usr/local/bin`
+/// or `/opt/homebrew/bin`.  Probing those locations explicitly removes a
+/// class of "works in my shell but not as a service" surprises.
 ///
 /// Shared by hls_generator, motion_detector, and websocket snapshot handler.
 pub fn find_ffmpeg() -> String {
+    find_tool("ffmpeg")
+}
+
+/// Find FFprobe executable — same rules as `find_ffmpeg`.
+pub fn find_ffprobe() -> String {
+    find_tool("ffprobe")
+}
+
+/// Platform-aware executable lookup for FFmpeg-family tools.
+///
+/// `name` is the bare name ("ffmpeg" or "ffprobe"); the Windows branch
+/// appends `.exe` automatically.
+fn find_tool(name: &str) -> String {
     #[cfg(target_os = "windows")]
     {
+        // Bundled copy shipped by the setup wizard (./ffmpeg/bin/name.exe).
+        let exe_name = format!("{}.exe", name);
         if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
+            let local = cwd.join("ffmpeg").join("bin").join(&exe_name);
             if local.exists() {
                 return local.to_string_lossy().to_string();
             }
         }
+        return name.to_string(); // fall through to PATH
     }
-    "ffmpeg".to_string()
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1. Bundled copy next to the binary (./ffmpeg/bin/name), if any.
+        if let Ok(cwd) = std::env::current_dir() {
+            let local = cwd.join("ffmpeg").join("bin").join(name);
+            if local.exists() {
+                return local.to_string_lossy().to_string();
+            }
+        }
+
+        // 2. Well-known absolute paths.  Apt/dnf/pacman land in /usr/bin;
+        //    source or manual installs in /usr/local/bin; Homebrew on Apple
+        //    Silicon uses /opt/homebrew/bin; Intel macOS uses /usr/local/bin.
+        //    Checking these explicitly is the difference between "works when
+        //    I run it from my shell" and "works when systemd runs it with
+        //    PATH=/usr/bin:/bin".
+        for candidate in [
+            "/usr/local/bin",
+            "/usr/bin",
+            "/opt/homebrew/bin",
+            "/snap/bin",
+        ] {
+            let p = std::path::Path::new(candidate).join(name);
+            if p.exists() {
+                return p.to_string_lossy().to_string();
+            }
+        }
+
+        // 3. Last resort: bare name — let the OS resolve via PATH.
+        name.to_string()
+    }
 }

@@ -28,5 +28,7 @@ mod detector;
 mod platform;
 mod types;
 
-pub use detector::{detect_cameras, is_valid_device_path, DetectedCamera};
+pub use detector::{
+    detect_cameras, is_valid_device_path, validate_device_available, DetectedCamera,
+};
 pub use types::{CameraCapabilities, CameraStatus};

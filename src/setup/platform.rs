@@ -64,19 +64,12 @@ impl PlatformInfo {
     }
 }
 
-/// Find the FFmpeg executable path — checks local directory first, then PATH.
-/// Same logic as `HlsGenerator::find_ffmpeg()` so the setup check matches runtime.
+/// Find the FFmpeg executable path — delegates to the shared
+/// `streaming::find_ffmpeg` so the setup-time check matches runtime exactly.
+/// Keeping these in sync prevents "setup said ffmpeg was installed but
+/// the node can't find it" mysteries.
 fn find_ffmpeg_path() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join("ffmpeg.exe");
-            if local.exists() {
-                return local.to_string_lossy().to_string();
-            }
-        }
-    }
-    "ffmpeg".to_string()
+    crate::streaming::find_ffmpeg()
 }
 
 /// Check if FFmpeg is available

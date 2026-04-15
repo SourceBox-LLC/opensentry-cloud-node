@@ -525,6 +525,13 @@ fn install_dependencies(config: &SetupConfig, platform: &PlatformInfo) -> Result
                 }
             }
         }
+    } else if matches!(config.deployment_method, DeploymentMethod::WSL2) {
+        // WSL2: the host is Windows but the node will run inside a Linux
+        // distro.  Delegate to the preflight module, which probes WSL,
+        // the distro's ffmpeg, usbipd-win, and connected USB cameras —
+        // auto-installing what it can and printing actionable guidance
+        // for the rest.
+        super::wsl_preflight::run_wsl_preflight_interactive(config)?;
     } else {
         if !super::platform::check_ffmpeg()? {
             if platform.is_linux {

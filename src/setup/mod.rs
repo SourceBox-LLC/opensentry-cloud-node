@@ -23,6 +23,7 @@ pub mod recovery;
 pub mod tui;
 pub mod ui;
 pub mod validator;
+pub mod wsl_preflight;
 
 use anyhow::Result;
 use std::path::PathBuf;

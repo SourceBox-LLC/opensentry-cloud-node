@@ -427,6 +427,12 @@ impl Node {
             }
             let local_ip = get_local_ip();
 
+            // Track the last "update available" hint we logged so we don't
+            // spam the dashboard with the same warning every 30s.  We log
+            // when the value first appears AND when it changes (e.g. a
+            // newer release lands while CloudNode is still running).
+            let mut last_update_hint: Option<String> = None;
+
             loop {
                 // Build a fresh snapshot each tick from the supervisor's
                 // reported state. Unknown IDs fall back to "streaming"
@@ -459,6 +465,20 @@ impl Node {
                                 dash.log_warn("API key rotated by server — updating");
                                 client.update_api_key(new_key);
                             }
+                        }
+                        // Surface "update available" hints from the backend
+                        // exactly once per distinct version so the operator
+                        // sees the nudge without the heartbeat loop turning
+                        // it into a once-per-30s wall of warnings.
+                        if r.update_available != last_update_hint {
+                            if let Some(latest) = &r.update_available {
+                                dash.log_warn(format!(
+                                    "CloudNode update available: {} (running {}). Re-run the installer to update.",
+                                    latest,
+                                    env!("CARGO_PKG_VERSION"),
+                                ));
+                            }
+                            last_update_hint = r.update_available.clone();
                         }
                         // Heartbeat success is silent — no log noise every N seconds
                     }

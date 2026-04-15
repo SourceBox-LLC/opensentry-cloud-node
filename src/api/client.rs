@@ -123,6 +123,11 @@ impl ApiClient {
             node_id: node_id.clone(),
             local_ip: local_ip.map(|s| s.to_string()),
             cameras,
+            // Sent on every heartbeat (not just register) so the backend
+            // sees in-place CloudNode upgrades without us needing to
+            // re-register.  Read from the build at compile time so a
+            // tampered runtime config can't claim a fake version.
+            version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         let response = self.client

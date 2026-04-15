@@ -57,7 +57,11 @@ pub struct RegisterRequest {
     /// Node name
     pub name: String,
 
-    /// Node software version
+    /// Node software version.  Wire name is `node_version` to match the
+    /// backend's Pydantic schema — Pydantic's default `extra="ignore"`
+    /// would silently drop a field called `version`, which is how this
+    /// was broken before.
+    #[serde(rename = "node_version")]
     pub version: String,
 
     /// Detected cameras
@@ -121,6 +125,19 @@ pub struct HeartbeatRequest {
     /// Camera statuses
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cameras: Option<Vec<CameraStatus>>,
+
+    /// CloudNode build version (`env!("CARGO_PKG_VERSION")`).
+    ///
+    /// The backend uses this to gate too-old nodes (HTTP 426) and to flag
+    /// "update available" when we ship a newer release.  Always sent — old
+    /// backends that don't know the field just ignore it via Pydantic's
+    /// extra-field tolerance.
+    ///
+    /// Wire name is `node_version` to match the backend schema.  If this
+    /// serializes as plain `version`, Pydantic drops it and every node
+    /// looks legacy to the gate.
+    #[serde(rename = "node_version")]
+    pub version: String,
 }
 
 /// Camera status for heartbeat
@@ -157,5 +174,85 @@ pub struct HeartbeatResponse {
     /// New API key (if rotated)
     #[serde(default)]
     pub new_api_key: Option<String>,
+
+    /// Newer CloudNode release available (e.g. "0.2.0").
+    ///
+    /// Set when the backend's `LATEST_NODE_VERSION` is ahead of what we
+    /// reported.  CloudNode logs a one-line "update available" warning when
+    /// this changes; we deliberately do NOT auto-update because operators
+    /// are running this on their own hardware.  `None` means we're current.
+    #[serde(default)]
+    pub update_available: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_request_serializes_version_field() {
+        // Backend's Pydantic schema declares `node_version` and defaults to
+        // extra="ignore", so if we ever drop the #[serde(rename)] this
+        // payload would serialize as `version`, Pydantic would silently
+        // drop it, and every node would look legacy to the update gate.
+        // Pin the exact wire key here.
+        let req = HeartbeatRequest {
+            node_id: "nd_42".into(),
+            local_ip: None,
+            cameras: None,
+            version: "0.1.0".into(),
+        };
+        let json: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(json.get("node_version").and_then(|v| v.as_str()), Some("0.1.0"));
+        assert!(json.get("version").is_none(), "must serialize as node_version, not version");
+        assert_eq!(json.get("node_id").and_then(|v| v.as_str()), Some("nd_42"));
+    }
+
+    #[test]
+    fn heartbeat_response_parses_with_update_available() {
+        let raw = r#"{
+            "success": true,
+            "timestamp": "2026-04-14T12:00:00",
+            "update_available": "0.2.0"
+        }"#;
+        let parsed: HeartbeatResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.update_available.as_deref(), Some("0.2.0"));
+        assert!(!parsed.key_rotated);
+    }
+
+    #[test]
+    fn heartbeat_response_parses_without_update_available() {
+        // Backwards compat: an old backend that doesn't set the new field
+        // must still produce a valid response.  #[serde(default)] makes
+        // this work — this test pins the contract.
+        let raw = r#"{
+            "success": true,
+            "timestamp": "2026-04-14T12:00:00"
+        }"#;
+        let parsed: HeartbeatResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.success);
+        assert!(parsed.update_available.is_none());
+    }
+
+    #[test]
+    fn register_request_includes_version() {
+        // Wire key MUST be `node_version` so the backend's Pydantic schema
+        // picks it up.  The historical `version` key was silently dropped
+        // by Pydantic's default extra="ignore", so every CloudNode looked
+        // legacy at register time and the 426 gate never fired.  Pin the
+        // correct name here so the bug can't come back.
+        let req = RegisterRequest {
+            node_id: "nd_42".into(),
+            name: "Test".into(),
+            version: "0.1.0".into(),
+            cameras: vec![],
+            video_codec: None,
+            audio_codec: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(json.get("node_version").and_then(|v| v.as_str()), Some("0.1.0"));
+        assert!(json.get("version").is_none(), "must serialize as node_version, not version");
+    }
 }
 

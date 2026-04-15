@@ -21,7 +21,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
@@ -292,7 +292,60 @@ fn build_heartbeat(camera_ids: &[String], dash: &Dashboard) -> WsMessage {
         payload: serde_json::json!({
             "cameras": cameras,
             "local_ip": local_ip,
+            // Same field as the HTTP heartbeat — backend uses it to gate
+            // too-old nodes and to surface "update available" hints.  Read
+            // from the build at compile time so it always matches the
+            // running binary.
+            "node_version": env!("CARGO_PKG_VERSION"),
         }),
+    }
+}
+
+/// Process the version-compatibility hints the backend can attach to a
+/// heartbeat ack and surface them in the dashboard.
+///
+/// `update_available` fires once per *distinct* version we see (so a long
+/// uptime doesn't repeat the same nudge every 30s).  `unsupported` fires
+/// at most once per process — once the operator has been told to update
+/// they don't need to keep being told until they restart CloudNode.
+fn handle_ack_version_hints(payload: &serde_json::Value, dash: &Dashboard) {
+    static LAST_HINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    static UNSUPPORTED_LOGGED: OnceLock<Mutex<bool>> = OnceLock::new();
+    let last_hint = LAST_HINT.get_or_init(|| Mutex::new(None));
+    let unsupported_logged = UNSUPPORTED_LOGGED.get_or_init(|| Mutex::new(false));
+
+    let update_hint = payload
+        .get("update_available")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Ok(mut guard) = last_hint.lock() {
+        if *guard != update_hint {
+            if let Some(latest) = &update_hint {
+                dash.log_warn(format!(
+                    "CloudNode update available: {} (running {}). Re-run the installer to update.",
+                    latest,
+                    env!("CARGO_PKG_VERSION"),
+                ));
+            }
+            *guard = update_hint;
+        }
+    }
+
+    let unsupported = payload
+        .get("unsupported")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if unsupported {
+        if let Ok(mut guard) = unsupported_logged.lock() {
+            if !*guard {
+                dash.log_warn(format!(
+                    "Backend reports CloudNode {} is below the minimum supported version. Update to keep streaming.",
+                    env!("CARGO_PKG_VERSION"),
+                ));
+                *guard = true;
+            }
+        }
     }
 }
 
@@ -315,7 +368,11 @@ async fn handle_message(
 
     match msg.msg_type.as_str() {
         "ack" => {
-            // Heartbeat acknowledged — silent, no log noise
+            // Heartbeat acknowledged — silent on the happy path, but the
+            // backend may piggyback version-compat hints in the payload.
+            // Both are de-duped at process scope so a long-running node
+            // doesn't repeat the warning every ~30s.
+            handle_ack_version_hints(&msg.payload, dash);
             None
         }
         "command" => {
@@ -611,5 +668,47 @@ mod tests {
         // Malformed but shouldn't panic.
         assert_eq!(redact_api_key("api_key=&next=1"), "api_key=[REDACTED]&next=1");
         assert_eq!(redact_api_key("api_key="), "api_key=[REDACTED]");
+    }
+
+    // ── Version-reporting tests ───────────────────────────────────
+
+    #[test]
+    fn build_heartbeat_includes_node_version() {
+        // Backend's wire-protocol gate keys off this field.  If a refactor
+        // accidentally drops it from the WS payload, every node looks like
+        // an unknown-version legacy node — silently degrades the
+        // "update available" UX without breaking anything else.  Test
+        // catches that regression.
+        let dash = Dashboard::new("nd_test", "http://localhost");
+        let msg = build_heartbeat(&[], &dash);
+        assert_eq!(msg.msg_type, "heartbeat");
+        let version = msg.payload.get("node_version").and_then(|v| v.as_str());
+        assert_eq!(version, Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn handle_ack_version_hints_tolerates_empty_payload() {
+        // Old backends won't set update_available / unsupported.  The hint
+        // handler must not panic or log spurious warnings on a bare ack.
+        let dash = Dashboard::new("nd_test", "http://localhost");
+        handle_ack_version_hints(&serde_json::json!({}), &dash);
+        handle_ack_version_hints(&serde_json::json!({"timestamp": "now"}), &dash);
+    }
+
+    #[test]
+    fn handle_ack_version_hints_accepts_update_payload() {
+        // Smoke test that a well-formed hint payload is accepted without
+        // panicking.  We can't easily assert the dashboard log content
+        // without a fake sink (the dashboard buffers internally), but
+        // exercising the path catches type / lock-poisoning regressions.
+        let dash = Dashboard::new("nd_test", "http://localhost");
+        handle_ack_version_hints(
+            &serde_json::json!({"update_available": "9.9.9"}),
+            &dash,
+        );
+        handle_ack_version_hints(
+            &serde_json::json!({"unsupported": true}),
+            &dash,
+        );
     }
 }

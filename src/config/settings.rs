@@ -229,7 +229,12 @@ pub struct ServerConfig {
     /// HTTP server port
     pub port: u16,
 
-    /// HTTP server bind address
+    /// HTTP server bind address.
+    ///
+    /// Defaults to `127.0.0.1` — the local server has no auth and exposes
+    /// HLS segments, so binding to `0.0.0.0` would let anyone on the LAN
+    /// pull live video. Only change this if you explicitly want LAN-local
+    /// HLS playback and understand the implications.
     pub bind: String,
 }
 
@@ -237,7 +242,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: 8080,
-            bind: "0.0.0.0".to_string(),
+            bind: "127.0.0.1".to_string(),
         }
     }
 }

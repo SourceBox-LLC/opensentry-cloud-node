@@ -46,13 +46,15 @@ storage:
   # Maximum storage size in GB (oldest recordings deleted when exceeded)
   max_size_gb: 64
 
-# HTTP server settings (for serving recordings)
+# HTTP server settings — local HLS preview + Docker healthcheck
 server:
   # Port for HTTP API
   port: 8080
-  
-  # Bind address
-  bind: "0.0.0.0"
+
+  # Bind address. Defaults to 127.0.0.1 because the server has no auth and
+  # exposes HLS segments — binding to 0.0.0.0 lets anyone on the LAN pull
+  # live video. Only change this if you explicitly want LAN-local playback.
+  bind: "127.0.0.1"
 
 # Logging settings
 logging:

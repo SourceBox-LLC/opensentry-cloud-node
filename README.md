@@ -252,15 +252,13 @@ The node runs an HTTP server on port 8080 for local access:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Health check |
+| GET | `/health` | Health check (also used by the Docker `HEALTHCHECK`) |
 | GET | `/hls/{camera_id}/stream.m3u8` | HLS playlist (local) |
-| GET | `/hls/{camera_id}/segment_{n}.ts` | Video segment (local) |
-| GET | `/recordings/list` | JSON list of stored recording filenames |
-| GET | `/recordings/{file}` | Download a stored recording |
-| GET | `/snapshots/list` | JSON list of stored snapshot filenames |
-| GET | `/snapshots/{file}` | Download a stored snapshot |
+| GET | `/hls/{camera_id}/segment_{n}.ts` | Video segment (local) — filename must be `segment_<digits>.ts` |
 
-These are intended for local consumption (e.g. `VITE_LOCAL_HLS=true` on the Command Center frontend). In normal cloud operation the browser fetches video through the backend proxy, not directly from the node.
+The server has **no authentication** and binds to `127.0.0.1` by default — only the local machine can reach it. If you need LAN-local HLS playback (e.g. `VITE_LOCAL_HLS=true` on the Command Center frontend from another device), set `server.bind = "0.0.0.0"` in your config — and understand you're exposing live video to everyone on that network. In normal cloud operation the browser fetches video through the backend proxy, not directly from the node.
+
+Recordings and snapshots now live inside the encrypted SQLite database rather than on the filesystem; the old `/recordings/*` and `/snapshots/*` routes were removed.
 
 **Outbound calls to Command Center** (via `reqwest`):
 

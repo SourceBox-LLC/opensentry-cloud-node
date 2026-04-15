@@ -547,11 +547,7 @@ impl Node {
     }
 
     fn create_http_server_with_hls(&self, hls_cameras: HashMap<String, PathBuf>) -> HttpServer {
-        HttpServer::new_with_hls(
-            self.config.server.clone(),
-            PathBuf::from(&self.config.storage.path),
-            hls_cameras,
-        )
+        HttpServer::new_with_hls(self.config.server.clone(), hls_cameras)
     }
 }
 

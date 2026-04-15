@@ -67,7 +67,7 @@ src/
 │   ├── runner.rs       # Node lifecycle (register, spawn pipelines, dashboard loop)
 │   └── mod.rs
 ├── server/             # Local HTTP server (warp)
-│   ├── http.rs         # Endpoints: /health, /hls/*, /recordings/*, /snapshots/*
+│   ├── http.rs         # Endpoints: /health, /hls/* — binds to 127.0.0.1 by default
 │   └── mod.rs
 ├── setup/              # Interactive TUI setup wizard (crossterm + inquire)
 │   ├── mod.rs          # Setup flow
@@ -168,13 +168,13 @@ Exposes the same `.ts` and `.m3u8` files the uploader pushes to the cloud, so yo
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/health` | Returns `OK` |
+| GET | `/health` | Returns `OK` (also consumed by the Docker HEALTHCHECK) |
 | GET | `/hls/{camera_id}/stream.m3u8` | Local HLS playlist |
-| GET | `/hls/{camera_id}/segment_{n}.ts` | Local segment (validates prefix + extension) |
-| GET | `/recordings/list` | JSON list of stored recording filenames |
-| GET | `/recordings/{file}` | Served from `data/recordings/` |
-| GET | `/snapshots/list` | JSON list of stored snapshot filenames |
-| GET | `/snapshots/{file}` | Served from `data/snapshots/` |
+| GET | `/hls/{camera_id}/segment_{n}.ts` | Local segment — filename must match `segment_<digits>.ts` exactly |
+
+**Security:** the server has no authentication and binds to `127.0.0.1` by default. Only set `server.bind = "0.0.0.0"` if you explicitly want LAN-local HLS playback; changing it exposes live video to anyone on the network.
+
+Recordings and snapshots used to be served here from the filesystem. They now live inside the encrypted SQLite DB and are fetched over the cloud API — the old `/recordings/*` and `/snapshots/*` routes were removed.
 
 ### Outbound API surface
 

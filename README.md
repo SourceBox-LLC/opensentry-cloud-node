@@ -174,7 +174,37 @@ DBs written by older CloudNode versions that derived the key from the hostname a
 
 ## Docker
 
-### Quick run
+Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHub Container Registry on every release tag.
+
+### Quick run (prebuilt image — recommended)
+
+```bash
+docker pull ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
+
+docker run -d \
+  --name opensentry-cloudnode \
+  --device /dev/video0:/dev/video0 \
+  -e OPENSENTRY_NODE_ID=your_node_id \
+  -e OPENSENTRY_API_KEY=your_api_key \
+  -e OPENSENTRY_API_URL=https://your-backend.example.com \
+  -p 8080:8080 \
+  -v ./data:/app/data \
+  ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
+```
+
+Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.4`. Major.minor tags like `:0.1` are also published and float to the newest patch.
+
+### Docker Compose
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+docker-compose up -d
+```
+
+> The bundled `docker-compose.yml` currently builds from source (`build: .`). To use the prebuilt image instead, swap the `build:` line for `image: ghcr.io/sourcebox-llc/opensentry-cloudnode:latest` and run `docker compose pull && docker compose up -d`.
+
+### Build from source (dev / airgapped)
 
 ```bash
 docker build -t opensentry-cloudnode .
@@ -190,14 +220,6 @@ docker run -d \
   opensentry-cloudnode
 ```
 
-### Docker Compose
-
-```bash
-cp .env.example .env
-# Edit .env with your credentials
-docker-compose up -d
-```
-
 ### Multiple cameras
 
 Pass each device to the container:
@@ -210,7 +232,7 @@ docker run -d \
   -e OPENSENTRY_API_KEY=your_api_key \
   -e OPENSENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
-  opensentry-cloudnode
+  ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
 ```
 
 ---

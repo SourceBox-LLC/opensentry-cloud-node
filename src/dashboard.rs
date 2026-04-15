@@ -568,12 +568,40 @@ impl Dashboard {
             lines.push(settings_action("/reauth", "Clear credentials and re-run setup"));
             lines.push(String::new());
 
-            // Render with padding
+            // Render settings content
             for line in &lines {
                 out.push_str(&panel_row_str(line, w));
                 out.push('\n');
             }
-            for _ in lines.len()..content_rows {
+
+            // ── Command output panel (persistent, above footer) ─────────────
+            // Same as the Main view's command output panel. Without this, any
+            // output set by /set /wipe /reauth /export-logs while on the
+            // settings page is invisible — the user types the command, it
+            // runs, but they see no feedback (looks like "nothing happened").
+            let cmd_output_rows = if state.command_output.is_empty() {
+                0
+            } else {
+                state.command_output.len() + 1 // +1 for the divider bar
+            };
+            if !state.command_output.is_empty() {
+                out.push_str(&format!(
+                    "{}{}{}\x1B[K\n",
+                    cyan_bold(ML),
+                    cyan_bold(&H.repeat(w.saturating_sub(2))),
+                    cyan_bold(MR),
+                ));
+                for line in &state.command_output {
+                    let content = format!("  {}", line);
+                    let truncated = truncate_ansi(&content, w.saturating_sub(4));
+                    out.push_str(&panel_row_str(&truncated, w));
+                    out.push('\n');
+                }
+            }
+
+            // Pad remaining vertical space so the footer lands at the bottom.
+            let used = lines.len() + cmd_output_rows;
+            for _ in used..content_rows {
                 out.push_str(&panel_row_str("", w));
                 out.push('\n');
             }

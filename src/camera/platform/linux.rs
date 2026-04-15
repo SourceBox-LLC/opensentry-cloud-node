@@ -33,13 +33,22 @@
 //! where 2 physical USB cameras showed up as 4 entries with half of
 //! them stuck in `failed: FFmpeg`.
 //!
-//! Two filters fix it:
-//!   1. Run `VIDIOC_QUERYCAP` on each node and require the
-//!      `V4L2_CAP_VIDEO_CAPTURE` bit — this excludes metadata nodes.
-//!   2. Dedupe by `bus_info` (USB bus path) so multiple capture-capable
-//!      nodes belonging to the same physical camera collapse to one
-//!      entry — the kernel orders these such that the lowest videoN
-//!      is the canonical capture device.
+//! Four filters fix it (see [`LinuxDetector::detect_cameras`]):
+//!   1. **Capability check** — `VIDIOC_QUERYCAP` must report
+//!      `V4L2_CAP_VIDEO_CAPTURE`.  Excludes metadata-only siblings.
+//!   2. **M2M reject** — drop nodes that set `V4L2_CAP_VIDEO_M2M` or
+//!      `V4L2_CAP_VIDEO_M2M_MPLANE`.  These are codecs/transformers
+//!      that need a frame pushed in before they emit one — FFmpeg
+//!      can't capture from them and dies with EINVAL.
+//!   3. **Driver blacklist** — Raspberry Pi's `bcm2835-isp` and
+//!      `bcm2835-codec` drivers register single-direction capture
+//!      nodes (so the M2M check doesn't catch them) but they're
+//!      ISP/codec processing pipelines, not real camera sources.
+//!      They load by default on Pi OS even with no CSI camera
+//!      attached, so we have to filter them by driver name.
+//!   4. **bus_info dedup** — multiple capture-capable nodes from the
+//!      same physical USB device collapse to one entry; the kernel
+//!      orders these such that the lowest videoN is canonical.
 
 use std::collections::HashSet;
 use std::fs;
@@ -66,6 +75,30 @@ use crate::error::Result;
 /// device node can produce a single-planar video capture stream.
 const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
 
+/// `V4L2_CAP_VIDEO_M2M_MPLANE` — multi-planar memory-to-memory.
+/// Codec/transform devices set this; they're never real cameras.
+const V4L2_CAP_VIDEO_M2M_MPLANE: u32 = 0x0000_4000;
+
+/// `V4L2_CAP_VIDEO_M2M` — single-planar memory-to-memory.  Same
+/// reasoning as above.
+const V4L2_CAP_VIDEO_M2M: u32 = 0x0000_8000;
+
+/// Driver-name prefixes for V4L2 nodes that report
+/// `V4L2_CAP_VIDEO_CAPTURE` but aren't actually cameras you can
+/// stream from.  These show up on Raspberry Pi OS by default
+/// regardless of whether a CSI camera is attached, and FFmpeg dies
+/// with EINVAL ("Inappropriate ioctl for device") if you point it
+/// at one.
+///
+/// Match is case-sensitive prefix on `cap.driver` (truncated to 16
+/// bytes by the kernel).  We avoid the broader `bcm2835-` prefix so
+/// we don't accidentally exclude the unicam CSI camera driver
+/// (`bcm2835-unicam`) which IS a real camera source.
+const NON_CAMERA_DRIVER_PREFIXES: &[&str] = &[
+    "bcm2835-isp",   // Raspberry Pi ISP pipeline (capture/output/stats nodes)
+    "bcm2835-codec", // Raspberry Pi hardware H.264 codec (encoder + decoder)
+];
+
 /// `_IOR('V', 0, struct v4l2_capability)` — query device capabilities.
 /// Same value across all Linux architectures we ship to (x86_64,
 /// aarch64, armv7).
@@ -85,16 +118,33 @@ struct V4l2Capability {
     reserved: [u32; 3],
 }
 
-/// Result of a `VIDIOC_QUERYCAP` probe — the per-node capability mask
-/// plus the USB bus path we use to dedupe multi-node cameras.
+/// Result of a `VIDIOC_QUERYCAP` probe — the per-node capability mask,
+/// the driver name (used to blacklist Pi ISP/codec nodes), and the
+/// USB bus path we use to dedupe multi-node cameras.
 struct V4l2Caps {
     /// Effective per-node capabilities (device_caps if the driver
     /// reports it, otherwise the legacy device-wide `capabilities`).
     capabilities: u32,
+    /// Kernel driver name (e.g. "uvcvideo", "bcm2835-isp", "unicam").
+    /// Used to filter out Pi ISP/codec nodes that report video-capture
+    /// capability but aren't streamable cameras.  Truncated to 16 bytes
+    /// by the kernel uABI.
+    driver: String,
     /// USB bus path (e.g. "usb-0000:01:00.0-1.2"), used as the dedup
     /// key.  Empty for non-USB drivers, in which case dedup is a no-op
     /// for that node.
     bus_info: String,
+}
+
+/// Trim a kernel-supplied fixed-size NUL-terminated byte buffer down
+/// to the printable string before the first NUL.  v4l2 returns
+/// `driver`, `card`, and `bus_info` in fixed buffers and the bytes
+/// past the NUL are unspecified — without this trim they show up as
+/// trailing `\0` glyphs in logs and (worse) break our prefix matching
+/// when Rust treats the trailing nulls as part of the string.
+fn trim_kernel_cstr(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
 /// Open `device_path` and run `VIDIOC_QUERYCAP` on it.
@@ -134,13 +184,11 @@ fn query_v4l2_caps(device_path: &str) -> Result<V4l2Caps> {
         cap.capabilities
     };
 
-    // bus_info comes back NUL-terminated inside a fixed 32-byte buffer
-    // — trim at the first NUL before going through utf8 conversion or
-    // we'll carry trailing garbage into the dedup key.
-    let bus_end = cap.bus_info.iter().position(|&b| b == 0).unwrap_or(cap.bus_info.len());
-    let bus_info = String::from_utf8_lossy(&cap.bus_info[..bus_end]).into_owned();
-
-    Ok(V4l2Caps { capabilities: effective, bus_info })
+    Ok(V4l2Caps {
+        capabilities: effective,
+        driver: trim_kernel_cstr(&cap.driver),
+        bus_info: trim_kernel_cstr(&cap.bus_info),
+    })
 }
 
 pub struct LinuxDetector;
@@ -198,7 +246,38 @@ impl CameraDetector for LinuxDetector {
                 continue;
             }
 
-            // Filter 2: dedup by bus_info.  A single physical camera
+            // Filter 2: reject memory-to-memory transformers (codecs,
+            // some ISP pipelines).  These set VIDEO_CAPTURE but exist
+            // to *process* frames pushed in via an OUTPUT queue — they
+            // never produce frames spontaneously, so FFmpeg trying to
+            // capture from them dies immediately with EINVAL.
+            const M2M_MASK: u32 = V4L2_CAP_VIDEO_M2M | V4L2_CAP_VIDEO_M2M_MPLANE;
+            if v4l_caps.capabilities & M2M_MASK != 0 {
+                tracing::debug!(
+                    "{}: memory-to-memory device (driver={}, caps=0x{:08x}), skipping",
+                    path, v4l_caps.driver, v4l_caps.capabilities
+                );
+                continue;
+            }
+
+            // Filter 3: reject specific known non-camera drivers.
+            // The Pi's bcm2835-isp registers single-direction capture
+            // nodes (so the M2M check above doesn't catch them) but
+            // they're still ISP processing nodes and not real camera
+            // sources — the user hits this even with no CSI camera
+            // attached, because the driver loads by default.
+            if NON_CAMERA_DRIVER_PREFIXES
+                .iter()
+                .any(|prefix| v4l_caps.driver.starts_with(prefix))
+            {
+                tracing::debug!(
+                    "{}: blacklisted driver '{}' (not a real camera source), skipping",
+                    path, v4l_caps.driver
+                );
+                continue;
+            }
+
+            // Filter 4: dedup by bus_info.  A single physical camera
             // can expose more than one capture-capable node (e.g. an
             // ISP variant alongside the raw sensor) — without this,
             // those would all show up as separate cameras and FFmpeg
@@ -362,6 +441,37 @@ mod tests {
         let expected = (dir << 30) | (size << 16) | (typ << 8) | nr;
         assert_eq!(VIDIOC_QUERYCAP as u64, expected);
         assert_eq!(VIDIOC_QUERYCAP as u64, 0x8068_5600);
+    }
+
+    /// `trim_kernel_cstr` is the only thing standing between us and
+    /// trailing NULs leaking into log lines and prefix matches.
+    #[test]
+    fn trim_kernel_cstr_strips_nuls() {
+        assert_eq!(trim_kernel_cstr(b"uvcvideo\0\0\0\0\0\0\0\0"), "uvcvideo");
+        assert_eq!(trim_kernel_cstr(b"\0\0\0\0"), "");
+        // No NUL anywhere — return the whole buffer as-is.
+        assert_eq!(trim_kernel_cstr(b"no-nul-here"), "no-nul-here");
+        // Real-world bcm2835-isp driver name with kernel padding.
+        assert_eq!(trim_kernel_cstr(b"bcm2835-isp\0\0\0\0\0"), "bcm2835-isp");
+    }
+
+    /// The Raspberry Pi blacklist is the entire defense against the
+    /// "phantom 3rd camera" bug.  Pin the list so a future cleanup
+    /// can't quietly drop entries.
+    #[test]
+    fn non_camera_driver_blacklist_includes_pi_internals() {
+        assert!(NON_CAMERA_DRIVER_PREFIXES.contains(&"bcm2835-isp"));
+        assert!(NON_CAMERA_DRIVER_PREFIXES.contains(&"bcm2835-codec"));
+        // And a positive case: real USB camera drivers must NOT be
+        // blacklisted, even though they share no common prefix.
+        for good in &["uvcvideo", "unicam", "bcm2835-unicam", "v4l2 loopback"] {
+            assert!(
+                !NON_CAMERA_DRIVER_PREFIXES
+                    .iter()
+                    .any(|p| good.starts_with(p)),
+                "driver {good:?} must not match any blacklisted prefix"
+            );
+        }
     }
 
     #[test]

@@ -303,9 +303,41 @@ impl HlsGenerator {
     fn get_platform_input_args(&self, device_path: &str) -> Vec<String> {
         #[cfg(target_os = "linux")]
         {
+            // `-input_format mjpeg` is required for any UVC camera that
+            // advertises BOTH MJPEG and YUYV (uncompressed YUV 4:2:2).
+            //
+            // Without it, FFmpeg's V4L2 demuxer picks whichever format
+            // the driver enumerates first — and `uvcvideo` typically
+            // lists YUYV first. YUYV at 1280×720 @ 30fps is ~530 Mbit/s
+            // of raw pixel data, which blows past USB 2.0's 480 Mbit/s
+            // ceiling. On the Raspberry Pi 4's shared xhci bus (where
+            // all four USB ports plus any hub downstream contend for
+            // one ~4 Gbit/s bus) the capture stalls outright: FFmpeg's
+            // child process stays alive but produces zero segments,
+            // surfacing to the operator as a stuck "detecting…" state
+            // in the Command Center with no useful error in the logs.
+            //
+            // MJPG is motion-JPEG — every frame is a self-contained
+            // JPEG at ~3–5 Mbit/s for 720p30. Every real-world UVC
+            // webcam we've seen supports it for any resolution above
+            // 640×480 because the USB bandwidth math only works with
+            // it. FFmpeg decodes MJPG→YUV420 on the CPU at negligible
+            // cost (~1% of one core) before handing frames to the
+            // encoder, so the overall pipeline is identical from the
+            // encoder's perspective.
+            //
+            // Failure mode if a camera is truly YUYV-only: FFmpeg
+            // aborts immediately with "Cannot find a proper format
+            // for codec_type 'Video' / codec_id 'Rawvideo'" — a loud,
+            // actionable failure vs. the current silent stall. If that
+            // ever happens in the field we can enumerate formats via
+            // VIDIOC_ENUM_FMT in the detector and make this a per-
+            // camera choice; hardcoding MJPG buys us the common case.
             vec![
                 "-f".to_string(),
                 "v4l2".to_string(),
+                "-input_format".to_string(),
+                "mjpeg".to_string(),
                 "-framerate".to_string(),
                 self.config.fps.to_string(),
                 "-video_size".to_string(),

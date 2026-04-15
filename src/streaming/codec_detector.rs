@@ -38,6 +38,8 @@ struct FFprobeStream {
     codec_name: Option<String>,
     profile: Option<String>,
     level: Option<i32>,
+    width: Option<i32>,
+    height: Option<i32>,
 }
 
 /// FFprobe output structure
@@ -70,7 +72,49 @@ fn normalize_h264_level(level: i32) -> String {
     format!("{:02x}", normalized)
 }
 
-fn to_hls_codec_string(codec: &str, profile: Option<&str>, level: Option<i32>) -> String {
+/// Derive the minimum H.264 level required to decode a given resolution.
+///
+/// Browser MSE decoders reject streams whose NAL units exceed the declared
+/// level's capabilities — if we publish `avc1.42e00a` (level 1.0, max
+/// 176×144) for a 1080p stream, `MANIFEST_PARSED` never fires and the
+/// player shows a spinner forever. This happens in practice because the
+/// Raspberry Pi's `h264_v4l2m2m` encoder sometimes writes a `level_idc=0`
+/// into the SPS, which ffprobe then reports as `level=0`, which our
+/// `normalize_h264_level` rounds to the nearest valid value: 10 (level 1.0).
+///
+/// The safe fallback is to use the resolution itself as a floor on the
+/// declared level. We never downgrade a level ffprobe reports — we only
+/// upgrade when the reported level is clearly incompatible with the frame
+/// size we're actually shipping. Values chosen from H.264 Annex A Table A-1
+/// (max macroblocks per frame per level).
+fn derive_level_from_resolution(width: i32, height: i32) -> i32 {
+    let pixels = width.max(0).saturating_mul(height.max(0));
+    if pixels <= 25_344 {
+        10 // ≤ 176×144 (QCIF)
+    } else if pixels <= 101_376 {
+        12 // ≤ 352×288 (CIF)
+    } else if pixels <= 307_200 {
+        22 // ≤ 640×480 (VGA)
+    } else if pixels <= 414_720 {
+        30 // ≤ 720×576 (PAL/NTSC)
+    } else if pixels <= 921_600 {
+        31 // ≤ 1280×720 (720p)
+    } else if pixels <= 2_073_600 {
+        40 // ≤ 1920×1080 (1080p)
+    } else if pixels <= 3_686_400 {
+        50 // ≤ 2560×1440 (1440p)
+    } else {
+        51 // > 1440p (4K+)
+    }
+}
+
+fn to_hls_codec_string(
+    codec: &str,
+    profile: Option<&str>,
+    level: Option<i32>,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> String {
     match codec {
         "h264" => {
             let (profile_hex, constraint_byte) = match profile {
@@ -84,9 +128,35 @@ fn to_hls_codec_string(codec: &str, profile: Option<&str>, level: Option<i32>) -
                 None => ("42", "e0"),
             };
 
-            let level_hex = level
-                .map(|l| normalize_h264_level(l))
-                .unwrap_or_else(|| "1e".to_string());
+            // Floor the reported level at whatever the resolution demands.
+            // If ffprobe reported `Some(0)` (malformed SPS) or a tiny value
+            // that can't decode this frame size, bump it up. If the report
+            // is missing but we have dimensions, derive from dimensions.
+            // If everything's missing, fall back to level 3.0 like before.
+            let resolution_level = match (width, height) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => Some(derive_level_from_resolution(w, h)),
+                _ => None,
+            };
+
+            let effective_level = match (level, resolution_level) {
+                (Some(l), Some(min)) if l >= min => l,
+                (Some(l), Some(min)) => {
+                    tracing::warn!(
+                        "[Codec] FFprobe reported H.264 level={} but resolution {}x{} requires ≥ {} — using {}",
+                        l,
+                        width.unwrap_or(0),
+                        height.unwrap_or(0),
+                        min,
+                        min
+                    );
+                    min
+                }
+                (Some(l), None) => l,
+                (None, Some(min)) => min,
+                (None, None) => 30,
+            };
+
+            let level_hex = normalize_h264_level(effective_level);
 
             format!("avc1.{}{}{}", profile_hex, constraint_byte, level_hex)
         }
@@ -148,7 +218,7 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
             "-select_streams",
             "v:0", // First video stream
             "-show_entries",
-            "stream=codec_name,profile,level",
+            "stream=codec_name,profile,level,width,height",
             "-of",
             "json",
             segment_path_str,
@@ -180,10 +250,12 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
         .ok_or(Error::Storage("Video stream has no codec_name".into()))?;
 
     tracing::info!(
-        "[Codec] Video stream: codec={}, profile={:?}, level={:?}",
+        "[Codec] Video stream: codec={}, profile={:?}, level={:?}, size={:?}x{:?}",
         video_codec_name,
         video_stream.profile,
-        video_stream.level
+        video_stream.level,
+        video_stream.width,
+        video_stream.height
     );
 
     // Convert to HLS codec string
@@ -191,6 +263,8 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
         video_codec_name,
         video_stream.profile.as_deref(),
         video_stream.level,
+        video_stream.width,
+        video_stream.height,
     );
 
     // Run FFprobe to get audio stream info
@@ -222,7 +296,7 @@ pub fn detect_codec(segment_path: &Path) -> Result<CodecInfo> {
 
         tracing::info!("[Codec] Audio stream: codec={}", audio_codec_name);
 
-        to_hls_codec_string(audio_codec_name, None, None)
+        to_hls_codec_string(audio_codec_name, None, None, None, None)
     } else {
         // No audio stream - use default AAC-LC
         tracing::warn!("[Codec] No audio stream found, using default AAC-LC");
@@ -346,7 +420,7 @@ mod tests {
     #[test]
     fn test_h264_baseline_codec_string() {
         assert_eq!(
-            to_hls_codec_string("h264", Some("Baseline"), Some(30)),
+            to_hls_codec_string("h264", Some("Baseline"), Some(30), None, None),
             "avc1.42e01e"
         );
     }
@@ -354,7 +428,7 @@ mod tests {
     #[test]
     fn test_h264_main_codec_string() {
         assert_eq!(
-            to_hls_codec_string("h264", Some("Main"), Some(41)),
+            to_hls_codec_string("h264", Some("Main"), Some(41), None, None),
             "avc1.4da029"
         );
     }
@@ -362,18 +436,94 @@ mod tests {
     #[test]
     fn test_h264_high_codec_string() {
         assert_eq!(
-            to_hls_codec_string("h264", Some("High"), Some(51)),
+            to_hls_codec_string("h264", Some("High"), Some(51), None, None),
             "avc1.64a033"
         );
     }
 
     #[test]
     fn test_aac_codec_string() {
-        assert_eq!(to_hls_codec_string("aac", None, None), "mp4a.40.2");
+        assert_eq!(
+            to_hls_codec_string("aac", None, None, None, None),
+            "mp4a.40.2"
+        );
     }
 
     #[test]
     fn test_unknown_codec_string() {
-        assert_eq!(to_hls_codec_string("vp9", None, None), "vp9");
+        assert_eq!(to_hls_codec_string("vp9", None, None, None, None), "vp9");
+    }
+
+    #[test]
+    fn test_derive_level_from_resolution_1080p() {
+        assert_eq!(derive_level_from_resolution(1920, 1080), 40);
+    }
+
+    #[test]
+    fn test_derive_level_from_resolution_720p() {
+        assert_eq!(derive_level_from_resolution(1280, 720), 31);
+    }
+
+    #[test]
+    fn test_derive_level_from_resolution_4k() {
+        assert_eq!(derive_level_from_resolution(3840, 2160), 51);
+    }
+
+    #[test]
+    fn test_derive_level_from_resolution_vga() {
+        assert_eq!(derive_level_from_resolution(640, 480), 22);
+    }
+
+    #[test]
+    fn test_derive_level_from_resolution_zero() {
+        // Malformed input shouldn't panic — should return smallest level
+        assert_eq!(derive_level_from_resolution(0, 0), 10);
+        assert_eq!(derive_level_from_resolution(-1, -1), 10);
+    }
+
+    /// Regression: v0.1.3 shipped with avc1.42e00a (level 1.0) for 1080p
+    /// streams because `h264_v4l2m2m` on the Raspberry Pi reports
+    /// `level=0` in the SPS, and we rounded 0 → 10 (level 1.0, max
+    /// 176×144). Browser MSE rejects the stream; spinner never clears.
+    #[test]
+    fn test_h264_level_zero_with_1080p_resolution_upgrades_to_level_4() {
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Baseline"), Some(0), Some(1920), Some(1080)),
+            "avc1.42e028" // Baseline level 4.0
+        );
+    }
+
+    #[test]
+    fn test_h264_level_zero_with_720p_resolution_upgrades_to_level_31() {
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Main"), Some(0), Some(1280), Some(720)),
+            "avc1.4da01f" // Main level 3.1
+        );
+    }
+
+    #[test]
+    fn test_h264_valid_level_above_resolution_floor_is_preserved() {
+        // If ffprobe reports a valid level >= resolution floor, keep it.
+        // 720p floor is 31; ffprobe says 41 → keep 41.
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Main"), Some(41), Some(1280), Some(720)),
+            "avc1.4da029"
+        );
+    }
+
+    #[test]
+    fn test_h264_no_level_uses_resolution_floor() {
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Baseline"), None, Some(1920), Some(1080)),
+            "avc1.42e028"
+        );
+    }
+
+    #[test]
+    fn test_h264_no_level_no_resolution_falls_back_to_level_3() {
+        assert_eq!(
+            to_hls_codec_string("h264", Some("Baseline"), None, None, None),
+            "avc1.42e01e" // Level 3.0 — old behavior preserved
+        );
     }
 }

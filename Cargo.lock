@@ -1415,6 +1415,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "once_cell",
+ "percent-encoding",
  "rand",
  "reqwest",
  "rusqlite",

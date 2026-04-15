@@ -24,12 +24,25 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use serde::{Deserialize, Serialize};
 use base64::prelude::*;
 use crate::dashboard::Dashboard;
 use crate::storage::NodeDatabase;
 use crate::streaming::hls_uploader::MotionEvent;
+
+/// Characters that must be percent-encoded inside a URL query parameter value.
+///
+/// Starts from `CONTROLS` (C0 + DEL) and adds every ASCII character that has
+/// any reserved or delimiting meaning in a URL. Anything not in this set —
+/// letters, digits, and the sub-delim-safe punctuation — passes through
+/// unchanged.
+const QUERY_VALUE_ENCODE: &AsciiSet = &CONTROLS
+    .add(b' ').add(b'"').add(b'#').add(b'%').add(b'&').add(b'+')
+    .add(b'/').add(b':').add(b'<').add(b'=').add(b'>').add(b'?')
+    .add(b'@').add(b'[').add(b'\\').add(b']').add(b'^').add(b'`')
+    .add(b'{').add(b'|').add(b'}');
 
 /// JSON message sent/received over the WebSocket.
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,7 +159,10 @@ pub async fn run_ws_client(
                                     break;
                                 }
                                 Some(Err(e)) => {
-                                    dash.log_warn(format!("WebSocket error: {} — reconnecting", e));
+                                    dash.log_warn(format!(
+                                        "WebSocket error: {} — reconnecting",
+                                        redact_api_key(&e.to_string()),
+                                    ));
                                     break;
                                 }
                                 None => {
@@ -160,7 +176,12 @@ pub async fn run_ws_client(
                 }
             }
             Err(e) => {
-                dash.log_warn(format!("WebSocket connect failed: {}", e));
+                // `tungstenite::Error::Display` can include the request URL
+                // (and therefore the api_key query param). Redact before log.
+                dash.log_warn(format!(
+                    "WebSocket connect failed: {}",
+                    redact_api_key(&e.to_string()),
+                ));
             }
         }
 
@@ -172,6 +193,9 @@ pub async fn run_ws_client(
 }
 
 /// Build the WebSocket URL from the HTTP API URL.
+///
+/// The `api_key` and `node_id` are percent-encoded so they can safely carry
+/// any bytes, including `?`, `#`, `&`, `=`, `/`, whitespace, and non-ASCII.
 fn build_ws_url(api_url: &str, api_key: &str, node_id: &str) -> String {
     let base = api_url
         .replace("https://", "wss://")
@@ -182,18 +206,48 @@ fn build_ws_url(api_url: &str, api_key: &str, node_id: &str) -> String {
     format!(
         "{}/ws/node?api_key={}&node_id={}",
         base,
-        urlencoded(api_key),
-        urlencoded(node_id),
+        encode_query_value(api_key),
+        encode_query_value(node_id),
     )
 }
 
-/// Minimal URL-encoding for query param values.
-fn urlencoded(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace(' ', "%20")
-        .replace('+', "%2B")
+/// Percent-encode a URL query parameter value.
+fn encode_query_value(s: &str) -> String {
+    utf8_percent_encode(s, QUERY_VALUE_ENCODE).to_string()
+}
+
+/// Strip `api_key=<value>` from any string before it hits a log sink.
+///
+/// Dashboard warnings end up in the plaintext SQLite `logs` table (see
+/// [`Dashboard::log_warn`]), and tungstenite error messages can include the
+/// full request URL — which would leak the node's API key next to a DB column
+/// that goes to considerable trouble to encrypt it. This redacts every
+/// occurrence of `api_key=…` up to the next URL, quoting, or punctuation
+/// delimiter so keys are masked both in raw URLs (`?api_key=…&next=…`) and
+/// in prose log messages (`"tried api_key=…, then …"`).
+fn redact_api_key(s: &str) -> String {
+    const KEY: &str = "api_key=";
+    let mut out = String::with_capacity(s.len());
+    let mut remainder = s;
+    while let Some(idx) = remainder.find(KEY) {
+        out.push_str(&remainder[..idx + KEY.len()]);
+        let after = &remainder[idx + KEY.len()..];
+        // Value ends at the next reasonable delimiter. We're deliberately
+        // liberal — any char that wouldn't plausibly appear in a percent-
+        // encoded API key value terminates the redaction.
+        let end = after
+            .find(|c: char| {
+                matches!(
+                    c,
+                    '&' | '#' | ',' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+                ) || c.is_whitespace()
+            })
+            .unwrap_or(after.len());
+        out.push_str("[REDACTED]");
+        remainder = &after[end..];
+    }
+    out.push_str(remainder);
+    out
 }
 
 /// Build a heartbeat message.
@@ -452,4 +506,110 @@ fn get_local_ip() -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
     socket.local_addr().ok().map(|a| a.ip().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_query_value_passes_through_safe_chars() {
+        assert_eq!(encode_query_value("abc123"), "abc123");
+        assert_eq!(encode_query_value("AZaz09"), "AZaz09");
+    }
+
+    #[test]
+    fn encode_query_value_escapes_reserved() {
+        // Every reserved character the old hand-rolled encoder missed.
+        assert_eq!(encode_query_value("a?b"), "a%3Fb");
+        assert_eq!(encode_query_value("a#b"), "a%23b");
+        assert_eq!(encode_query_value("a/b"), "a%2Fb");
+        assert_eq!(encode_query_value("a b"), "a%20b");
+        assert_eq!(encode_query_value("a+b"), "a%2Bb");
+        assert_eq!(encode_query_value("a=b"), "a%3Db");
+        assert_eq!(encode_query_value("a&b"), "a%26b");
+        assert_eq!(encode_query_value("a%b"), "a%25b");
+    }
+
+    #[test]
+    fn encode_query_value_escapes_controls_and_whitespace() {
+        assert_eq!(encode_query_value("a\tb"), "a%09b");
+        assert_eq!(encode_query_value("a\nb"), "a%0Ab");
+        assert_eq!(encode_query_value("a\rb"), "a%0Db");
+        assert_eq!(encode_query_value("a\0b"), "a%00b");
+    }
+
+    #[test]
+    fn encode_query_value_handles_utf8() {
+        // UTF-8 for "ñ" is 0xC3 0xB1 — encoded byte-wise.
+        assert_eq!(encode_query_value("ñ"), "%C3%B1");
+    }
+
+    #[test]
+    fn build_ws_url_swaps_scheme_and_encodes_params() {
+        let url = build_ws_url("https://api.example.com", "key with spaces&stuff", "node-1");
+        assert_eq!(
+            url,
+            "wss://api.example.com/ws/node?api_key=key%20with%20spaces%26stuff&node_id=node-1",
+        );
+    }
+
+    #[test]
+    fn build_ws_url_trims_trailing_slash() {
+        let url = build_ws_url("http://localhost:8000/", "k", "n");
+        assert_eq!(url, "ws://localhost:8000/ws/node?api_key=k&node_id=n");
+    }
+
+    #[test]
+    fn redact_api_key_strips_value_before_ampersand() {
+        let s = "connect failed at wss://x/ws/node?api_key=sk_live_abc123&node_id=nd_7";
+        assert_eq!(
+            redact_api_key(s),
+            "connect failed at wss://x/ws/node?api_key=[REDACTED]&node_id=nd_7",
+        );
+    }
+
+    #[test]
+    fn redact_api_key_strips_value_at_end_of_string() {
+        let s = "url=wss://x/ws/node?api_key=supersecret";
+        assert_eq!(redact_api_key(s), "url=wss://x/ws/node?api_key=[REDACTED]");
+    }
+
+    #[test]
+    fn redact_api_key_strips_before_fragment_or_whitespace() {
+        assert_eq!(
+            redact_api_key("api_key=secret#frag"),
+            "api_key=[REDACTED]#frag",
+        );
+        assert_eq!(
+            redact_api_key("see api_key=secret for details"),
+            "see api_key=[REDACTED] for details",
+        );
+    }
+
+    #[test]
+    fn redact_api_key_handles_multiple_occurrences() {
+        let s = "tried api_key=one, then api_key=two";
+        assert_eq!(
+            redact_api_key(s),
+            "tried api_key=[REDACTED], then api_key=[REDACTED]",
+        );
+    }
+
+    #[test]
+    fn redact_api_key_is_noop_when_absent() {
+        assert_eq!(redact_api_key(""), "");
+        assert_eq!(redact_api_key("nothing secret here"), "nothing secret here");
+        assert_eq!(
+            redact_api_key("X-Node-API-Key header used"),
+            "X-Node-API-Key header used",
+        );
+    }
+
+    #[test]
+    fn redact_api_key_handles_empty_value() {
+        // Malformed but shouldn't panic.
+        assert_eq!(redact_api_key("api_key=&next=1"), "api_key=[REDACTED]&next=1");
+        assert_eq!(redact_api_key("api_key="), "api_key=[REDACTED]");
+    }
 }

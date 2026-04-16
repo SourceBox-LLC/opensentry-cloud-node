@@ -541,21 +541,61 @@ async fn cmd_take_snapshot(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Find the newest .ts segment file in a directory by sequence number.
+/// Find the newest *complete* `.ts` segment for a camera.
+///
+/// **Primary**: parse `stream.m3u8` — segments listed there are guaranteed
+/// complete (the one currently being written has not been appended yet).
+///
+/// **Fallback**: filesystem scan using the *second*-to-latest sequence number,
+/// since the very latest on disk may still be under active write by FFmpeg.
 fn find_latest_segment(dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir).ok()?
+    // Strategy 1: playlist — authoritative source of complete segments
+    if let Some(seg) = last_segment_from_playlist(dir) {
+        return Some(seg);
+    }
+    // Strategy 2: filesystem — skip the segment currently being written
+    last_segment_from_fs(dir)
+}
+
+/// Parse `stream.m3u8` and return the path of the last `.ts` entry.
+fn last_segment_from_playlist(dir: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(dir.join("stream.m3u8")).ok()?;
+    let seg_line = content
+        .lines()
+        .rev()
+        .find(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#') && t.ends_with(".ts")
+        })?
+        .trim();
+    // The entry may carry a relative/absolute prefix — normalise to a
+    // plain filename so we can resolve it against `dir`.
+    let filename = std::path::Path::new(seg_line).file_name()?;
+    let path = dir.join(filename);
+    path.is_file().then_some(path)
+}
+
+/// Scan the directory for `segment_<seq>.ts` files and return the
+/// *second*-to-latest by sequence number — the latest may be incomplete.
+fn last_segment_from_fs(dir: &Path) -> Option<PathBuf> {
+    let mut segs: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.ends_with(".ts") { return None; }
-            // Format: segment_00001.ts
             let parts: Vec<&str> = name.split('_').collect();
             if parts.len() != 2 { return None; }
             let seq = parts[1].trim_end_matches(".ts").parse::<u64>().ok()?;
             Some((seq, e.path()))
         })
-        .max_by_key(|(seq, _)| *seq)
-        .map(|(_, path)| path)
+        .collect();
+    if segs.is_empty() { return None; }
+    segs.sort_unstable_by_key(|(seq, _)| *seq);
+    // The very latest segment may still be under active write by the
+    // streaming FFmpeg, so prefer the second-to-latest when available.
+    if segs.len() >= 2 { segs.pop(); }
+    segs.pop().map(|(_, p)| p)
 }
 
 fn get_local_ip() -> Option<String> {
@@ -710,5 +750,77 @@ mod tests {
             &serde_json::json!({"unsupported": true}),
             &dash,
         );
+    }
+
+    // ── Segment-selection tests ──────────────────────────────────
+
+    #[test]
+    fn segment_selection_prefers_playlist_over_fs() {
+        let dir = std::env::temp_dir().join("opensentry_test_playlist");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Three segment files on disk — third is "still being written"
+        std::fs::write(dir.join("segment_00001.ts"), b"seg1").unwrap();
+        std::fs::write(dir.join("segment_00002.ts"), b"seg2").unwrap();
+        std::fs::write(dir.join("segment_00003.ts"), b"incomplete").unwrap();
+
+        // Playlist only lists the first two (complete)
+        std::fs::write(
+            dir.join("stream.m3u8"),
+            "#EXTM3U\n#EXTINF:1.0,\nsegment_00001.ts\n#EXTINF:1.0,\nsegment_00002.ts\n",
+        ).unwrap();
+
+        let result = find_latest_segment(&dir);
+        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00002.ts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn segment_selection_fs_fallback_skips_latest() {
+        let dir = std::env::temp_dir().join("opensentry_test_fs_fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No playlist — only segment files
+        std::fs::write(dir.join("segment_00001.ts"), b"seg1").unwrap();
+        std::fs::write(dir.join("segment_00002.ts"), b"seg2").unwrap();
+        std::fs::write(dir.join("segment_00003.ts"), b"seg3").unwrap();
+
+        let result = find_latest_segment(&dir);
+        // Should return second-to-latest, not the latest
+        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00002.ts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn segment_selection_single_segment_still_returned() {
+        let dir = std::env::temp_dir().join("opensentry_test_single_seg");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("segment_00001.ts"), b"seg1").unwrap();
+
+        let result = find_latest_segment(&dir);
+        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00001.ts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playlist_parser_handles_path_prefix() {
+        let dir = std::env::temp_dir().join("opensentry_test_path_prefix");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("segment_00005.ts"), b"seg5").unwrap();
+        // Playlist entry has a path prefix (observed in the wild)
+        std::fs::write(
+            dir.join("stream.m3u8"),
+            "#EXTM3U\n#EXTINF:1.0,\n./data/hls/cam1/segment_00005.ts\n",
+        ).unwrap();
+
+        let result = last_segment_from_playlist(&dir);
+        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00005.ts");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

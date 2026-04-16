@@ -197,7 +197,20 @@ pub struct DashboardState {
     /// API client (for /wipe backend decommission).  Optional because
     /// dashboards created in test-mode / `run_once` don't have one.
     pub api_client: Option<ApiClient>,
+    /// Armed destructive-command confirmation.  Stores `(command, armed_at)`.
+    /// Running the same command again without args within the timeout
+    /// window (see [`CONFIRM_TIMEOUT`]) counts as confirmation.  Cleared
+    /// as soon as *any* other command is dispatched, so the user can't
+    /// accidentally confirm a pending wipe by typing /wipe minutes later
+    /// after having done other things in between.
+    pub pending_confirm: Option<(String, Instant)>,
 }
+
+/// How long after the first bare `/wipe` or `/reauth` a repeat press
+/// still counts as confirmation.  30s is plenty of time to read the
+/// warning and decide, but short enough that a forgotten terminal left
+/// on the settings page won't accept a confirmation hours later.
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl DashboardState {
     pub fn new(node_id: impl Into<String>, api_url: impl Into<String>) -> Self {
@@ -218,6 +231,7 @@ impl DashboardState {
             db: None,
             hls_dir: None,
             api_client: None,
+            pending_confirm: None,
         }
     }
 
@@ -975,6 +989,53 @@ impl Dashboard {
         }
     }
 
+    /// Check whether a destructive command should run, using either
+    /// an explicit `/<cmd> confirm` argument OR a repeat *bare* press
+    /// of the same command within [`CONFIRM_TIMEOUT`] of the first.
+    ///
+    /// - `explicit_arg` — true iff the user typed `/<cmd> confirm`.
+    /// - `bare`        — true iff the user typed `/<cmd>` with no args.
+    ///
+    /// Only bare repeats count as confirmation.  A call with unrecognized
+    /// arguments (e.g. `/wipe dry-run`) re-arms the prompt but does not
+    /// consume a pending confirmation, so a previous `/wipe` doesn't get
+    /// turned into destruction by a typo.
+    ///
+    /// Returns `true` if the command should proceed now; in that case
+    /// the pending-confirm slot is cleared.  Returns `false` if the
+    /// caller should show the warning prompt; in that case the slot is
+    /// (re-)armed so the next bare press of the same command confirms.
+    fn check_or_arm_confirm(&self, cmd: &str, explicit_arg: bool, bare: bool) -> bool {
+        let Ok(mut s) = self.0.lock() else {
+            // Lock poisoned — fail closed (require re-arming).
+            return false;
+        };
+
+        let repeat_confirm = bare
+            && matches!(
+                &s.pending_confirm,
+                Some((pending_cmd, armed_at))
+                    if pending_cmd == cmd && armed_at.elapsed() < CONFIRM_TIMEOUT
+            );
+
+        if explicit_arg || repeat_confirm {
+            s.pending_confirm = None;
+            true
+        } else {
+            s.pending_confirm = Some((cmd.to_string(), Instant::now()));
+            false
+        }
+    }
+
+    /// Discard any pending destructive-command confirmation.  Called
+    /// whenever the user dispatches an unrelated command, so they can't
+    /// accidentally confirm a stale `/wipe` hours later.
+    fn clear_pending_confirm(&self) {
+        if let Ok(mut s) = self.0.lock() {
+            s.pending_confirm = None;
+        }
+    }
+
     /// Parse and execute a slash command from the input bar.
     fn execute_command(&self, input: &str, stop: &Arc<std::sync::atomic::AtomicBool>) {
         let input = input.trim();
@@ -987,6 +1048,13 @@ impl Dashboard {
         let parts: Vec<&str> = input[1..].split_whitespace().collect();
         let cmd = parts.first().copied().unwrap_or("");
         let args = if parts.len() > 1 { &parts[1..] } else { &parts[..0] };
+
+        // Any command other than the pending destructive one invalidates
+        // the armed confirmation.  The handlers for /wipe and /reauth
+        // below re-arm or consume it as appropriate.
+        if !matches!(cmd, "wipe" | "reauth") {
+            self.clear_pending_confirm();
+        }
 
         // Check current view for settings-only commands
         let on_settings = self.0.lock().map(|s| s.current_view == View::Settings).unwrap_or(false);
@@ -1163,7 +1231,9 @@ impl Dashboard {
                 self.log_info(format!("Logs exported to {}", filename));
             }
             "wipe" if on_settings => {
-                let confirm = args.first().copied() == Some("confirm");
+                let explicit_arg = args.first().copied() == Some("confirm");
+                let bare = args.is_empty();
+                let confirm = self.check_or_arm_confirm("wipe", explicit_arg, bare);
                 if !confirm {
                     self.set_output(vec![
                         "This will permanently delete ALL data and unpair from Command Center:"
@@ -1175,7 +1245,8 @@ impl Dashboard {
                         "The node will shut down. Run setup again with a NEW".to_string(),
                         "node ID / API key from Command Center to re-pair.".to_string(),
                         String::new(),
-                        "Type /wipe confirm to proceed.".to_string(),
+                        "Press /wipe again within 30s (or type /wipe confirm) to proceed."
+                            .to_string(),
                     ]);
                 } else {
                     // Snapshot what we need out of the lock before doing
@@ -1257,13 +1328,16 @@ impl Dashboard {
                 }
             }
             "reauth" if on_settings => {
-                let confirm = args.first().copied() == Some("confirm");
+                let explicit_arg = args.first().copied() == Some("confirm");
+                let bare = args.is_empty();
+                let confirm = self.check_or_arm_confirm("reauth", explicit_arg, bare);
                 if !confirm {
                     self.set_output(vec![
                         "This will clear your credentials and stop the node.".to_string(),
                         "You will need to run setup again with new credentials.".to_string(),
                         String::new(),
-                        "Type /reauth confirm to proceed.".to_string(),
+                        "Press /reauth again within 30s (or type /reauth confirm) to proceed."
+                            .to_string(),
                     ]);
                 } else {
                     if let Ok(s) = self.0.lock() {
@@ -1464,4 +1538,99 @@ fn truncate_ansi(s: &str, max: usize) -> String {
     }
 
     result
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fresh Dashboard with no DB / API / HLS dir attached —
+    /// enough to exercise the pure-state confirm helpers.
+    fn fresh() -> Dashboard {
+        Dashboard::new("test-node", "http://test")
+    }
+
+    fn pending_cmd(dash: &Dashboard) -> Option<String> {
+        dash.0
+            .lock()
+            .ok()
+            .and_then(|s| s.pending_confirm.as_ref().map(|(c, _)| c.clone()))
+    }
+
+    #[test]
+    fn first_bare_press_arms_but_does_not_confirm() {
+        let d = fresh();
+        let confirmed = d.check_or_arm_confirm("wipe", /*explicit*/ false, /*bare*/ true);
+        assert!(!confirmed, "first press must not proceed");
+        assert_eq!(pending_cmd(&d).as_deref(), Some("wipe"));
+    }
+
+    #[test]
+    fn second_bare_press_within_timeout_confirms() {
+        let d = fresh();
+        assert!(!d.check_or_arm_confirm("wipe", false, true));
+        let confirmed = d.check_or_arm_confirm("wipe", false, true);
+        assert!(confirmed, "second bare press must confirm");
+        assert_eq!(pending_cmd(&d), None, "pending cleared after confirm");
+    }
+
+    #[test]
+    fn explicit_confirm_arg_always_proceeds() {
+        let d = fresh();
+        let confirmed = d.check_or_arm_confirm("wipe", /*explicit*/ true, /*bare*/ false);
+        assert!(confirmed);
+        assert_eq!(pending_cmd(&d), None);
+    }
+
+    #[test]
+    fn second_press_with_unknown_arg_does_not_confirm() {
+        // /wipe then /wipe dry-run should NOT wipe — only bare repeat counts.
+        let d = fresh();
+        assert!(!d.check_or_arm_confirm("wipe", false, true)); // arm
+        let confirmed = d.check_or_arm_confirm("wipe", false, false); // non-bare
+        assert!(!confirmed, "non-bare repeat must not confirm");
+        // And it re-arms rather than leaving stale state.
+        assert_eq!(pending_cmd(&d).as_deref(), Some("wipe"));
+    }
+
+    #[test]
+    fn pending_for_different_command_does_not_cross_confirm() {
+        // Arming /wipe must not let a bare /reauth sneak through.
+        let d = fresh();
+        assert!(!d.check_or_arm_confirm("wipe", false, true));
+        let confirmed = d.check_or_arm_confirm("reauth", false, true);
+        assert!(!confirmed, "different pending cmd must not confirm");
+        assert_eq!(pending_cmd(&d).as_deref(), Some("reauth"));
+    }
+
+    #[test]
+    fn clear_pending_confirm_drops_armed_state() {
+        let d = fresh();
+        assert!(!d.check_or_arm_confirm("wipe", false, true));
+        d.clear_pending_confirm();
+        assert_eq!(pending_cmd(&d), None);
+        // After clear, a fresh bare press must re-arm, not confirm.
+        let confirmed = d.check_or_arm_confirm("wipe", false, true);
+        assert!(!confirmed);
+    }
+
+    #[test]
+    fn expired_pending_requires_rearming() {
+        // Simulate a stale arming older than CONFIRM_TIMEOUT by stuffing
+        // an `Instant` from far in the past into the slot directly.
+        let d = fresh();
+        {
+            let mut s = d.0.lock().unwrap();
+            let old = Instant::now()
+                .checked_sub(CONFIRM_TIMEOUT + Duration::from_secs(1))
+                .expect("system clock must support subtraction");
+            s.pending_confirm = Some(("wipe".to_string(), old));
+        }
+        let confirmed = d.check_or_arm_confirm("wipe", false, true);
+        assert!(!confirmed, "expired pending must require re-arming");
+        // And the slot should be re-armed with a fresh timestamp.
+        assert_eq!(pending_cmd(&d).as_deref(), Some("wipe"));
+    }
 }

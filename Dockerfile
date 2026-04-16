@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.75-alpine AS builder
+FROM rust:1-alpine AS builder
 
 RUN apk add --no-cache musl-dev
 
@@ -16,7 +16,7 @@ COPY src ./src
 RUN cargo build --release
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.21
 
 # Install FFmpeg for HLS generation and v4l-utils for USB camera
 # diagnostics (v4l2-ctl).  We don't link libv4l — the Linux camera

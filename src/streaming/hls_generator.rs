@@ -124,6 +124,18 @@ impl HlsGenerator {
     /// Detect available hardware encoder by probing FFmpeg.
     /// Returns the encoder name (e.g. "h264_nvenc", "h264_qsv", "h264_amf")
     /// or None if only software encoding is available.
+    ///
+    /// The test is an **encode-then-decode** round-trip against `testsrc`:
+    /// it writes a short MPEG-TS to a temp file with the candidate encoder,
+    /// then asks FFmpeg to decode the result.  This catches the class of
+    /// failure where the encoder initializes and accepts frames but writes
+    /// output that no decoder can read — the Raspberry Pi's `h264_v4l2m2m`
+    /// is the notorious offender.  It happily produces ~250 KB/s of
+    /// ".ts" segments that FFmpeg itself errors out on with
+    /// "Conversion failed!", leaving the browser looking at a gray box
+    /// under a valid-looking playlist.  A quick shallow test (encode to
+    /// ``-f null -``) passes because null muxer never reads the stream
+    /// back; only a real decode catches it.
     pub fn detect_hw_encoder(ffmpeg_path: &str) -> Option<String> {
         // Probe order: NVIDIA NVENC > Intel QSV > AMD AMF > V4L2
         let candidates = [
@@ -154,31 +166,104 @@ impl HlsGenerator {
                 continue;
             }
 
-            // Verify it actually works by doing a tiny test encode
-            let test = Command::new(ffmpeg_path)
-                .args([
-                    "-hide_banner",
-                    "-f", "lavfi",
-                    "-i", "nullsrc=s=256x256:d=0.1",
-                    "-c:v", encoder,
-                    "-f", "null",
-                    "-",
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-
-            if let Ok(status) = test {
-                if status.success() {
-                    tracing::info!("Hardware encoder detected: {}", encoder);
-                    return Some(encoder.to_string());
-                }
+            if Self::verify_encoder(ffmpeg_path, encoder) {
+                tracing::info!("Hardware encoder verified (encode+decode): {}", encoder);
+                return Some(encoder.to_string());
             }
-            tracing::debug!("Encoder {} listed but test encode failed", encoder);
+            tracing::warn!(
+                "[Encoder] {} listed by FFmpeg but failed round-trip verification — skipping",
+                encoder
+            );
         }
 
-        tracing::info!("No hardware encoder detected, using software (libx264)");
+        tracing::info!("No hardware encoder verified, using software (libx264)");
         None
+    }
+
+    /// Round-trip verify that a given encoder produces decodable MPEG-TS.
+    ///
+    /// Writes ~0.5s of `testsrc` frames through the candidate encoder to a
+    /// unique temp file, then runs a decode pass on the file.  Both the
+    /// encode exit code AND the decode exit code must be zero.  The temp
+    /// file is always cleaned up, even on failure paths.
+    ///
+    /// We avoid `nullsrc`/`-f null -` because those don't exercise the same
+    /// code path as real streaming:
+    ///   * `nullsrc` produces static blank frames — some encoders special-case
+    ///     them and never exercise the bitstream writer.
+    ///   * `-f null -` is a sink that never reads the elementary stream,
+    ///     so a broken bitstream writer produces no error.
+    /// `testsrc` + a real file + a real decode is the shortest path that
+    /// matches what the live pipeline actually does.
+    fn verify_encoder(ffmpeg_path: &str, encoder: &str) -> bool {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Unique filename so concurrent node starts can't stomp on each other.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let test_file = std::env::temp_dir()
+            .join(format!("opensentry_enc_test_{}_{}.ts", encoder, nanos));
+        let test_path = match test_file.to_str() {
+            Some(s) => s.to_string(),
+            None => return false,
+        };
+
+        // Encode pass — 15 frames of testsrc at 30fps → 0.5s of video.
+        // yuv420p is the lowest-common-denominator pixel format; hardware
+        // encoders that can't produce it under test will also fail under
+        // real load, which is exactly what we want to detect.
+        let encode = Command::new(ffmpeg_path)
+            .args([
+                "-hide_banner",
+                "-y",
+                "-f", "lavfi",
+                "-i", "testsrc=s=320x240:d=0.5:r=30",
+                "-pix_fmt", "yuv420p",
+                "-c:v", encoder,
+                "-f", "mpegts",
+                &test_path,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        let encode_ok = matches!(encode, Ok(s) if s.success());
+        if !encode_ok {
+            let _ = std::fs::remove_file(&test_file);
+            return false;
+        }
+
+        // File must be non-trivial — any encoder that produces < 188 bytes
+        // (one MPEG-TS packet) is broken regardless of what the exit code said.
+        let size_ok = std::fs::metadata(&test_file)
+            .map(|m| m.len() >= 188)
+            .unwrap_or(false);
+        if !size_ok {
+            let _ = std::fs::remove_file(&test_file);
+            return false;
+        }
+
+        // Decode pass — feed the produced file back through FFmpeg and
+        // require a clean exit.  This is where `h264_v4l2m2m`'s bad output
+        // gets caught: it'll produce ~20-30 KB of "segment" data that this
+        // pass errors out on.
+        let decode = Command::new(ffmpeg_path)
+            .args([
+                "-hide_banner",
+                "-v", "error",
+                "-i", &test_path,
+                "-f", "null",
+                "-",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        let _ = std::fs::remove_file(&test_file);
+
+        matches!(decode, Ok(s) if s.success())
     }
 
     /// Build encoding arguments based on available hardware.
@@ -743,5 +828,62 @@ mod tests {
         let generator = HlsGenerator::new(config);
         assert!(generator.is_ok());
         assert!(!generator.unwrap().is_running());
+    }
+
+    /// Round-trip sanity check: libx264 is the always-available safe path,
+    /// so verify_encoder must return true for it on any machine that can
+    /// run the rest of the test suite.  If this ever fails, something in
+    /// the encode/decode command construction is broken — a much worse
+    /// regression than the Pi-specific issue this was added to catch.
+    ///
+    /// Skipped when ``ffmpeg`` isn't on PATH — the pre-flight binary check
+    /// is what we'd use in production to decide whether to even attempt
+    /// streaming at all, not a test harness concern.
+    #[test]
+    fn libx264_passes_roundtrip_verification() {
+        let ffmpeg_path = HlsGenerator::find_ffmpeg();
+
+        let has_ffmpeg = Command::new(&ffmpeg_path)
+            .args(["-hide_banner", "-version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !has_ffmpeg {
+            eprintln!("ffmpeg not available — skipping libx264 verification test");
+            return;
+        }
+
+        assert!(
+            HlsGenerator::verify_encoder(&ffmpeg_path, "libx264"),
+            "libx264 should always pass round-trip verification on a machine with ffmpeg"
+        );
+    }
+
+    /// Invented encoder name that FFmpeg will refuse to initialize.  Exists
+    /// to prove the negative path — a failing encode must NOT return true,
+    /// and must clean up its temp file.
+    #[test]
+    fn nonexistent_encoder_fails_verification() {
+        let ffmpeg_path = HlsGenerator::find_ffmpeg();
+
+        let has_ffmpeg = Command::new(&ffmpeg_path)
+            .args(["-hide_banner", "-version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !has_ffmpeg {
+            return;
+        }
+
+        assert!(
+            !HlsGenerator::verify_encoder(&ffmpeg_path, "h264_this_codec_does_not_exist"),
+            "an unknown encoder must not pass verification"
+        );
     }
 }

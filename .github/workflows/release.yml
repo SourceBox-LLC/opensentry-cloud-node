@@ -152,7 +152,7 @@ jobs:
             latest=auto
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -161,3 +161,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Bust the GHA layer cache so the new rust:1-alpine base is
+          # actually pulled.  Without this, stale layers from the old
+          # rust:1.75-alpine build might be reused and the Cargo.lock v4
+          # failure persists.
+          no-cache-filters: builder

@@ -161,6 +161,34 @@ impl Node {
             }
         }
 
+        // Retired encoders — names we used to persist but have since
+        // removed from the auto-detect pool.  If a prior install saved
+        // one of these to the DB, clear it so auto-detect runs again.
+        //
+        // `h264_v4l2m2m` (Raspberry Pi V4L2 M2M) was retired in v0.1.14
+        // because it writes a non-conforming SPS across every Pi hardware
+        // revision we tested.  See HlsGenerator::detect_hw_encoder for the
+        // full rationale.  Without this coercion, a Pi that completed
+        // setup on v0.1.12 would keep using v4l2m2m forever — the runner
+        // only re-detects when the DB value is empty.
+        const RETIRED_ENCODERS: &[&str] = &["h264_v4l2m2m"];
+        if RETIRED_ENCODERS
+            .iter()
+            .any(|e| *e == self.config.streaming.encoder)
+        {
+            let retired = self.config.streaming.encoder.clone();
+            dash.log_warn(format!(
+                "Retired encoder '{}' in config — clearing for re-detection",
+                retired
+            ));
+            tracing::warn!(
+                "Retired encoder '{}' found in DB; clearing for re-detection",
+                retired
+            );
+            self.config.streaming.encoder.clear();
+            let _ = self.db.delete_config("encoder");
+        }
+
         // Detect encoder once (not per-camera) and persist it
         if self.config.streaming.encoder.is_empty() {
             let ffmpeg_path = crate::streaming::HlsGenerator::find_ffmpeg();

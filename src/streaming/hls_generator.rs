@@ -125,24 +125,29 @@ impl HlsGenerator {
     /// Returns the encoder name (e.g. "h264_nvenc", "h264_qsv", "h264_amf")
     /// or None if only software encoding is available.
     ///
-    /// The test is an **encode-then-decode** round-trip against `testsrc`:
-    /// it writes a short MPEG-TS to a temp file with the candidate encoder,
-    /// then asks FFmpeg to decode the result.  This catches the class of
-    /// failure where the encoder initializes and accepts frames but writes
-    /// output that no decoder can read — the Raspberry Pi's `h264_v4l2m2m`
-    /// is the notorious offender.  It happily produces ~250 KB/s of
-    /// ".ts" segments that FFmpeg itself errors out on with
-    /// "Conversion failed!", leaving the browser looking at a gray box
-    /// under a valid-looking playlist.  A quick shallow test (encode to
-    /// ``-f null -``) passes because null muxer never reads the stream
-    /// back; only a real decode catches it.
+    /// Each candidate is still round-tripped through `verify_encoder` (encode
+    /// + ffprobe-strict parse) so a broken NVENC/QSV/AMF build on an older
+    /// driver falls through to libx264 instead of silently producing garbage.
+    ///
+    /// **`h264_v4l2m2m` is intentionally excluded.**  The Raspberry Pi V4L2
+    /// M2M H.264 encoder writes a non-conforming SPS across every Pi
+    /// hardware revision we've tested.  The resulting bitstream looks valid
+    /// enough to trick a shallow `ffmpeg -f null -` round-trip, *and* can
+    /// even slip past a strict 720p ffprobe check on some kernels — but at
+    /// real 1080p capture resolution it produces segments that browsers'
+    /// MSE parser refuses to decode (and FFmpeg itself errors out on with
+    /// "Conversion failed!").  See the long investigation in the v0.1.10 /
+    /// v0.1.13 / v0.1.14 commit history; the short version is "testing
+    /// this encoder is harder than just not using it".  libx264 at
+    /// `-preset ultrafast -tune zerolatency` sustains 1080p30 on a Pi 4
+    /// at ~1.5 cores per stream, which is the correct trade.
     pub fn detect_hw_encoder(ffmpeg_path: &str) -> Option<String> {
-        // Probe order: NVIDIA NVENC > Intel QSV > AMD AMF > V4L2
+        // Probe order: NVIDIA NVENC > Intel QSV > AMD AMF.
+        // `h264_v4l2m2m` is deliberately NOT here — see function docstring.
         let candidates = [
             "h264_nvenc",   // NVIDIA (GeForce GTX 600+, all RTX)
             "h264_qsv",    // Intel Quick Sync (most Intel CPUs with iGPU)
             "h264_amf",    // AMD AMF (Radeon RX 400+)
-            "h264_v4l2m2m", // Linux V4L2 (Raspberry Pi 4, some ARM SoCs)
         ];
 
         // Run -encoders once, check all candidates against the output

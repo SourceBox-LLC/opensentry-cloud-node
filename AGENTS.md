@@ -25,7 +25,12 @@ Loading priority (in `Config::load()`):
    - `OPENSENTRY_NODE_ID`, `OPENSENTRY_API_KEY`, `OPENSENTRY_API_URL`
    - `OPENSENTRY_ENCODER` — video encoder override (e.g. `h264_nvenc`)
    - `RUST_LOG` — log level
-4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`
+4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`, `--config`, `--once`, `--log-level`
+
+CLI subcommands (defined in `src/main.rs`):
+- `opensentry-cloudnode run` — start the node (also the default when no subcommand is given)
+- `opensentry-cloudnode setup` — launch the interactive TUI setup wizard
+- `opensentry-cloudnode uninstall [--force]` — remove `data/`, legacy `.env`, and bundled `ffmpeg/`
 
 ## Project Structure
 
@@ -57,7 +62,10 @@ src/
 │   ├── mod.rs        # Setup flow
 │   ├── platform.rs   # Platform detection
 │   ├── recovery.rs   # Error recovery and user guidance
-│   └── tui.rs        # Terminal UI (crossterm + inquire)
+│   ├── tui.rs        # Terminal UI (crossterm + inquire)
+│   ├── ui.rs         # Full-width bordered panels / layout helpers
+│   ├── validator.rs  # Input validation (Node ID, API key, URL)
+│   └── animations.rs # Progress animations and spinners
 ├── streaming/        # HLS generation
 │   ├── hls_generator.rs    # FFmpeg orchestration
 │   ├── hls_uploader.rs     # Upload segments to cloud

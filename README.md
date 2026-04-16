@@ -95,6 +95,7 @@ Type `/` and press **Enter** to open the command menu.
 
 | Command | Description |
 |---------|-------------|
+| `/help` | Show the available commands |
 | `/settings` | Open the settings page |
 | `/status` | Show node status summary |
 | `/clear` | Clear the log panel |
@@ -136,11 +137,20 @@ Use environment variables to override database values without modifying the DB:
 | `OPENSENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
-### CLI flags
+### CLI flags and subcommands
 
 ```bash
-opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
+# Run the node (default if no subcommand is given)
+opensentry-cloudnode run --node-id <ID> --api-key <KEY> --api-url <URL>
+
+# Launch the interactive setup wizard
+opensentry-cloudnode setup
+
+# Remove local data, legacy .env, and bundled FFmpeg
+opensentry-cloudnode uninstall [--force]
 ```
+
+Additional flags: `--config <PATH>` (YAML file), `--log-level <LEVEL>`, and `--once` (run one detection cycle and exit — intended for testing).
 
 ### Security
 
@@ -213,7 +223,7 @@ docker run -d \
                                 └── (cloud API)
 ```
 
-**Video pipeline:** Camera → FFmpeg subprocess → HLS segments (`.ts`) → uploaded to Command Center via presigned URLs.
+**Video pipeline:** Camera → FFmpeg subprocess → HLS segments (`.ts`) → pushed directly to Command Center via `POST /api/cameras/{camera_id}/push-segment` (no S3, no presigned URLs).
 
 **Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs. Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
 
@@ -249,16 +259,20 @@ cargo fmt -- --check     # Format check
 
 ```
 src/
-├── main.rs              # CLI entry point (clap)
-├── dashboard.rs         # Live TUI dashboard
-├── api/                 # Cloud API client + WebSocket
-├── camera/              # Detection and capture (platform-specific)
+├── main.rs              # CLI entry point (clap) with run/setup/uninstall subcommands
+├── lib.rs               # Library root and re-exports
+├── error.rs             # Custom Error enum (thiserror)
+├── dashboard.rs         # Live TUI dashboard (crossterm)
+├── api/                 # Cloud API client + WebSocket (reqwest, tungstenite)
+├── camera/              # Detection and capture
+│   └── platform/        # Platform-specific backends (linux / windows / macos)
 ├── config/              # Config loading (DB → YAML → env → CLI)
-├── node/                # Orchestration and lifecycle
+├── node/                # Orchestration and lifecycle (node::runner)
 ├── server/              # HTTP server (warp)
-├── setup/               # Interactive setup wizard
-├── streaming/           # HLS generation and segment upload
-└── storage/             # SQLite database
+├── setup/               # Interactive setup wizard (mod, platform, recovery,
+│                        # tui, ui, validator, animations)
+├── streaming/           # HLS generation, segment upload, codec detection
+└── storage/             # SQLite-backed local storage
 ```
 
 ### Cross-compilation

@@ -1,7 +1,9 @@
 # Build stage
 FROM rust:1-alpine AS builder
 
-RUN apk add --no-cache musl-dev perl make
+# pkg-config + openssl-dev are needed because reqwest's default-tls feature
+# pulls in openssl-sys.  perl is needed by ring's assembly codegen.
+RUN apk add --no-cache musl-dev pkgconf openssl-dev perl make
 
 WORKDIR /app
 

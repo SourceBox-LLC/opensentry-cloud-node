@@ -180,21 +180,33 @@ impl HlsGenerator {
         None
     }
 
-    /// Round-trip verify that a given encoder produces decodable MPEG-TS.
+    /// Round-trip verify that a given encoder produces a stream a browser
+    /// (MSE / hls.js) will actually play.
     ///
-    /// Writes ~0.5s of `testsrc` frames through the candidate encoder to a
-    /// unique temp file, then runs a decode pass on the file.  Both the
-    /// encode exit code AND the decode exit code must be zero.  The temp
-    /// file is always cleaned up, even on failure paths.
+    /// Pipeline:
+    ///   1. Encode ~0.5s of `testsrc` through the candidate at 1280×720.
+    ///   2. Require non-trivial output size (> 188 B = 1 TS packet).
+    ///   3. Run `ffprobe` on the output and require all four of
+    ///      `profile`, `level`, `width`, `height` to parse cleanly.
     ///
-    /// We avoid `nullsrc`/`-f null -` because those don't exercise the same
-    /// code path as real streaming:
-    ///   * `nullsrc` produces static blank frames — some encoders special-case
-    ///     them and never exercise the bitstream writer.
-    ///   * `-f null -` is a sink that never reads the elementary stream,
-    ///     so a broken bitstream writer produces no error.
-    /// `testsrc` + a real file + a real decode is the shortest path that
-    /// matches what the live pipeline actually does.
+    /// **Why not just `ffmpeg -f null -`?**
+    ///
+    /// FFmpeg's decoder is *extremely* forgiving — it will happily skip
+    /// broken SPS/PPS NAL units and still exit 0 after "decoding" garbage.
+    /// `h264_v4l2m2m` on Raspberry Pi is the poster child: it produces a
+    /// bitstream that `ffmpeg -i x.ts -f null -` accepts with no error,
+    /// but browsers' strict MSE parser rejects because the SPS is
+    /// malformed (profile/level fields unreadable).  `ffprobe`'s stream
+    /// parser uses the same strict path as MSE — if ffprobe can't read
+    /// `profile`/`level`/`width`/`height`, the browser can't either.
+    ///
+    /// **Why 1280×720 instead of 320×240?**
+    ///
+    /// Some hardware encoders pass at tiny synthetic resolutions and fail
+    /// at capture-realistic ones.  720p is the smallest resolution a
+    /// modern webcam actually produces in the wild, so we test there.
+    ///
+    /// The temp file is always cleaned up, on every exit path.
     fn verify_encoder(ffmpeg_path: &str, encoder: &str) -> bool {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -211,15 +223,14 @@ impl HlsGenerator {
         };
 
         // Encode pass — 15 frames of testsrc at 30fps → 0.5s of video.
-        // yuv420p is the lowest-common-denominator pixel format; hardware
-        // encoders that can't produce it under test will also fail under
-        // real load, which is exactly what we want to detect.
+        // 1280×720 matches the smallest capture resolution we'll see in
+        // production; some HW encoders pass at 320×240 but fail higher.
         let encode = Command::new(ffmpeg_path)
             .args([
                 "-hide_banner",
                 "-y",
                 "-f", "lavfi",
-                "-i", "testsrc=s=320x240:d=0.5:r=30",
+                "-i", "testsrc=s=1280x720:d=0.5:r=30",
                 "-pix_fmt", "yuv420p",
                 "-c:v", encoder,
                 "-f", "mpegts",
@@ -245,25 +256,104 @@ impl HlsGenerator {
             return false;
         }
 
-        // Decode pass — feed the produced file back through FFmpeg and
-        // require a clean exit.  This is where `h264_v4l2m2m`'s bad output
-        // gets caught: it'll produce ~20-30 KB of "segment" data that this
-        // pass errors out on.
-        let decode = Command::new(ffmpeg_path)
+        // Strict bitstream parse — ffprobe must extract profile + level +
+        // width + height from the first video stream.  This is where
+        // `h264_v4l2m2m`'s malformed SPS finally gets caught: ffprobe
+        // exits non-zero (or prints `N/A` / negative level) when the SPS
+        // can't be parsed, which is the same failure mode MSE will hit.
+        let ffprobe_path = super::find_ffprobe();
+        let probe = Command::new(&ffprobe_path)
             .args([
-                "-hide_banner",
                 "-v", "error",
-                "-i", &test_path,
-                "-f", "null",
-                "-",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=profile,level,width,height",
+                "-of", "default=noprint_wrappers=1:nokey=0",
+                &test_path,
             ])
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status();
+            .output();
 
+        // Remove the temp file now — we've read what we need.
         let _ = std::fs::remove_file(&test_file);
 
-        matches!(decode, Ok(s) if s.success())
+        let probe_stdout = match probe {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    "[Encoder] {} — ffprobe exited non-zero on test output (bitstream unparseable)",
+                    encoder
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[Encoder] {} — couldn't run ffprobe to verify: {}",
+                    encoder, e
+                );
+                return false;
+            }
+        };
+
+        Self::probe_output_is_playable(encoder, &probe_stdout)
+    }
+
+    /// Parse `ffprobe -show_entries stream=profile,level,width,height`
+    /// output and decide whether the stream is playable.  A stream is
+    /// playable iff every required field is present AND non-degenerate:
+    ///   * `profile`  — non-empty, not `unknown`, not `N/A`
+    ///   * `level`    — parses to a positive integer
+    ///   * `width`    — parses to a positive integer
+    ///   * `height`   — parses to a positive integer
+    ///
+    /// Any missing or degenerate field logs a warning naming the encoder
+    /// and the raw probe output, so operators can see exactly which
+    /// encoder produced junk on their hardware.
+    ///
+    /// Factored out of `verify_encoder` so it's unit-testable without
+    /// spinning up ffmpeg.
+    fn probe_output_is_playable(encoder: &str, probe_stdout: &str) -> bool {
+        let mut profile: Option<String> = None;
+        let mut level: Option<i64> = None;
+        let mut width: Option<i64> = None;
+        let mut height: Option<i64> = None;
+
+        for line in probe_stdout.lines() {
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let k = k.trim();
+            let v = v.trim();
+            match k {
+                "profile" => profile = Some(v.to_string()),
+                "level" => level = v.parse().ok(),
+                "width" => width = v.parse().ok(),
+                "height" => height = v.parse().ok(),
+                _ => {}
+            }
+        }
+
+        let profile_ok = profile
+            .as_deref()
+            .map(|p| !p.is_empty() && !p.eq_ignore_ascii_case("unknown") && p != "N/A")
+            .unwrap_or(false);
+        let level_ok = level.map(|l| l > 0).unwrap_or(false);
+        let width_ok = width.map(|w| w > 0).unwrap_or(false);
+        let height_ok = height.map(|h| h > 0).unwrap_or(false);
+
+        if profile_ok && level_ok && width_ok && height_ok {
+            return true;
+        }
+
+        tracing::warn!(
+            "[Encoder] {} — ffprobe found an unplayable stream \
+             (profile={:?}, level={:?}, width={:?}, height={:?}); \
+             browsers will not decode this encoder's output",
+            encoder, profile, level, width, height
+        );
+        false
     }
 
     /// Build encoding arguments based on available hardware.
@@ -885,5 +975,68 @@ mod tests {
             !HlsGenerator::verify_encoder(&ffmpeg_path, "h264_this_codec_does_not_exist"),
             "an unknown encoder must not pass verification"
         );
+    }
+
+    // ─── Probe-output parser unit tests ──────────────────────────────
+    //
+    // These cover the real failure modes we've observed in the wild
+    // without needing a working ffmpeg on the test machine.
+
+    /// A clean libx264 encode looks like this — every field populated,
+    /// level is a positive integer, profile is a recognizable string.
+    #[test]
+    fn probe_playable_accepts_well_formed_libx264_output() {
+        let stdout = "profile=Constrained Baseline\nlevel=31\nwidth=1280\nheight=720\n";
+        assert!(HlsGenerator::probe_output_is_playable("libx264", stdout));
+    }
+
+    /// The actual failure signature the Pi v0.1.11 node logged:
+    /// `profile=None, level=Some(-99), size=None`.  ffprobe renders this
+    /// as `level=-99` and unknown profile/dimensions.  Must reject.
+    #[test]
+    fn probe_playable_rejects_pi_v4l2m2m_signature() {
+        let stdout = "profile=unknown\nlevel=-99\nwidth=N/A\nheight=N/A\n";
+        assert!(!HlsGenerator::probe_output_is_playable("h264_v4l2m2m", stdout));
+    }
+
+    /// An encoder that produces zero-dimension output is broken even if
+    /// the profile/level look OK.  Reject.
+    #[test]
+    fn probe_playable_rejects_zero_dimensions() {
+        let stdout = "profile=High\nlevel=40\nwidth=0\nheight=0\n";
+        assert!(!HlsGenerator::probe_output_is_playable("broken_hw", stdout));
+    }
+
+    /// ffprobe with a completely unparseable bitstream may emit only a
+    /// subset of the requested keys.  Missing fields must count as a
+    /// failure, not a success.
+    #[test]
+    fn probe_playable_rejects_missing_fields() {
+        // Only width/height present, no profile/level at all.
+        let stdout = "width=1920\nheight=1080\n";
+        assert!(!HlsGenerator::probe_output_is_playable("half_broken", stdout));
+    }
+
+    /// Empty output (ffprobe found no streams at all) must reject.
+    #[test]
+    fn probe_playable_rejects_empty_output() {
+        assert!(!HlsGenerator::probe_output_is_playable("silent", ""));
+    }
+
+    /// Profile case shouldn't matter — ffprobe sometimes outputs
+    /// lowercase `unknown`, sometimes uppercase.  Both reject.
+    #[test]
+    fn probe_playable_rejects_unknown_case_insensitive() {
+        let stdout = "profile=UNKNOWN\nlevel=30\nwidth=1280\nheight=720\n";
+        assert!(!HlsGenerator::probe_output_is_playable("weird", stdout));
+    }
+
+    /// Level 0 is what older ffprobe builds emit for malformed SPS — we
+    /// already handle that in the codec detector, and verify_encoder
+    /// should treat it the same way: not a valid level.
+    #[test]
+    fn probe_playable_rejects_level_zero() {
+        let stdout = "profile=Main\nlevel=0\nwidth=1280\nheight=720\n";
+        assert!(!HlsGenerator::probe_output_is_playable("weird", stdout));
     }
 }

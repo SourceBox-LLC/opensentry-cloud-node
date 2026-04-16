@@ -157,12 +157,12 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Bust the GHA layer cache so the new rust:1-alpine base is
-          # actually pulled.  Without this, stale layers from the old
-          # rust:1.75-alpine build might be reused and the Cargo.lock v4
-          # failure persists.
-          no-cache-filters: builder
+          # GHA cache disabled for this release to flush stale layers
+          # from the rust:1.75-alpine era.  Re-enable after a clean
+          # build populates fresh cache:
+          #   cache-from: type=gha
+          #   cache-to: type=gha,mode=max
+          no-cache: true

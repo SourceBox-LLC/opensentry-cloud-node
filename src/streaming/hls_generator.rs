@@ -459,12 +459,23 @@ impl HlsGenerator {
             }
             None => {
                 tracing::info!("Using software encoding (libx264)");
+                // Unlike NVENC/QSV/AMF, libx264 does NOT accept `-level auto`
+                // (x264 errors with "Error parsing option 'level' with value 'auto'"
+                // and refuses to open the encoder).  Omitting `-level` entirely
+                // lets libx264 auto-compute the correct level from resolution,
+                // framerate, and bitrate and embed it in the SPS — which is
+                // what hls.js / MSE needs to decode the stream.
+                //
+                // `-preset ultrafast` (not veryfast) is deliberate for the
+                // Pi 4 case: at 1080p30 it runs ~1.5 cores per stream, so
+                // two simultaneous cameras fit in the Pi 4's 4-core budget
+                // with headroom for the upload/dashboard/WS tasks.  veryfast
+                // is ~2-3 cores/stream and would starve the second camera.
                 vec![
                     "-pix_fmt".into(), "yuv420p".into(),
                     "-c:v".into(), "libx264".into(),
                     "-profile:v".into(), "main".into(),
-                    "-level".into(), "auto".into(),
-                    "-preset".into(), "veryfast".into(),
+                    "-preset".into(), "ultrafast".into(),
                     "-tune".into(), "zerolatency".into(),
                     "-b:v".into(), bitrate.into(),
                     "-maxrate".into(), bitrate.into(),
@@ -1043,5 +1054,86 @@ mod tests {
     fn probe_playable_rejects_level_zero() {
         let stdout = "profile=Main\nlevel=0\nwidth=1280\nheight=720\n";
         assert!(!HlsGenerator::probe_output_is_playable("weird", stdout));
+    }
+
+    // ─── build_encoding_args regression tests ────────────────────────
+    //
+    // Pin the software-encoder arg list so we don't re-introduce the
+    // `-level auto` bug (libx264 rejects "auto" and refuses to open,
+    // producing "Could not open encoder before EOF" on the Pi in v0.1.14).
+
+    /// Helper — find consecutive `flag, value` pair in the arg list.
+    fn find_arg_pair<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].as_str())
+    }
+
+    /// The libx264 branch must NOT emit `-level auto`.  x264 errors with
+    /// "Error parsing option 'level' with value 'auto'" and refuses to
+    /// open the encoder, which surfaces on the Pi 4 as an ffmpeg restart
+    /// loop and "detecting…" forever in the dashboard.  Omitting the
+    /// `-level` argument entirely is correct: libx264 auto-computes the
+    /// level from resolution/bitrate and embeds it in the SPS.
+    #[test]
+    fn libx264_args_omit_level_flag() {
+        let args = HlsGenerator::build_encoding_args(&None, "2500k", 5000, 30, 1);
+        assert!(
+            find_arg_pair(&args, "-level").is_none(),
+            "libx264 branch must not emit `-level <anything>` — it doesn't accept 'auto' \
+             and auto-selects the correct level from resolution when omitted.  Got: {:?}",
+            args
+        );
+    }
+
+    /// On the Pi 4, `-preset veryfast` uses ~2-3 cores per 1080p30 stream,
+    /// which exhausts the 4-core budget with two cameras.  `ultrafast` is
+    /// the documented correct trade — ~1.5 cores/stream with headroom for
+    /// upload, dashboard, and WebSocket tasks.
+    #[test]
+    fn libx264_args_use_ultrafast_preset() {
+        let args = HlsGenerator::build_encoding_args(&None, "2500k", 5000, 30, 1);
+        assert_eq!(
+            find_arg_pair(&args, "-preset"),
+            Some("ultrafast"),
+            "libx264 preset must be `ultrafast` to fit two 1080p30 streams on a Pi 4.  Got: {:?}",
+            args
+        );
+    }
+
+    /// Hardware encoders (NVENC/QSV/AMF) DO accept `-level auto`; this
+    /// test makes sure a future "fix" doesn't over-apply the libx264
+    /// change to the hardware branches.
+    #[test]
+    fn hw_encoder_branches_still_use_level_auto() {
+        for enc in ["h264_nvenc", "h264_qsv", "h264_amf"] {
+            let args = HlsGenerator::build_encoding_args(
+                &Some(enc.to_string()),
+                "2500k",
+                5000,
+                30,
+                1,
+            );
+            assert_eq!(
+                find_arg_pair(&args, "-level"),
+                Some("auto"),
+                "{} branch should keep `-level auto` — this encoder accepts it.  Got: {:?}",
+                enc,
+                args
+            );
+        }
+    }
+
+    /// libx264 must produce a complete, valid arg list — every piece
+    /// downstream ffmpeg needs to actually start encoding.
+    #[test]
+    fn libx264_args_contain_required_pieces() {
+        let args = HlsGenerator::build_encoding_args(&None, "2500k", 5000, 30, 1);
+        assert_eq!(find_arg_pair(&args, "-c:v"), Some("libx264"));
+        assert_eq!(find_arg_pair(&args, "-pix_fmt"), Some("yuv420p"));
+        assert_eq!(find_arg_pair(&args, "-profile:v"), Some("main"));
+        assert_eq!(find_arg_pair(&args, "-tune"), Some("zerolatency"));
+        assert_eq!(find_arg_pair(&args, "-b:v"), Some("2500k"));
+        assert_eq!(find_arg_pair(&args, "-c:a"), Some("aac"));
     }
 }

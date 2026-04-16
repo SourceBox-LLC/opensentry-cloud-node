@@ -102,7 +102,21 @@ const NON_CAMERA_DRIVER_PREFIXES: &[&str] = &[
 /// `_IOR('V', 0, struct v4l2_capability)` — query device capabilities.
 /// Same value across all Linux architectures we ship to (x86_64,
 /// aarch64, armv7).
-const VIDIOC_QUERYCAP: libc::c_ulong = 0x8068_5600;
+///
+/// Stored as `u64` because the type `libc::ioctl` expects for its
+/// `request` argument (aliased as `libc::Ioctl`) differs between libc
+/// implementations:
+///   * glibc / bionic / uclibc → `c_ulong` (u64 on 64-bit, u32 on 32-bit)
+///   * musl                    → `c_int`   (i32 everywhere)
+///
+/// The cast to `libc::Ioctl` happens at the call site.  The kernel only
+/// cares about the 32-bit ioctl number's bit pattern, not whether the
+/// host type is signed or unsigned — `0x80685600 as i32` is negative but
+/// its bits are identical to `0x80685600 as u32`, which is what the
+/// syscall boundary actually compares against.  Without this the Alpine
+/// Docker build (our only musl target) fails to compile with
+/// "expected `i32`, found `u64`".
+const VIDIOC_QUERYCAP: u64 = 0x8068_5600;
 
 /// Mirrors `struct v4l2_capability` from <linux/videodev2.h>.  Layout
 /// is part of the kernel uABI and stable since v4l2 1.4.  104 bytes
@@ -166,7 +180,11 @@ fn query_v4l2_caps(device_path: &str) -> Result<V4l2Caps> {
     let ret = unsafe {
         libc::ioctl(
             file.as_raw_fd(),
-            VIDIOC_QUERYCAP,
+            // Cast to the libc-implementation-specific `Ioctl` type.
+            // Bit pattern is what matters to the kernel; the sign of
+            // the host-side value is irrelevant.  See the constant's
+            // definition for why this can't just be a typed constant.
+            VIDIOC_QUERYCAP as libc::Ioctl,
             &mut cap as *mut V4l2Capability as *mut libc::c_void,
         )
     };

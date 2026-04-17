@@ -1,6 +1,6 @@
 [package]
 name = "opensentry-cloudnode"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 authors = ["SourceBox LLC"]
 description = "OpenSentry camera node for cloud-connected surveillance"
@@ -90,6 +90,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

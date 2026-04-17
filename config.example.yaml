@@ -27,9 +27,32 @@ cameras:
 streaming:
   # Target frames per second
   fps: 30
-  
+
   # JPEG quality (1-100)
   jpeg_quality: 85
+
+  # Video encoder override (auto-detected if empty)
+  # Supported: h264_nvenc (NVIDIA), h264_qsv (Intel), h264_amf (AMD), libx264 (CPU)
+  # encoder: ""
+
+  # HLS output settings
+  hls:
+    enabled: true
+    # Segment duration in seconds
+    segment_duration: 1
+    # Number of segments in the rolling playlist window
+    playlist_size: 15
+    # Target bitrate (e.g. "2M" for 2 Mbps)
+    # bitrate: "2M"
+
+# Motion detection settings
+motion:
+  # Toggle motion detection on/off
+  enabled: true
+  # Scene-change score threshold (0.0 = identical, 1.0 = totally different)
+  threshold: 0.02
+  # Minimum seconds between events per camera
+  cooldown_secs: 30
 
 # Recording settings
 recording:

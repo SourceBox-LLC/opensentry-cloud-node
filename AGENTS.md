@@ -238,8 +238,8 @@ All outbound calls use `ApiClient` in `src/api/client.rs`:
 
 | Method | Path | Header | Body | When |
 |--------|------|--------|------|------|
-| POST | `/api/nodes/register` | `X-API-Key` | `RegisterRequest` JSON | Startup |
-| POST | `/api/nodes/heartbeat` | `X-API-Key` | `HeartbeatRequest` JSON | Every `heartbeat_interval` s (fallback path; WS heartbeat is primary) |
+| POST | `/api/nodes/register` | `X-Node-API-Key` | `RegisterRequest` JSON | Startup |
+| POST | `/api/nodes/heartbeat` | `X-Node-API-Key` | `HeartbeatRequest` JSON | Every `heartbeat_interval` s (fallback path; WS heartbeat is primary) |
 | POST | `/api/cameras/{id}/codec` | `X-Node-API-Key` | `{video_codec, audio_codec}` JSON | After first segment or codec change |
 | POST | `/api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | raw `.ts` bytes (`video/mp2t`) | Every segment |
 | POST | `/api/cameras/{id}/playlist` | `X-Node-API-Key` | playlist text (`text/plain`) | Every playlist rewrite |
@@ -328,7 +328,7 @@ cargo run -- --once     # Run one detection cycle and exit (if supported by curr
 
 **Build:** `docker build -t opensentry-cloudnode:latest .`
 
-Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.16`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
+Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.16`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Multi-arch images (`linux/amd64`, `linux/arm64`) are built via Docker Buildx with QEMU emulation; prebuilt ARM64 binaries are also published to GitHub Releases (built on native `ubuntu-24.04-arm` runners).
 
 **Run:**
 ```bash
@@ -352,8 +352,8 @@ docker run -d \
 - Add user to video group: `sudo usermod -a -G video $USER`
 - Camera devices: `/dev/video0`, `/dev/video1`, etc.
 
-**Raspberry Pi (Linux ARM64):** production-ready, build from source only
-- Build: `cargo build --release` — no prebuilt binaries on the releases page for ARM
+**Raspberry Pi (Linux ARM64):** production-ready
+- Prebuilt binaries and Docker images (`linux/arm64`) are published on every release
 - Encoder: **libx264 CPU** only. `h264_v4l2m2m` is in `RETIRED_ENCODERS` because every Pi hardware revision we tested writes a non-conforming SPS that browsers reject.
 - Preset: libx264 `ultrafast` keeps a 1080p30 stream under ~1.5 cores on a Pi 4, leaving room for a second camera. See "HLS generation" for the full rationale.
 - USB: plug cameras into the Pi directly, not through an unpowered hub. Hub EMI faults show up as `usb-port: disabled by hub (EMI?)` + `xhci_hcd: Setup ERROR` in `dmesg` and wedge the whole USB controller until reboot.
@@ -382,7 +382,7 @@ docker run -d \
 | `tokio-tungstenite` + `futures-util` | WebSocket client |
 | `serde` / `serde_json` | JSON serialization |
 | `clap` | CLI parser |
-| `tracing` / `tracing-subscriber` / `tracing-appender` | Logging |
+| `tracing` / `tracing-subscriber` | Logging |
 | `crossterm` | Terminal raw mode + input events (dashboard TUI) |
 | `inquire` / `indicatif` | Interactive prompts + progress bars (setup wizard) |
 | `colored` | ANSI color formatting |

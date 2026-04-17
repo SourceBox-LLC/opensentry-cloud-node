@@ -141,6 +141,20 @@ impl HlsUploader {
         // supervisor to kill FFmpeg so a brief V4L2 hiccup doesn't
         // trigger a spurious restart storm.
         const STALL_KILL_CYCLES: u32 = 20;
+
+        // Orphan-sweep cadence.  Every `SWEEP_EVERY_CYCLES` polls (~60s
+        // with the 1s poll interval) we reap stale `segment_*.ts` files
+        // that the per-upload cleanup path missed.  Runs on a blocking
+        // executor so the main loop doesn't stall on large directories.
+        const SWEEP_EVERY_CYCLES: u32 = 60;
+        // Keep roughly one minute of segments at 1s segment duration —
+        // much larger than the `local_buffer_size=5` and
+        // `hls_list_size=15` retention that FFmpeg + the uploader
+        // already enforce, so this only trips when something has gone
+        // wrong upstream.  Cap the disk-use tail at ~20 MB/camera.
+        let sweep_keep_count: usize =
+            (self.config.local_buffer_size as usize).saturating_add(60).max(30);
+        let mut sweep_counter: u32 = 0;
         // Per-camera cooldown — this uploader is single-camera, so one Instant suffices
         let last_motion: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
@@ -355,6 +369,41 @@ impl HlsUploader {
                 });
             }
 
+            // Periodic orphan sweep — see SWEEP_EVERY_CYCLES comment above.
+            sweep_counter = sweep_counter.wrapping_add(1);
+            if sweep_counter >= SWEEP_EVERY_CYCLES {
+                sweep_counter = 0;
+                let out_dir = self.config.output_dir.clone();
+                let cam_name = camera_name.clone();
+                let d = dash.clone();
+                let keep = sweep_keep_count;
+                tokio::task::spawn_blocking(move || {
+                    match sweep_orphan_segments(&out_dir, keep) {
+                        Ok((n, bytes)) if n > 0 => {
+                            d.log_warn(format!(
+                                "Orphan sweep ({}): removed {} stale segment(s), freed {} KB",
+                                cam_name,
+                                n,
+                                bytes / 1024,
+                            ));
+                            tracing::warn!(
+                                "Orphan sweep for {}: removed {} stale segment(s), freed {} KB",
+                                cam_name,
+                                n,
+                                bytes / 1024,
+                            );
+                        }
+                        Ok(_) => {
+                            // Nothing to do — the normal cleanup paths
+                            // kept the directory tidy.
+                        }
+                        Err(e) => {
+                            tracing::debug!("Orphan sweep failed for {}: {}", cam_name, e);
+                        }
+                    }
+                });
+            }
+
             tokio::time::sleep(poll_interval).await;
         }
     }
@@ -414,6 +463,70 @@ fn extract_sequence_number(filename: &str) -> Option<u64> {
     num_part.parse().ok()
 }
 
+/// Reap orphaned `segment_*.ts` files from a camera's HLS output directory.
+///
+/// The inline cleanup in the upload path only runs inside `Ok(true)` — if a
+/// segment push fails (network, auth, rate limit) its `.ts` is left on disk,
+/// and if the scan window (`scan_start..oldest_to_keep`) ever falls behind
+/// by more than its width, files older than the window are orphaned
+/// forever.  On a Pi 4 with a flaky uplink we've seen `data/hls/{cam}/`
+/// fill a 32 GB SD card in ~2 days.
+///
+/// FFmpeg's own `-hls_flags delete_segments` (added in the same change as
+/// this sweeper) handles the common case; this function catches anything
+/// FFmpeg missed — e.g. files written before we added the flag, or files
+/// left behind after an FFmpeg crash.
+///
+/// Keeps the `keep_count` segments with the **highest sequence numbers**
+/// (not mtime — sequence is monotonic, filesystem timestamps on FAT / SD
+/// cards can skew by seconds) and removes the rest.  Returns
+/// `(files_removed, bytes_freed)`.
+pub(crate) fn sweep_orphan_segments(
+    output_dir: &std::path::Path,
+    keep_count: usize,
+) -> std::io::Result<(usize, u64)> {
+    let mut segments: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    for entry in std::fs::read_dir(output_dir)?.flatten() {
+        // Skip non-UTF8 filenames explicitly rather than mangling them
+        // through `to_string_lossy`.  `to_string_lossy` would turn a
+        // non-UTF8 byte into `�`, which then silently fails the
+        // `segment_` prefix match — meaning a weirdly-named orphan
+        // (shouldn't exist; FFmpeg only writes ASCII) would never be
+        // reaped.  Being explicit costs nothing and keeps the sweeper
+        // honest: "I only touch files I fully understand."
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("segment_") || !name.ends_with(".ts") {
+            continue;
+        }
+        let Some(seq) = extract_sequence_number(name) else {
+            continue;
+        };
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        segments.push((seq, entry.path(), size));
+    }
+
+    if segments.len() <= keep_count {
+        return Ok((0, 0));
+    }
+
+    // Sort by sequence ASC so the tail is the newest `keep_count`
+    // segments.  Drop everything before the tail.
+    segments.sort_by_key(|(seq, _, _)| *seq);
+    let remove_count = segments.len() - keep_count;
+    let mut freed = 0u64;
+    let mut removed = 0usize;
+    for (_, path, size) in segments.into_iter().take(remove_count) {
+        if std::fs::remove_file(&path).is_ok() {
+            freed += size;
+            removed += 1;
+        }
+    }
+    Ok((removed, freed))
+}
+
 // File watcher (notify crate) was removed because ReadDirectoryChangesW
 // on Windows silently stops delivering events after ~95 segments.
 // Replaced by simple 1-second polling in the upload loop above.
@@ -438,5 +551,81 @@ mod tests {
         assert_eq!(config.camera_id, "camera_123");
         assert_eq!(config.local_buffer_size, 5);
         assert_eq!(config.retry_count, 3);
+    }
+
+    // ── Orphan sweeper regression tests ───────────────────────────────
+    //
+    // These lock in the disk-full recovery path added in v0.1.16 after
+    // a Pi 4 deployment filled its SD card with segments the inline
+    // upload cleanup had missed.  See `docs/runbooks/video-not-showing.md`.
+
+    fn write_segment(dir: &std::path::Path, seq: u64, bytes: &[u8]) {
+        let path = dir.join(format!("segment_{:05}.ts", seq));
+        std::fs::write(&path, bytes).expect("write segment");
+    }
+
+    #[test]
+    fn sweep_keeps_newest_segments_by_sequence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for seq in 1..=20u64 {
+            write_segment(tmp.path(), seq, &[0u8; 1024]);
+        }
+        let (removed, freed) = sweep_orphan_segments(tmp.path(), 5).expect("sweep ok");
+        assert_eq!(removed, 15, "should remove 15 oldest of 20");
+        assert_eq!(freed, 15 * 1024, "should report bytes freed");
+
+        // Only segments 16..=20 should remain.
+        let mut remaining: Vec<u64> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                extract_sequence_number(&name)
+            })
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec![16, 17, 18, 19, 20]);
+    }
+
+    #[test]
+    fn sweep_noop_when_below_keep_count() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for seq in 1..=3u64 {
+            write_segment(tmp.path(), seq, b"x");
+        }
+        let (removed, freed) = sweep_orphan_segments(tmp.path(), 10).expect("sweep ok");
+        assert_eq!(removed, 0);
+        assert_eq!(freed, 0);
+        let count = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 3, "no segments should be deleted");
+    }
+
+    #[test]
+    fn sweep_ignores_non_segment_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Real segments
+        for seq in 1..=10u64 {
+            write_segment(tmp.path(), seq, b"ts");
+        }
+        // Files the sweeper must not touch.
+        std::fs::write(tmp.path().join("stream.m3u8"), "#EXTM3U\n").unwrap();
+        std::fs::write(tmp.path().join("README"), "hi").unwrap();
+        std::fs::write(tmp.path().join("segment_bogus.ts"), "x").unwrap();
+
+        let (removed, _) = sweep_orphan_segments(tmp.path(), 3).expect("sweep ok");
+        assert_eq!(removed, 7, "only segment_NNNNN.ts files should be reaped");
+
+        // Non-segment files must still exist.
+        assert!(tmp.path().join("stream.m3u8").exists());
+        assert!(tmp.path().join("README").exists());
+        assert!(tmp.path().join("segment_bogus.ts").exists());
+    }
+
+    #[test]
+    fn sweep_handles_nonexistent_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does-not-exist");
+        let result = sweep_orphan_segments(&missing, 5);
+        assert!(result.is_err(), "should surface the io::Error to caller");
     }
 }

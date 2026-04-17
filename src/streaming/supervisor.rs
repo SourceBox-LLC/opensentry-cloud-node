@@ -158,7 +158,10 @@ pub async fn supervise_hls(
         };
 
         if let Err(e) = start_result {
-            let err = format!("FFmpeg start failed: {}", e);
+            let err = annotate_with_disk_state(
+                format!("FFmpeg start failed: {}", e),
+                &hls_config.output_dir,
+            );
             dash.log_warn(format!("[{}] supervisor: {}", camera_name, err));
 
             // One-shot fallback on the very first attempt: if primary
@@ -223,9 +226,10 @@ pub async fn supervise_hls(
         // ── Poll until FFmpeg exits or we're told to stop ──────────────
         loop {
             if stop_flag.load(Ordering::Relaxed) {
-                // Best-effort kill before we drop the generator —
-                // HlsGenerator has no Drop impl, so without this the
-                // child would leak until the OS reaps it.
+                // Best-effort kill before return so we surface any kill
+                // error to the log.  `HlsGenerator`'s Drop impl also
+                // calls `stop()` as a fallback, but it swallows errors
+                // there — we'd rather see them in tracing at shutdown.
                 let _ = generator.stop();
                 return;
             }
@@ -257,10 +261,13 @@ pub async fn supervise_hls(
             };
 
             let alive_for = alive_since.elapsed();
-            let err = format!(
-                "FFmpeg exited with {} after running {}s",
-                status,
-                alive_for.as_secs()
+            let err = annotate_with_disk_state(
+                format!(
+                    "FFmpeg exited with {} after running {}s",
+                    status,
+                    alive_for.as_secs()
+                ),
+                &hls_config.output_dir,
             );
             dash.log_warn(format!("[{}] {}", camera_name, err));
 
@@ -313,6 +320,52 @@ fn start_with(
     match source {
         PipelineSource::Device(path) => generator.start_from_device(path),
         PipelineSource::TestPattern(w, h, fps) => generator.start_from_frames(*w, *h, *fps),
+    }
+}
+
+/// Report free bytes on the filesystem containing `path`.
+///
+/// Returns `None` if the query fails or isn't implemented for this OS.
+/// Used by the supervisor to annotate crash reports when the box is
+/// almost certainly out of disk — which on a Pi running for days with
+/// a flaky uplink is the most common cause of an FFmpeg bounce loop
+/// that nothing in the stack can recover from.
+#[cfg(target_os = "linux")]
+fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statvfs` writes only to the buffer we provide; the path
+    // is a valid NUL-terminated C string we just constructed.
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+    if rc != 0 {
+        return None;
+    }
+    Some((buf.f_bavail as u64).saturating_mul(buf.f_bsize as u64))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn free_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// If `output_dir`'s filesystem has less than this many bytes free, we
+/// annotate supervisor crash messages with a "(disk exhausted)" tag so
+/// the dashboard, heartbeats, and `get_node` MCP tool all surface the
+/// real cause without requiring SSH.  Chosen small enough that a
+/// healthy Pi never trips it (a few hours of HLS segments is ~1 GB)
+/// but large enough to catch the tail of the fill.
+const LOW_DISK_THRESHOLD_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+
+/// Prepend a "(disk exhausted)" tag to `err` if the output dir's
+/// filesystem is below `LOW_DISK_THRESHOLD_BYTES`.  No-op otherwise.
+fn annotate_with_disk_state(err: String, output_dir: &std::path::Path) -> String {
+    match free_bytes(output_dir) {
+        Some(free) if free < LOW_DISK_THRESHOLD_BYTES => {
+            let mib = free / (1024 * 1024);
+            format!("(disk exhausted: {} MiB free) {}", mib, err)
+        }
+        _ => err,
     }
 }
 

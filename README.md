@@ -117,7 +117,7 @@ Type `/` and press **Enter** to open the command menu.
 | `/reauth confirm` | Clear credentials and re-run setup |
 | `/back` | Return to the dashboard |
 
-Press **Esc** to return from settings. Destructive commands require the `confirm` argument.
+Press **Esc** to return from settings. Destructive commands (`/wipe`, `/reauth`) require confirmation: either press the command **twice within 30 seconds** — the first press arms the confirmation, the second executes — or pass the `confirm` argument explicitly (`/wipe confirm`). Any other command in between clears the armed state.
 
 ---
 
@@ -192,7 +192,7 @@ docker run -d \
   ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
 ```
 
-Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.4`. Major.minor tags like `:0.1` are also published and float to the newest patch.
+Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.16`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases) for the current version.
 
 ### Docker Compose
 
@@ -381,11 +381,38 @@ sudo pacman -S ffmpeg          # Arch
 </details>
 
 <details>
+<summary><strong>Raspberry Pi (4 / 5, 64-bit)</strong></summary>
+
+CloudNode runs on 64-bit Raspberry Pi OS. Build from source (the prebuilt ARM64 Docker image also works, but a native build skips the container USB-passthrough setup):
+
+```bash
+sudo apt install -y build-essential pkg-config libssl-dev ffmpeg
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
+cd opensentry-cloud-node
+cargo build --release
+./target/release/opensentry-cloudnode setup
+```
+
+The first `cargo build --release` on a Pi 4 takes 15–20 minutes. Subsequent incremental builds after `git pull` are 1–3 minutes.
+
+**Software encoding only.** CloudNode deliberately does **not** use the Pi's `h264_v4l2m2m` hardware encoder — it produces a malformed SPS that the browser's Media Source Extensions layer rejects (video never appears, even though FFmpeg reports success). The node encodes with `libx264 -preset ultrafast` instead, which sustains 1080p30 at about 1.5 cores per camera on a Pi 4. A Pi 4 comfortably runs 2 cameras at 1080p30; a Pi 5 runs 3–4.
+
+**USB cameras.** Plug webcams **directly into the Pi's USB ports** rather than through a hub when possible — unpowered hubs frequently brown out under the combined draw of two UVC cameras streaming at 1080p, and a hub fault can wedge the entire xhci controller until reboot. Use the blue USB 3.0 ports (top pair) for more power budget even if the camera only needs USB 2.0 bandwidth.
+
+**Thermal.** Two simultaneous `libx264` streams will push a bare Pi 4 past 80 °C and trip the kernel's thermal throttle, dropping frame rate. A heatsink and fan are a small upgrade that make this non-issue. Check with `vcgencmd measure_temp` and `vcgencmd get_throttled` (anything other than `throttled=0x0` indicates a power or thermal event).
+
+</details>
+
+<details>
 <summary><strong>Windows</strong></summary>
 
 CloudNode runs natively on Windows using DirectShow. FFmpeg is downloaded automatically during setup to `./ffmpeg/bin/`.
 
 Camera names (e.g. `MEE USB Camera`, `Integrated Webcam`) are detected via DirectShow enumeration.
+
+**WSL2 deployment (optional):** The setup wizard on Windows can also deploy inside WSL2 (useful for Linux-native builds and tighter V4L2 integration). The wizard's WSL preflight detects whether WSL is installed, finds a usable distro, installs FFmpeg inside it, and prints the `usbipd bind` / `usbipd attach --wsl` commands you need to run in an admin PowerShell to forward USB cameras from the host into the distro. Elevation-required steps (installing WSL, installing `usbipd-win`, `usbipd bind`) are printed for the operator to run rather than executed on their behalf.
 
 </details>
 
@@ -405,6 +432,8 @@ You may need to grant camera access in **System Settings > Privacy & Security > 
 ---
 
 ## Troubleshooting
+
+For the full end-to-end "live video isn't showing up in the dashboard" workflow, see [`docs/runbooks/video-not-showing.md`](docs/runbooks/video-not-showing.md). The most common causes are also captured below.
 
 <details>
 <summary><strong>No cameras detected</strong></summary>
@@ -472,6 +501,49 @@ Pass each camera device explicitly:
 ```bash
 docker run --device /dev/video0:/dev/video0 ...
 ```
+
+</details>
+
+<details>
+<summary><strong>FFmpeg exits with status 234 in a restart loop (encoder open failure)</strong></summary>
+
+The dashboard log shows repeated `FFmpeg exited with exit status: 234` and messages like `Could not open encoder before EOF` or `Error parsing option '...' with value '...'`. This means the selected encoder can't be initialized with the current argument set.
+
+1. Look for the line `Selected encoder: <name>` or `Using software encoder (configured)` in the startup log to see which encoder was picked.
+2. If the encoder is a hardware codec (`h264_nvenc`, `h264_qsv`, `h264_amf`) and the driver on this machine is broken, override with software: set `OPENSENTRY_ENCODER=libx264` or change it via the setup wizard.
+3. On CloudNode ≥ v0.1.14 the `h264_v4l2m2m` Pi codec is automatically retired — a stale DB entry naming it is cleared on next launch (look for `Retired encoder '…' in config — clearing for re-detection`). If you're on an older node, run `/wipe` from the dashboard's settings page to clear the cached encoder and let auto-detect re-run.
+4. If libx264 itself crashes with `Error parsing option 'level' with value 'auto'`, upgrade — that was a bug in the libx264 branch of `build_encoding_args` fixed in v0.1.15.
+
+</details>
+
+<details>
+<summary><strong>Raspberry Pi: cameras drop off the USB bus under load</strong></summary>
+
+Symptoms: cameras appear at startup then disappear after minutes/hours; `lsusb` shows only root hubs; `dmesg` shows `usb usb1-port1: disabled by hub (EMI?)` or `device descriptor read/64, error -110` or `xhci_hcd ... Setup ERROR`.
+
+This is almost always a USB hub fault or power issue, not a software problem.
+
+1. **Reboot** (`sudo reboot`). The xhci controller can wedge in a state hot-replugging doesn't recover; only a kernel restart clears it.
+2. **Plug cameras directly into the Pi's ports** — remove any external hub, splitter, or extension cable from the path. Unpowered hubs routinely brown out under two 1080p UVC cameras.
+3. **Check power** — `vcgencmd get_throttled` must return `0x0`. Any non-zero value means under-voltage or over-current events have happened; use the official 5V/3A USB-C supply.
+4. **Try USB 3.0 (blue) ports** — more power budget than USB 2.0 (black) even for USB 2.0 devices.
+5. **Verify post-reboot** — `lsusb` should show your camera's VID:PID (e.g. `1bcf:2283 Sunplus ... MEE USB Camera`), and `/dev/video0` / `/dev/video2` should exist.
+
+If a full power cycle, direct-to-Pi connection, and official PSU all fail, the camera itself is the most likely cause — test each camera alone on the Pi before replacing hubs.
+
+</details>
+
+<details>
+<summary><strong>Video plays in the dashboard but browser shows a black frame</strong></summary>
+
+The CloudNode dashboard's `STREAMING` status and the ↑ segs counter only prove that segments are being produced and pushed to the backend — not that they're decodable by the browser's MSE (Media Source Extensions) layer.
+
+1. In the Command Center dashboard, check the camera card's codec badge. A valid line like `avc1.42e01f` (Baseline, Level 3.1) or `avc1.4d401e` (Main, Level 3.0) means the SPS is parseable. A missing codec badge or `avc1.000000` means the encoder produced a malformed bitstream.
+2. On the node, run `ffprobe` against a recent segment:
+   ```bash
+   ls -t data/hls/*/segment_*.ts | head -1 | xargs ffprobe 2>&1 | head -20
+   ```
+   Valid output shows a recognizable `Profile` (Baseline / Main / High) and a positive `Level` (e.g. `Level: 31`). If you see `Profile: unknown` or `Level: -99`, the encoder is producing garbage — force `libx264` as described in the encoder-crash entry above.
 
 </details>
 

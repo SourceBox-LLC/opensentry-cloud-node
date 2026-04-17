@@ -25,6 +25,19 @@ use std::io::{BufRead, BufReader};
 
 use crate::error::Result;
 
+/// Value passed to FFmpeg's `-hls_flags` option.
+///
+/// `append_list`      — don't clobber the `.m3u8` on each write (the uploader
+///                      polls this file to discover new segments).
+/// `delete_segments`  — reap `.ts` files on disk when they fall off the end
+///                      of the `hls_list_size` window.  Without this, the
+///                      HLS dir grows without bound when the uploader's
+///                      cleanup path misses a file (upload failure, stall,
+///                      auth error) — on a Pi 4 with a flaky uplink that
+///                      fills a 32 GB SD card in ~2 days.  See
+///                      `docs/runbooks/video-not-showing.md`.
+pub(crate) const HLS_FLAGS_VALUE: &str = "append_list+delete_segments";
+
 /// HLS segment information
 #[derive(Debug, Clone)]
 pub struct HlsSegment {
@@ -637,7 +650,7 @@ impl HlsGenerator {
         );
         cmd.args(&encoding_args);
 
-        // HLS output args
+        // HLS output args.  `-hls_flags` value documented on HLS_FLAGS_VALUE.
         cmd.args([
             "-f",
             "hls",
@@ -646,7 +659,7 @@ impl HlsGenerator {
             "-hls_list_size",
             &self.config.playlist_size.to_string(),
             "-hls_flags",
-            "append_list",
+            HLS_FLAGS_VALUE,
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",
@@ -762,8 +775,9 @@ impl HlsGenerator {
             &self.config.segment_duration.to_string(),
             "-hls_list_size",
             &self.config.playlist_size.to_string(),
+            // Same `-hls_flags` value as the device path — see HLS_FLAGS_VALUE.
             "-hls_flags",
-            "append_list",
+            HLS_FLAGS_VALUE,
             "-hls_segment_filename",
             &self
                 .config
@@ -799,13 +813,24 @@ impl HlsGenerator {
         Ok("libx264".to_string())
     }
 
-    /// Stop HLS generation
+    /// Stop HLS generation.
+    ///
+    /// Sends SIGKILL, then **waits for the child** so the PID is reaped.
+    /// Without the `.wait()` call, a zombie process accumulates on Unix
+    /// every time the supervisor kills a wedged FFmpeg — and with the
+    /// stall-flag watchdog (see `supervisor.rs`) that can happen several
+    /// times an hour on a thermally-stressed Pi, eventually exhausting
+    /// the PID table.  The wait is bounded because we just sent SIGKILL
+    /// and the kernel always delivers it.
     pub fn stop(&mut self) -> Result<()> {
         self.running.store(false, Ordering::SeqCst);
 
         if let Some(mut child) = self.ffmpeg_process.take() {
             tracing::info!("Stopping FFmpeg process");
             child.kill()?;
+            // Reap immediately — SIGKILL can't be blocked, so this
+            // returns as soon as the kernel runs the death signal.
+            let _ = child.wait();
         }
 
         Ok(())
@@ -1135,5 +1160,33 @@ mod tests {
         assert_eq!(find_arg_pair(&args, "-tune"), Some("zerolatency"));
         assert_eq!(find_arg_pair(&args, "-b:v"), Some("2500k"));
         assert_eq!(find_arg_pair(&args, "-c:a"), Some("aac"));
+    }
+
+    /// `-hls_flags` MUST include `delete_segments` so FFmpeg reaps `.ts`
+    /// files that fall out of the sliding `hls_list_size` window.
+    ///
+    /// Pre-v0.1.16 the value was just `append_list`, which meant the HLS
+    /// output directory grew without bound whenever the uploader's
+    /// cleanup path missed a file (upload failure, stalled task, auth
+    /// error, etc.).  On a Pi running for days with a flaky uplink this
+    /// filled 32 GB SD cards in production — a "cheap refactor" that
+    /// drops `delete_segments` would resurrect that bug.
+    ///
+    /// `append_list` must ALSO stay — without it FFmpeg truncates the
+    /// playlist on each write, breaking the uploader's discovery path.
+    #[test]
+    fn hls_flags_include_delete_segments_and_append_list() {
+        assert!(
+            HLS_FLAGS_VALUE.contains("delete_segments"),
+            "HLS_FLAGS_VALUE must include `delete_segments` so FFmpeg reaps \
+             rotated `.ts` files.  Got: {:?}",
+            HLS_FLAGS_VALUE
+        );
+        assert!(
+            HLS_FLAGS_VALUE.contains("append_list"),
+            "HLS_FLAGS_VALUE must include `append_list` or the uploader \
+             can't watch the playlist for new segments.  Got: {:?}",
+            HLS_FLAGS_VALUE
+        );
     }
 }

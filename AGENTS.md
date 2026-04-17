@@ -2,6 +2,11 @@
 
 OpenSentry CloudNode — turns USB webcams into cloud-connected security cameras. Rust binary that transcodes camera video into HLS and pushes each segment directly into the Command Center's in-memory cache. **No Tigris, no S3, no presigned URLs.**
 
+**Companion docs:**
+- [`README.md`](README.md) — user-facing install and operation guide.
+- [`docs/runbooks/`](docs/runbooks/) — runbooks for common failure modes (start with `video-not-showing.md`).
+- [`docs/adr/`](docs/adr/) — architecture decision records (e.g. `0001-pi-software-encoding.md` for why Pi is libx264-only).
+
 ## Build & Test Commands
 
 ```bash
@@ -71,14 +76,20 @@ src/
 │   └── mod.rs
 ├── setup/              # Interactive TUI setup wizard (crossterm + inquire)
 │   ├── mod.rs          # Setup flow
-│   ├── platform.rs     # Platform detection
+│   ├── platform.rs     # Platform detection (Linux / Windows / macOS / Pi / WSL)
 │   ├── tui.rs          # Terminal UI
 │   ├── ui.rs           # Rendering helpers
 │   ├── animations.rs   # Progress animations
 │   ├── validator.rs    # Credential validation via POST /api/nodes/validate
-│   └── recovery.rs     # Error recovery and user guidance
+│   ├── recovery.rs     # Error recovery and user guidance
+│   └── wsl_preflight.rs # WSL2 Scope A preflight: detect WSL, pick a usable distro,
+│                        #   install FFmpeg in-distro, print usbipd bind/attach
+│                        #   commands for each detected USB camera. Actions that
+│                        #   need admin elevation are printed, not executed.
 ├── streaming/          # HLS pipeline
 │   ├── hls_generator.rs    # FFmpeg subprocess per camera (HLS muxer)
+│   ├── supervisor.rs       # Per-camera FFmpeg supervisor: exponential-backoff restart,
+│   │                       #   stall-flag watchdog, propagates CameraStatus to the dashboard
 │   ├── hls_uploader.rs     # Watches HLS dir, drives playlist updates + motion event channel
 │   ├── segment_uploader.rs # Posts each .ts to POST /push-segment with retry/backoff
 │   ├── motion_detector.rs  # Parallel FFmpeg scene-change scorer
@@ -87,6 +98,11 @@ src/
 └── storage/            # SQLite-backed local storage
     ├── database.rs     # NodeDatabase: snapshots, recordings, config (all BLOB/KV)
     └── mod.rs
+
+examples/
+└── wsl_preflight_probe.rs  # Manual probe that runs the WSL2 preflight against
+                            #   the real host and prints distros / ffmpeg / usbipd state.
+                            #   Run with: cargo run --example wsl_preflight_probe
 ```
 
 ## Architecture
@@ -99,13 +115,38 @@ src/
 1. Create live TUI dashboard (raw mode, crossterm events)
 2. Detect cameras (`camera::detect_cameras()`)
 3. Register with Command Center (`api_client.register()`)
-4. Detect hardware encoder once (NVENC/QSV/AMF), persist to DB
-5. Create HLS generator per camera (FFmpeg subprocess)
-6. Spawn HLS uploader tasks (segment push + playlist update + codec detection)
-7. Spawn motion detector per camera (second FFmpeg probe for scene-change scoring)
-8. Launch local HTTP server (port 8080) + WebSocket client
-9. Start retention task (enforces `max_size_gb` via DB)
-10. Run dashboard render loop (blocks until `/quit` or Ctrl+C)
+4. Detect hardware encoder once (NVENC/QSV/AMF on x86; **libx264 forced on Raspberry Pi**), persist to DB
+5. Coerce any retired encoders stored in DB (`RETIRED_ENCODERS` — see "Encoder coercion" below) back to auto-detect
+6. Spawn one `FFmpegSupervisor` per camera (wraps `HlsGenerator` — see "Supervisor" below)
+7. Spawn HLS uploader tasks (segment push + playlist update + codec detection)
+8. Spawn motion detector per camera (second FFmpeg probe for scene-change scoring)
+9. Launch local HTTP server (port 8080) + WebSocket client
+10. Start retention task (enforces `max_size_gb` via DB)
+11. Run dashboard render loop (blocks until `/quit` or Ctrl+C)
+
+### FFmpeg supervisor (`streaming/supervisor.rs`)
+
+Each camera's HLS pipeline runs under an `FFmpegSupervisor` rather than being spawned once and forgotten. The supervisor:
+
+- Polls the FFmpeg child every 2s (`POLL_INTERVAL`).
+- On exit, restarts FFmpeg with exponential backoff (1s → 2s → 4s → … capped at 30s, matching the WebSocket reconnect ceiling).
+- Gives up and marks the camera `Failed` if it restarts more than 5 times inside a 60s window.
+- Resets backoff after 60s of healthy streaming (`HEALTHY_RESET_THRESHOLD`).
+- Watches a shared `stall_flag: Arc<AtomicBool>` that the uploader raises after ~20s of no new segments — a wedged-but-alive FFmpeg (V4L2 deadlock, thermal throttle below real-time, USB bandwidth starvation) gets killed and routed through the normal restart path.
+- Pushes `CameraStatus::Streaming / Restarting / Failed` into the dashboard so WebSocket and HTTP heartbeats report real pipeline state instead of the old hardcoded `"streaming"`.
+- Supports a `PipelineSource::TestPattern(w, h, fps)` fallback used in dev / CI when a real webcam isn't available.
+
+Before this supervisor existed, an FFmpeg crash (disk-full, closed V4L2 fd, segment-writer failure) silently left the camera offline from the browser's point of view while the node still reported `streaming` in every heartbeat — backend MCP tools ended up telling users to "update CloudNode" when the real failure was upstream.
+
+**Disk-exhausted annotation.** On Linux the supervisor calls `libc::statvfs` on the HLS output dir before every start and after every crash. If the filesystem is under 256 MiB free, the error string surfaced to `CameraStatus::Restarting` / `CameraStatus::Failed` is prefixed with `(disk exhausted: N MiB free)`. That string flows into heartbeats and the `get_node` MCP tool, so an operator never has to SSH in to diagnose ENOSPC — they see it directly in the dashboard. Only implemented on Linux because the Pi is where the failure mode lives; on other platforms the helper returns `None` and the error string passes through untouched.
+
+**Orphan segment sweeper** (`streaming/hls_uploader.rs` → `sweep_orphan_segments`). Belt-and-suspenders for the `-hls_flags delete_segments` guarantee. Every ~60s the uploader lists `data/hls/{cam}/segment_*.ts`, sorts by embedded sequence number, keeps the newest `local_buffer_size + 60` (~30+ MB upper bound per camera), and removes the rest. Runs on `tokio::task::spawn_blocking` so large directories don't stall the poll loop. Unit tests in `hls_uploader.rs::tests` (`sweep_keeps_newest_segments_by_sequence`, `sweep_noop_when_below_keep_count`, `sweep_ignores_non_segment_files`, `sweep_handles_nonexistent_dir`) lock the behaviour in.
+
+### Encoder coercion (`src/node/runner.rs:174-188`)
+
+The Pi's `h264_v4l2m2m` hardware encoder writes a non-conforming SPS on every Pi hardware revision we've tested, so it's been retired across the codebase (see `HlsGenerator::detect_hw_encoder` for the full reasoning). Because the runner normally only re-detects the encoder when the DB value is empty, a Pi that completed setup on v0.1.12 would otherwise keep using `h264_v4l2m2m` forever.
+
+The coercion works by walking `RETIRED_ENCODERS: &[&str] = &["h264_v4l2m2m"]` against the stored value; if any match, the DB value is cleared to force re-detection on the next start. New retirements only need a one-liner added to that slice.
 
 ### Video push path
 
@@ -154,6 +195,21 @@ FFmpeg subprocess transcoding camera → HLS segments:
 - HLS directories wiped on startup so segment numbering resets cleanly
 - Encoder detected once at startup and shared across all cameras
 
+**Encoder-specific args** (`HlsGenerator::build_encoding_args`):
+
+| Encoder | Accepts `-level auto`? | Preset | Notes |
+|---------|------------------------|--------|-------|
+| `h264_nvenc` (NVIDIA) | Yes | `p5` | CBR + zerolatency, `-level auto` lets NVENC pick |
+| `h264_qsv` (Intel) | Yes | `veryfast` | CBR |
+| `h264_amf` (AMD) | Yes | `speed` | CBR |
+| `libx264` (CPU fallback) | **No** — level omitted | `ultrafast` | libx264 auto-computes level and embeds it in the SPS |
+
+**HLS muxer flags** (`HLS_FLAGS_VALUE` in `hls_generator.rs`): passed to every FFmpeg invocation as `-hls_flags append_list+delete_segments`. `append_list` is required for the uploader's playlist-polling loop (it would otherwise see an empty playlist every time FFmpeg truncates on write); `delete_segments` tells FFmpeg to reap `.ts` files when they fall off the end of the sliding `hls_list_size` window. Before v0.1.16 only `append_list` was set, which meant the HLS output dir grew without bound whenever the uploader's inline cleanup missed a file (upload failure, stall, auth error) — on a Pi 4 with a flaky uplink that filled a 32 GB SD card in ~2 days. The regression test `hls_flags_include_delete_segments_and_append_list` locks both flags in.
+
+`-level auto` is a driver-specific string accepted only by the hardware encoders; passing it to libx264 errors with `Error parsing option 'level' with value 'auto'` and the encoder refuses to open. Omitting `-level` entirely lets libx264 compute the right level from resolution / framerate / bitrate and write it into the SPS — which is what hls.js / MSE needs to decode.
+
+`-preset ultrafast` (not `veryfast`) is deliberate for the Pi 4 case: at 1080p30 ultrafast runs ~1.5 cores per stream, so two simultaneous cameras fit in the Pi 4's 4-core budget with headroom for the upload / dashboard / WebSocket tasks. `veryfast` is ~2-3 cores per stream and would starve the second camera on a Pi. The regression tests `libx264_args_omit_level_flag` and `libx264_args_use_ultrafast_preset` in `hls_generator.rs` lock both decisions in.
+
 ### Local storage
 
 SQLite database (`data/node.db`):
@@ -198,9 +254,15 @@ All outbound calls use `ApiClient` in `src/api/client.rs`:
 ## Dashboard TUI (`dashboard.rs`)
 
 - Full-screen live dashboard with camera status, upload stats, log viewer
-- Slash command bar (`/help`, `/settings`, `/wipe confirm`, `/export-logs`, `/reauth confirm`, `/clear`, `/status`, `/quit`)
+- Slash command bar (`/help`, `/settings`, `/wipe`, `/export-logs`, `/reauth`, `/clear`, `/status`, `/quit`)
 - Settings page with config display and action commands
 - Raw mode input via crossterm events; `\x1B[nG` cursor positioning for right border alignment
+
+### Destructive-command confirm-on-repeat
+
+`/wipe` and `/reauth` don't execute the first time they're entered. They arm a `pending_confirm: Option<(command, Instant)>` on the dashboard; the **same command typed again within 30 seconds** (or the explicit `confirm` argument, e.g. `/wipe confirm`) actually runs it. Any unrelated command entered in between (including `/clear` or `/status`) drops the pending confirmation so an operator can't accidentally confirm a stale `/wipe` hours later.
+
+The logic lives in `Dashboard::check_or_arm_confirm(cmd, explicit_arg, bare)` and is exercised by the test block near the bottom of `dashboard.rs` (look for `check_or_arm_confirm` assertions). Both commands also call `ApiClient::notify_wipe_started` / `notify_reauth` before the local action runs, so the backend logs the intent before the node potentially takes itself offline.
 
 ## Key Patterns
 
@@ -236,8 +298,26 @@ mod windows;
 ## Testing
 
 **Unit tests:** `cargo test`
+- 121+ unit tests across streaming / setup / node modules
 - Integration tests in `tests/integration.rs`
 - Uses `tokio-test` for async testing
+- Key regression tests in `streaming/hls_generator.rs`:
+  - `libx264_args_omit_level_flag` — guards against re-introducing `-level auto` on libx264
+  - `libx264_args_use_ultrafast_preset` — locks the Pi 4 CPU budget
+  - `hw_encoder_branches_still_use_level_auto` — makes sure the libx264 fix didn't break NVENC/QSV/AMF
+  - `libx264_args_contain_required_pieces` — pix_fmt, codec, profile, audio
+  - `hls_flags_include_delete_segments_and_append_list` — guards the v0.1.16 disk-fill fix (both flags must stay)
+- Orphan-sweeper tests in `streaming/hls_uploader.rs`:
+  - `sweep_keeps_newest_segments_by_sequence` — retention correctness
+  - `sweep_noop_when_below_keep_count` — below-threshold no-op
+  - `sweep_ignores_non_segment_files` — `stream.m3u8` / other files untouched
+  - `sweep_handles_nonexistent_dir` — surfaces `io::Error` instead of panicking
+
+**Manual probes (examples/):**
+
+```bash
+cargo run --example wsl_preflight_probe    # Print WSL + usbipd state without running setup
+```
 
 **Manual check:**
 ```bash
@@ -247,6 +327,8 @@ cargo run -- --once     # Run one detection cycle and exit (if supported by curr
 ## Docker
 
 **Build:** `docker build -t opensentry-cloudnode:latest .`
+
+Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.16`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
 
 **Run:**
 ```bash
@@ -270,9 +352,21 @@ docker run -d \
 - Add user to video group: `sudo usermod -a -G video $USER`
 - Camera devices: `/dev/video0`, `/dev/video1`, etc.
 
+**Raspberry Pi (Linux ARM64):** production-ready, build from source only
+- Build: `cargo build --release` — no prebuilt binaries on the releases page for ARM
+- Encoder: **libx264 CPU** only. `h264_v4l2m2m` is in `RETIRED_ENCODERS` because every Pi hardware revision we tested writes a non-conforming SPS that browsers reject.
+- Preset: libx264 `ultrafast` keeps a 1080p30 stream under ~1.5 cores on a Pi 4, leaving room for a second camera. See "HLS generation" for the full rationale.
+- USB: plug cameras into the Pi directly, not through an unpowered hub. Hub EMI faults show up as `usb-port: disabled by hub (EMI?)` + `xhci_hcd: Setup ERROR` in `dmesg` and wedge the whole USB controller until reboot.
+- Under-voltage: `vcgencmd get_throttled` — anything non-zero means the PSU is sagging and FFmpeg restarts will follow.
+
 **Windows:** production-ready (DirectShow)
 - FFmpeg auto-downloaded during setup to `./ffmpeg/bin/`
 - Camera names: `MEE USB Camera`, `Integrated Webcam`, etc.
+
+**Windows + WSL2:** alternative deployment path
+- Setup wizard detects the WSL2 option, runs `wsl_preflight.rs`, installs FFmpeg inside the chosen distro, and prints the `usbipd bind` / `usbipd attach --wsl` commands for each detected USB camera.
+- Steps that need admin elevation (installing WSL itself, installing `usbipd-win` via `winget`, running `usbipd bind`) are printed for the operator to run in an elevated PowerShell — we don't execute them (Scope A). Scope B would handle elevation programmatically.
+- `docker-desktop` distros are filtered out because they have no package manager and no v4l2 support.
 
 **macOS:** experimental (AVFoundation)
 - Requires FFmpeg: `brew install ffmpeg`
@@ -296,12 +390,15 @@ docker run -d \
 | `aes-gcm` / `sha2` / `rand` | AES-256-GCM encryption for API key at rest (key derived from OS machine ID) |
 | `bytes` | Zero-copy buffers for segment upload |
 | `base64` | Snapshot image transfer over WebSocket |
+| `percent-encoding` | URL-safe encoding for WebSocket query params with arbitrary key bytes |
+| `once_cell` | Lazy one-shot static initialisation (logging registry, encoder cache) |
 | `chrono` | Timestamps |
 | `uuid` | Unique identifiers |
 | `sysinfo` | System information (hostname, platform detection) |
 | `anyhow` / `thiserror` | Error handling |
 | `dotenvy` | Legacy `.env` loading |
 | `zip` | Installer archive extraction (Windows FFmpeg download) |
+| `libc` (Linux only) | Raw V4L2 `ioctl` for camera capability probing — see `src/camera/platform/linux.rs` |
 
 ## Code Conventions
 

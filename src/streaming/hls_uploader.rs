@@ -318,16 +318,48 @@ impl HlsUploader {
                                 );
                             }
 
-                            // Playlist push (background, non-blocking)
+                            // Playlist push (background, non-blocking).  Retry
+                            // on transient failure — a single dropped push
+                            // expires the backend's playlist cache and the
+                            // browser gets 404 "Stream not started yet" even
+                            // though fresh segments are still being uploaded.
+                            // Matches the spirit of SegmentUploader's retry
+                            // loop but with a shorter ceiling since playlists
+                            // are cheap (<4 KB) and a new one will be written
+                            // in another ~1 s anyway.
                             let api = api_client.clone();
                             let cam = cam_id_for_playlist;
                             let dir = output_dir;
                             tokio::spawn(async move {
                                 let playlist_path = dir.join("stream.m3u8");
-                                if let Ok(content) = tokio::fs::read_to_string(&playlist_path).await {
-                                    if content.starts_with("#EXTM3U") && content.contains("#EXTINF") {
-                                        if let Err(e) = api.update_playlist(&cam, &content).await {
-                                            tracing::warn!("Playlist push failed: {}", e);
+                                let content = match tokio::fs::read_to_string(&playlist_path).await {
+                                    Ok(c) => c,
+                                    Err(_) => return,
+                                };
+                                if !content.starts_with("#EXTM3U") || !content.contains("#EXTINF") {
+                                    return;
+                                }
+                                const MAX_ATTEMPTS: u32 = 3;
+                                let mut delay_ms: u64 = 250;
+                                for attempt in 1..=MAX_ATTEMPTS {
+                                    match api.update_playlist(&cam, &content).await {
+                                        Ok(_) => return,
+                                        Err(e) => {
+                                            if attempt == MAX_ATTEMPTS {
+                                                tracing::warn!(
+                                                    "Playlist push failed after {} attempts: {}",
+                                                    MAX_ATTEMPTS, e,
+                                                );
+                                            } else {
+                                                tracing::debug!(
+                                                    "Playlist push attempt {} failed ({}); retrying in {} ms",
+                                                    attempt, e, delay_ms,
+                                                );
+                                                tokio::time::sleep(
+                                                    std::time::Duration::from_millis(delay_ms),
+                                                ).await;
+                                                delay_ms = (delay_ms * 2).min(1000);
+                                            }
                                         }
                                     }
                                 }
@@ -426,10 +458,17 @@ fn spawn_motion_detection(
 
     tokio::spawn(async move {
         if let Some(score) = motion_detector::detect_motion(&segment_path, threshold).await {
-            // Check cooldown before sending (scoped to drop guard before await)
+            // Check cooldown before sending (scoped to drop guard before await).
+            // Recover from a poisoned lock rather than panicking — the protected
+            // state is just a timestamp; if a prior task died mid-critical-section
+            // the worst outcome is one extra motion event fires, not data loss.
+            // Without this, a single panic inside the critical section wedges all
+            // future motion detection on this node until the daemon restarts.
             let now = Instant::now();
             {
-                let mut guard = last_motion.lock().unwrap();
+                let mut guard = last_motion
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(last) = *guard {
                     if now.duration_since(last) < cooldown {
                         return;

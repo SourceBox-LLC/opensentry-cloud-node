@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">OpenSentry CloudNode</h1>
+  <h1 align="center">SourceBox Sentry CloudNode</h1>
   <p align="center">
     Turn any USB webcam into a cloud-connected security camera.
     <br />
@@ -20,7 +20,7 @@
 
 ---
 
-CloudNode runs on your local network, detects USB cameras, and streams live video to the [OpenSentry Command Center](https://opensentry-command.fly.dev) via HLS. All configuration is stored locally in an encrypted SQLite database — no cloud dependency for setup.
+CloudNode runs on your local network, detects USB cameras, and streams live video to the [SourceBox Sentry Command Center](https://opensentry-command.fly.dev) via HLS. All configuration is stored locally in an encrypted SQLite database — no cloud dependency for setup.
 
 **What it does:**
 
@@ -45,7 +45,7 @@ CloudNode runs on your local network, detects USB cameras, and streams live vide
 ### Prerequisites
 
 - A USB webcam
-- An [OpenSentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key (generated from the Settings page)
+- An [SourceBox Sentry Command Center](https://opensentry-command.fly.dev) account with a Node ID and API Key (generated from the Settings page)
 - **Docker** (recommended) or **Rust 1.70+** with **FFmpeg**
 
 ### Install
@@ -558,7 +558,7 @@ CloudNode uses GPL-3.0 to ensure users can always inspect, modify, and verify wh
 ---
 
 <p align="center">
-  <a href="https://opensentry-command.fly.dev">OpenSentry Command Center</a>
+  <a href="https://opensentry-command.fly.dev">SourceBox Sentry Command Center</a>
   &middot;
-  Made by the OpenSentry Team
+  Made by the SourceBox Sentry Team
 </p>

@@ -1,6 +1,6 @@
 # CloudNode docs
 
-Supplementary documentation for OpenSentry CloudNode. The top-level `README.md` is the user-facing install + operation guide; `AGENTS.md` is the developer / LLM-facing architecture reference. The docs in this tree cover the things that don't fit cleanly in either.
+Supplementary documentation for SourceBox Sentry CloudNode. The top-level `README.md` is the user-facing install + operation guide; `AGENTS.md` is the developer / LLM-facing architecture reference. The docs in this tree cover the things that don't fit cleanly in either.
 
 ## Runbooks (`docs/runbooks/`)
 

@@ -1,4 +1,4 @@
-// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -14,12 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+//! SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 //!
 //! This node runs on a local device (Raspberry Pi, Mini PC, etc.) and:
 //! - Detects USB cameras
 //! - Captures video frames
-//! - Streams to OpenSentry Command Center
+//! - Streams to SourceBox Sentry Command Center
 //! - Stores recordings locally
 //! - Serves recordings via HTTP
 
@@ -33,7 +33,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[derive(Parser)]
 #[command(name = "opensentry-cloudnode")]
 #[command(version)]
-#[command(about = "OpenSentry camera node - stream cameras to OpenSentry Cloud")]
+#[command(about = "SourceBox Sentry camera node - stream cameras to SourceBox Sentry Cloud")]
 struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -210,7 +210,7 @@ fn run_cloudnode(
     once: bool,
     config_path: Option<String>,
 ) -> Result<()> {
-    info!("Starting OpenSentry CloudNode v{}", env!("CARGO_PKG_VERSION"));
+    info!("Starting SourceBox Sentry CloudNode v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
     let config = Config::load(config_path.as_deref())?;
@@ -278,7 +278,7 @@ fn uninstall_cloudnode(force: bool) -> Result<()> {
     use colored::Colorize;
     
     println!("{}", "╔════════════════════════════════════════════════════╗".red());
-    println!("{}", "║          OpenSentry CloudNode Uninstall           ║".red());
+    println!("{}", "║          SourceBox Sentry CloudNode Uninstall           ║".red());
     println!("{}", "╚════════════════════════════════════════════════════╝".red());
     println!();
     
@@ -374,7 +374,7 @@ fn launch_in_terminal() -> std::result::Result<bool, anyhow::Error> {
 #[cfg(target_os = "windows")]
 fn show_terminal_required_message() {
     eprintln!();
-    eprintln!("  OpenSentry CloudNode");
+    eprintln!("  SourceBox Sentry CloudNode");
     eprintln!("  ────────────────────────────────────────");
     eprintln!();
     eprintln!("  This application requires a terminal window.");

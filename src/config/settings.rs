@@ -1,4 +1,4 @@
-// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -73,7 +73,7 @@ impl Default for NodeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudConfig {
-    /// OpenSentry Command Center URL
+    /// SourceBox Sentry Command Center URL
     pub api_url: String,
 
     /// Organization API key for authentication

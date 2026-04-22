@@ -1,4 +1,4 @@
-// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -267,7 +267,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
 
     panel_row(&format!(
         "  Open {} in your browser:",
-        "OpenSentry Command Center".cyan().bold()
+        "SourceBox Sentry Command Center".cyan().bold()
     ));
     panel_row(&format!(
         "  {} {}",
@@ -743,7 +743,7 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     panel_blank();
 
     // Pulse the tagline inside the panel
-    let tagline = "🎉  Your OpenSentry CloudNode is ready!";
+    let tagline = "🎉  Your SourceBox Sentry CloudNode is ready!";
     for _ in 0..2 {
         panel_row(&format!("  {}", tagline.green().bold()));
         thread::sleep(Duration::from_millis(450));

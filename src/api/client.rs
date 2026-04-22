@@ -1,4 +1,4 @@
-// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -13,14 +13,14 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-//! HTTP Client for OpenSentry Cloud API
+//! HTTP Client for SourceBox Sentry Cloud API
 
 use reqwest::Client;
 
 use crate::error::{Error, Result};
 use super::types::*;
 
-/// API Client for communicating with OpenSentry Command Center
+/// API Client for communicating with SourceBox Sentry Command Center
 #[derive(Clone)]
 pub struct ApiClient {
     client: Client,

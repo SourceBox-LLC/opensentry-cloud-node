@@ -1,4 +1,4 @@
-//! Integration tests for OpenSentry CloudNode
+//! Integration tests for SourceBox Sentry CloudNode
 
 use opensentry_cloudnode::{Config, Result};
 

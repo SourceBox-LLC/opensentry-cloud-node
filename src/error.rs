@@ -1,4 +1,4 @@
-// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-//! Error types for OpenSentry CloudNode
+//! Error types for SourceBox Sentry CloudNode
 
 use thiserror::Error;
 

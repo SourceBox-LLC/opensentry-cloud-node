@@ -1,4 +1,4 @@
-// OpenSentry CloudNode - Camera streaming node for OpenSentry Cloud
+// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -815,7 +815,7 @@ impl Dashboard {
         };
 
         let mut lines = Vec::new();
-        lines.push("OpenSentry CloudNode — Log Export".to_string());
+        lines.push("SourceBox Sentry CloudNode — Log Export".to_string());
         lines.push(format!("Node: {}  |  API: {}", state.node_id, state.api_url));
         lines.push(format!("Total segments: {}  |  Uptime: {}", state.total_segments, state.uptime()));
         lines.push(String::new());

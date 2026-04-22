@@ -1,4 +1,4 @@
-# OpenSentry CloudNode Configuration Example
+# SourceBox Sentry CloudNode Configuration Example
 
 # Node identification
 node:
@@ -7,7 +7,7 @@ node:
 
 # Cloud connection settings
 cloud:
-  # OpenSentry Command Center URL
+  # SourceBox Sentry Command Center URL
   api_url: "http://localhost:8000"
   
   # Heartbeat interval in seconds (default: 30)

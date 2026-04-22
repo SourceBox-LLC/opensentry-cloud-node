@@ -1,6 +1,6 @@
 # AGENTS.md
 
-OpenSentry CloudNode — turns USB webcams into cloud-connected security cameras. Rust binary that transcodes camera video into HLS and pushes each segment directly into the Command Center's in-memory cache. **No Tigris, no S3, no presigned URLs.**
+SourceBox Sentry CloudNode — turns USB webcams into cloud-connected security cameras. Rust binary that transcodes camera video into HLS and pushes each segment directly into the Command Center's in-memory cache. **No Tigris, no S3, no presigned URLs.**
 
 **Companion docs:**
 - [`README.md`](README.md) — user-facing install and operation guide.

@@ -16,12 +16,27 @@
 
 //! Lightweight motion detection using FFmpeg scene-change scoring.
 //!
-//! Runs `ffmpeg -i <segment> -vf "select='gte(scene,T)',metadata=print"` on
-//! each completed HLS segment. If any frame exceeds the threshold the segment
-//! is flagged as containing motion and the peak score is returned.
+//! Reads each completed HLS segment into memory and pipes it into an FFmpeg
+//! child through stdin. FFmpeg runs `-vf "select='gte(scene,T)',metadata=print"`
+//! against the piped MPEG-TS; if any frame exceeds `threshold` the segment is
+//! flagged as containing motion and the peak score is returned.
+//!
+//! ### Why we pipe instead of passing a path
+//!
+//! On Windows, `DeleteFile` fails with `ERROR_SHARING_VIOLATION` unless every
+//! open handle was created with `FILE_SHARE_DELETE`. Rust's `std::fs::File`
+//! sets that flag; FFmpeg's own file I/O does not. Earlier versions passed
+//! `-i <path>` which made FFmpeg open the segment directly — that handle then
+//! raced the HLS muxer's rotation, producing `failed to delete old segment`
+//! warnings and leaving the rotated `.ts` on disk until the uploader's
+//! sweeper reaped it. Reading the bytes in Rust first closes our handle
+//! before FFmpeg ever sees the content, so rotation is unblocked.
 
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
+
+use tokio::io::AsyncWriteExt;
 
 /// Maximum time FFmpeg is allowed to run per segment before we give up.
 /// With the 320x180 downscale, even a 2-second segment should analyse in
@@ -33,38 +48,52 @@ const FFMPEG_TIMEOUT: Duration = Duration::from_secs(5);
 /// Returns `Some(peak_score)` if any frame's scene score exceeds `threshold`,
 /// or `None` if there is no significant motion (or FFmpeg fails/times out).
 pub async fn detect_motion(segment_path: &Path, threshold: f64) -> Option<f64> {
-    if !segment_path.exists() {
-        return None;
-    }
+    // Read the segment bytes via Rust so the file handle carries
+    // FILE_SHARE_DELETE on Windows (see module docs). The bytes land in a
+    // Vec<u8> then the handle closes, clearing any delete-block before we
+    // even spawn FFmpeg. Typical segment is 200–400 KB, so this adds
+    // negligible memory pressure.
+    let bytes = match tokio::fs::read(segment_path).await {
+        Ok(b) => b,
+        Err(_) => return None, // segment rotated away, or I/O failure
+    };
 
     let ffmpeg = super::find_ffmpeg();
 
     // Always extract ALL scene scores (threshold 0 in FFmpeg), then compare
     // against the configured threshold in Rust.  This lets us log actual peak
     // scores for debugging even when they fall below the trigger threshold.
-    let result = tokio::time::timeout(
-        FFMPEG_TIMEOUT,
-        tokio::process::Command::new(&ffmpeg)
+    let work = async {
+        let mut child = tokio::process::Command::new(&ffmpeg)
             .args([
-                "-i",
-                &segment_path.to_string_lossy(),
-                "-vf",
-                "scale=320:180,fps=5,select='gte(scene,0)',metadata=print",
+                "-f", "mpegts",
+                "-i", "pipe:0",
+                "-vf", "scale=320:180,fps=5,select='gte(scene,0)',metadata=print",
                 "-an",
-                "-f",
-                "null",
+                "-f", "null",
                 "-",
             ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .output(),
-    )
-    .await;
+            .spawn()
+            .ok()?;
 
-    let output = match result {
-        Ok(Ok(o)) => o,
-        Ok(Err(_)) => return None,   // FFmpeg failed to run
+        // Feed the segment to FFmpeg, then drop our stdin writer so FFmpeg
+        // sees EOF and finishes. Without the drop, wait_with_output() would
+        // stall forever waiting for us to close stdin.
+        {
+            let mut stdin = child.stdin.take()?;
+            stdin.write_all(&bytes).await.ok()?;
+        }
+
+        child.wait_with_output().await.ok()
+    };
+
+    let output = match tokio::time::timeout(FFMPEG_TIMEOUT, work).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return None, // FFmpeg failed to spawn / stdin pipe broke
         Err(_) => {
             tracing::warn!("Motion detection timed out for {}", segment_path.display());
             return None;

@@ -502,24 +502,23 @@ fn extract_sequence_number(filename: &str) -> Option<u64> {
     num_part.parse().ok()
 }
 
-/// Reap orphaned `segment_*.ts` files from a camera's HLS output directory.
+/// Reap `segment_*.ts` files from a camera's HLS output directory.
 ///
-/// The inline cleanup in the upload path only runs inside `Ok(true)` — if a
-/// segment push fails (network, auth, rate limit) its `.ts` is left on disk,
-/// and if the scan window (`scan_start..oldest_to_keep`) ever falls behind
-/// by more than its width, files older than the window are orphaned
-/// forever.  On a Pi 4 with a flaky uplink we've seen `data/hls/{cam}/`
-/// fill a 32 GB SD card in ~2 days.
-///
-/// FFmpeg's own `-hls_flags delete_segments` (added in the same change as
-/// this sweeper) handles the common case; this function catches anything
-/// FFmpeg missed — e.g. files written before we added the flag, or files
-/// left behind after an FFmpeg crash.
+/// This is now the **sole** cleanup path for HLS segments — we removed
+/// FFmpeg's `-hls_flags delete_segments` in v0.1.17 because on Windows its
+/// rotation-delete raced Windows Defender / NTFS lazy-close and logged
+/// `failed to delete old segment ...` on every rotation. Running cleanup
+/// from our own process, on a 60-cycle (~60s) cadence, avoids the race:
+/// transient handles have long since closed by the time the sweeper runs.
 ///
 /// Keeps the `keep_count` segments with the **highest sequence numbers**
 /// (not mtime — sequence is monotonic, filesystem timestamps on FAT / SD
 /// cards can skew by seconds) and removes the rest.  Returns
 /// `(files_removed, bytes_freed)`.
+///
+/// With a 1s segment cadence and `keep_count ≈ 30`, worst-case disk use
+/// between sweeps is ~30 × ~400 KB = ~12 MB per camera — well below the
+/// bounds that motivated the original sweep on Pi 4s with flaky uplinks.
 pub(crate) fn sweep_orphan_segments(
     output_dir: &std::path::Path,
     keep_count: usize,

@@ -29,14 +29,27 @@ use crate::error::Result;
 ///
 /// `append_list`      — don't clobber the `.m3u8` on each write (the uploader
 ///                      polls this file to discover new segments).
-/// `delete_segments`  — reap `.ts` files on disk when they fall off the end
-///                      of the `hls_list_size` window.  Without this, the
-///                      HLS dir grows without bound when the uploader's
-///                      cleanup path misses a file (upload failure, stall,
-///                      auth error) — on a Pi 4 with a flaky uplink that
-///                      fills a 32 GB SD card in ~2 days.  See
-///                      `docs/runbooks/video-not-showing.md`.
-pub(crate) const HLS_FLAGS_VALUE: &str = "append_list+delete_segments";
+///
+/// We deliberately *omit* `delete_segments`. On Windows, FFmpeg's own
+/// rotation delete calls `DeleteFile` on the .ts as soon as it falls off the
+/// `hls_list_size` window, and any other handle on that file — Windows
+/// Defender's on-access scan, NTFS's lazy-close of the just-finished write,
+/// or a slow transient reader — causes `DeleteFile` to fail with
+/// `ERROR_SHARING_VIOLATION`. FFmpeg then logs `failed to delete old
+/// segment ...` on *every* rotation, which is both noisy and actually leaks
+/// disk if it ever persists.
+///
+/// Ownership of cleanup lives in `sweep_orphan_segments` (hls_uploader.rs),
+/// which runs on a blocking executor every 60s, keeps the `keep_count`
+/// segments with the highest sequence numbers, and removes the rest. By the
+/// time the sweeper runs the transient handles are long gone, so
+/// `std::fs::remove_file` succeeds cleanly on every platform.
+///
+/// Upper bound on disk use: `sweep_keep_count` segments per camera
+/// (default 30+) between sweeps ≈ ~20 MB/camera on a 1s cadence — much
+/// smaller than the headroom we need anyway. See
+/// `docs/runbooks/video-not-showing.md` for the original motivation.
+pub(crate) const HLS_FLAGS_VALUE: &str = "append_list";
 
 /// HLS segment information
 #[derive(Debug, Clone)]
@@ -1162,30 +1175,29 @@ mod tests {
         assert_eq!(find_arg_pair(&args, "-c:a"), Some("aac"));
     }
 
-    /// `-hls_flags` MUST include `delete_segments` so FFmpeg reaps `.ts`
-    /// files that fall out of the sliding `hls_list_size` window.
-    ///
-    /// Pre-v0.1.16 the value was just `append_list`, which meant the HLS
-    /// output directory grew without bound whenever the uploader's
-    /// cleanup path missed a file (upload failure, stalled task, auth
-    /// error, etc.).  On a Pi running for days with a flaky uplink this
-    /// filled 32 GB SD cards in production — a "cheap refactor" that
-    /// drops `delete_segments` would resurrect that bug.
-    ///
-    /// `append_list` must ALSO stay — without it FFmpeg truncates the
+    /// `-hls_flags` MUST include `append_list` or FFmpeg truncates the
     /// playlist on each write, breaking the uploader's discovery path.
+    ///
+    /// It MUST NOT include `delete_segments`: ownership of `.ts` cleanup
+    /// lives in `sweep_orphan_segments` (hls_uploader.rs). On Windows,
+    /// FFmpeg's own rotation-delete races AV scanners / NTFS lazy-close and
+    /// fires `failed to delete old segment` warnings on every rotation.
+    /// See the doc comment on `HLS_FLAGS_VALUE` for the full history —
+    /// pre-v0.1.16 we had `delete_segments` and removed it in v0.1.17 once
+    /// the sweeper's retention math matched FFmpeg's `hls_list_size` plus a
+    /// generous safety buffer.
     #[test]
-    fn hls_flags_include_delete_segments_and_append_list() {
-        assert!(
-            HLS_FLAGS_VALUE.contains("delete_segments"),
-            "HLS_FLAGS_VALUE must include `delete_segments` so FFmpeg reaps \
-             rotated `.ts` files.  Got: {:?}",
-            HLS_FLAGS_VALUE
-        );
+    fn hls_flags_append_list_without_delete_segments() {
         assert!(
             HLS_FLAGS_VALUE.contains("append_list"),
             "HLS_FLAGS_VALUE must include `append_list` or the uploader \
              can't watch the playlist for new segments.  Got: {:?}",
+            HLS_FLAGS_VALUE
+        );
+        assert!(
+            !HLS_FLAGS_VALUE.contains("delete_segments"),
+            "HLS_FLAGS_VALUE must NOT include `delete_segments` — the \
+             orphan sweeper owns .ts cleanup.  Got: {:?}",
             HLS_FLAGS_VALUE
         );
     }

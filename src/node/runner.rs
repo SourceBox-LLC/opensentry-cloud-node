@@ -133,6 +133,19 @@ impl Node {
         dash.set_plan(registration.plan);
         dash.log_info(format!("Registered as node {}", node_id.cyan().bold()));
 
+        // If the backend dropped any cameras for being over the plan cap,
+        // surface it both as a pre-TUI yellow panel (visible in scrollback
+        // after the dashboard takes over) and as a persistent WARN line in
+        // the log buffer. Pure UX — enforcement already happened server-side.
+        if let Some(hit) = registration.plan_limit_hit.as_ref() {
+            dash.log_warn(format!(
+                "Plan limit reached: {} camera(s) skipped — {}",
+                hit.skipped.len(),
+                hit.detail,
+            ));
+            crate::setup::recovery::show_plan_limit_hit(hit, &self.config.cloud.api_url);
+        }
+
         // Attach cloud-assigned camera_id to each dashboard row so per-ID
         // lookups (e.g. the heartbeat's real-status read) can find them.
         for cam in &detected_cameras {

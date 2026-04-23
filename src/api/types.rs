@@ -102,6 +102,40 @@ pub struct RegisterResponse {
     /// response), in which case no badge is rendered.
     #[serde(default)]
     pub plan: Option<String>,
+
+    /// Present when the backend skipped one or more cameras during this
+    /// registration because the org's plan is at its camera cap.  The node
+    /// renders a yellow warning panel surfacing the detail so the operator
+    /// sees immediately which cameras failed to stream (rather than
+    /// wondering why their new camera tile never appeared in the dashboard).
+    /// `None` in the happy path.
+    #[serde(default)]
+    pub plan_limit_hit: Option<PlanLimitHit>,
+}
+
+/// Backend-reported plan-cap breach during registration.
+///
+/// The node uses this purely for display — enforcement happened server-side
+/// when the affected cameras were left out of the `cameras` mapping. Matches
+/// the shape of the backend's `plan_limit_hit` dict in
+/// `backend/app/api/nodes.py::register_node`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanLimitHit {
+    /// Human-readable plan name, e.g. `"Free"` / `"Pro"` / `"Business"`.
+    pub plan: String,
+
+    /// Camera cap for the active plan (the reason the skip happened).
+    pub max_cameras: u32,
+
+    /// Names of the cameras that were *not* registered this round.
+    /// Ordered as the node reported them in the register request.
+    #[serde(default)]
+    pub skipped: Vec<String>,
+
+    /// Pre-formatted one-line detail string from the backend.  Safe to
+    /// display verbatim; the node renders it as the panel caption.
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// Node registration info (stored locally)

@@ -138,6 +138,125 @@ pub fn show_warning(title: &str, message: &str) {
     panel_message(title, message, WARN, "⚠".yellow().bold().to_string());
 }
 
+/// Render a yellow full-width panel surfacing a backend-reported plan-cap
+/// breach. Called from `Node::run` right after registration succeeds when
+/// the backend included a `plan_limit_hit` object in the response — the
+/// registration itself went through, but one or more cameras were dropped
+/// because the org is at its plan's camera cap.
+///
+/// The panel is purely informational; enforcement happened server-side
+/// when the affected cameras were omitted from the `cameras` mapping.
+pub fn show_plan_limit_hit(hit: &crate::api::PlanLimitHit, api_url: &str) {
+    println!();
+    panel_top_color("Plan Limit Reached", WARN);
+    panel_blank_color(WARN);
+
+    // Centered headline + caption.
+    panel_center_color(
+        &format!(
+            "{}  {} plan — {} camera cap",
+            "⚠".yellow().bold(),
+            hit.plan.bold(),
+            hit.max_cameras.to_string().yellow().bold(),
+        ),
+        WARN,
+    );
+    panel_center_color(
+        &"Some cameras were not registered with the cloud"
+            .white()
+            .dimmed()
+            .to_string(),
+        WARN,
+    );
+
+    panel_blank_color(WARN);
+    panel_divider_color(WARN);
+    panel_blank_color(WARN);
+
+    // Aligned key/value context.  Renders a trailing "…" if the list would
+    // overflow the terminal; the full list is always in `hit.detail`, which
+    // the backend already formats one-line.
+    let kv: Vec<(String, String)> = vec![
+        ("Current plan".to_string(), hit.plan.white().bold().to_string()),
+        (
+            "Camera cap".to_string(),
+            hit.max_cameras.to_string().yellow().bold().to_string(),
+        ),
+        (
+            "Skipped".to_string(),
+            format_skipped(&hit.skipped).yellow().to_string(),
+        ),
+    ];
+    let key_width = kv.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    for (k, v) in &kv {
+        let padded = format!("{:<width$}", k, width = key_width);
+        panel_row_color(
+            &format!("     {}  :  {}", padded.white().bold(), v),
+            WARN,
+        );
+    }
+
+    panel_blank_color(WARN);
+    panel_divider_color(WARN);
+    panel_blank_color(WARN);
+
+    // Next steps.
+    panel_row_color(&format!("     {}", "To stream these cameras".white().bold()), WARN);
+    panel_blank_color(WARN);
+    let arrow = "→".cyan();
+    panel_row_color(
+        &format!(
+            "       {}  Upgrade your plan at {}",
+            arrow,
+            api_url.cyan(),
+        ),
+        WARN,
+    );
+    panel_row_color(
+        &format!(
+            "       {}  Pro allows 10 cameras  {}  Business allows 50",
+            arrow,
+            "·".bright_black(),
+        ),
+        WARN,
+    );
+
+    panel_blank_color(WARN);
+    panel_bottom_color(WARN);
+    println!();
+}
+
+/// Truncate the skipped-camera list if it would overflow a reasonable
+/// panel row. The full detail stays in `hit.detail`, which the backend
+/// already pre-formats for the log.
+fn format_skipped(names: &[String]) -> String {
+    const MAX_CHARS: usize = 80;
+    if names.is_empty() {
+        return "(none)".to_string();
+    }
+    let full = names.join(", ");
+    if full.chars().count() <= MAX_CHARS {
+        return full;
+    }
+    // Drop names from the end until we fit, then append a count marker.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for name in names {
+        let cost = name.chars().count() + if kept.is_empty() { 0 } else { 2 }; // ", "
+        if used + cost > MAX_CHARS - 8 {
+            break;
+        }
+        used += cost;
+        kept.push(name);
+    }
+    let dropped = names.len() - kept.len();
+    if kept.is_empty() {
+        format!("{} cameras", names.len())
+    } else {
+        format!("{} (+{} more)", kept.join(", "), dropped)
+    }
+}
+
 /// Show a success panel (green). Full-width, matches setup wizard aesthetic.
 pub fn show_success(title: &str, message: &str) {
     panel_message(title, message, OK, "✓".bright_green().bold().to_string());
@@ -430,6 +549,27 @@ mod tests {
         show_warning("Codec mismatch", "The camera advertises MJPEG but\nthe stream fell back to YUYV.");
         show_success("Setup complete", "Configuration saved.\nReady to launch.");
         show_reset_complete();
+
+        // Plan-limit panel — backend drops extra cameras on Free tier.
+        let hit = crate::api::PlanLimitHit {
+            plan: "Free".to_string(),
+            max_cameras: 2,
+            skipped: vec![
+                "Backyard Cam".to_string(),
+                "Kitchen".to_string(),
+            ],
+            detail: "Plan limit reached (2 on Free). Upgrade to add: Backyard Cam, Kitchen.".to_string(),
+        };
+        show_plan_limit_hit(&hit, "https://opensentry-command.fly.dev");
+
+        // And the overflow case — more skipped cameras than a panel row fits.
+        let hit_many = crate::api::PlanLimitHit {
+            plan: "Free".to_string(),
+            max_cameras: 2,
+            skipped: (3..=12).map(|i| format!("Camera {}", i)).collect(),
+            detail: "Plan limit reached (2 on Free). Upgrade to add 10 cameras.".to_string(),
+        };
+        show_plan_limit_hit(&hit_many, "https://opensentry-command.fly.dev");
     }
 
     #[test]
@@ -466,6 +606,36 @@ mod tests {
             message: "m".into(),
         }
         .offers_reset());
+    }
+
+    #[test]
+    fn format_skipped_handles_empty_and_short_and_overflow() {
+        assert_eq!(format_skipped(&[]), "(none)");
+        assert_eq!(
+            format_skipped(&["A".to_string(), "B".to_string()]),
+            "A, B"
+        );
+        let many: Vec<String> = (0..40).map(|i| format!("Cam_{}", i)).collect();
+        let out = format_skipped(&many);
+        assert!(out.contains("more"), "overflow should mark truncation: {}", out);
+        assert!(out.chars().count() <= 120, "overflow should cap width: {}", out);
+    }
+
+    #[test]
+    fn plan_limit_hit_deserializes_with_extra_fields() {
+        // Pydantic's extra=ignore semantics on the backend: we must tolerate
+        // new optional fields the backend may add without a node release.
+        let raw = r#"{
+            "plan": "Pro",
+            "max_cameras": 10,
+            "skipped": ["Cam 11", "Cam 12"],
+            "detail": "Plan limit reached.",
+            "future_field": 42
+        }"#;
+        let hit: crate::api::PlanLimitHit = serde_json::from_str(raw).unwrap();
+        assert_eq!(hit.plan, "Pro");
+        assert_eq!(hit.max_cameras, 10);
+        assert_eq!(hit.skipped.len(), 2);
     }
 
     #[test]

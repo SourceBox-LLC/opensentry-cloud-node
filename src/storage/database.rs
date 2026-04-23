@@ -16,7 +16,17 @@
 //! SQLite-backed local storage for snapshots and recording segments.
 //!
 //! Replaces flat-file storage so data isn't exposed in open folders.
-//! All binary data (JPEG snapshots, TS segments) is stored as BLOBs.
+//! All binary data (JPEG snapshots, TS segments) is stored as encrypted BLOBs
+//! using AES-256-GCM with a machine-id-derived key — the same key used for
+//! config secrets. A stolen copy of `node.db` alone can't be decrypted
+//! anywhere else; the attacker also needs code execution on the original
+//! host so they can read `/etc/machine-id` (or the Windows/macOS equivalent).
+//!
+//! BLOB layout (written by `encrypt_bytes`):
+//!     [5-byte magic "OSE\x02\x01"][12-byte nonce][ciphertext || 16-byte GCM tag]
+//! The magic lets future code cleanly refuse an un-encrypted blob rather
+//! than hand raw bytes to the AES-GCM decrypt routine, which would just
+//! return a generic "decryption failed" error.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -117,11 +127,19 @@ impl NodeDatabase {
         timestamp: i64,
         data: &[u8],
     ) -> Result<()> {
+        // `size_bytes` records the *plaintext* length — that's what the
+        // retention quota and the user-facing "disk usage" display care
+        // about. Storing the ciphertext length would drift the retention
+        // accounting by ~33 bytes per blob, which compounds across millions
+        // of segments and breaks the user's quota intuition.
+        let plaintext_len = data.len() as i64;
+        let encrypted = encrypt_bytes(data)
+            .map_err(|e| Error::Storage(format!("Snapshot encrypt error: {}", e)))?;
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO snapshots (camera_id, filename, timestamp, data, size_bytes)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![camera_id, filename, timestamp, data, data.len() as i64],
+            params![camera_id, filename, timestamp, encrypted, plaintext_len],
         )
         .map_err(|e| Error::Storage(format!("Snapshot insert error: {}", e)))?;
         Ok(())
@@ -187,11 +205,15 @@ impl NodeDatabase {
         date: &str,
         data: &[u8],
     ) -> Result<()> {
+        // See `save_snapshot` for why `size_bytes` is the plaintext length.
+        let plaintext_len = data.len() as i64;
+        let encrypted = encrypt_bytes(data)
+            .map_err(|e| Error::Storage(format!("Recording encrypt error: {}", e)))?;
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO recording_segments (camera_id, segment_seq, date, data, size_bytes)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![camera_id, segment_seq as i64, date, data, data.len() as i64],
+            params![camera_id, segment_seq as i64, date, encrypted, plaintext_len],
         )
         .map_err(|e| Error::Storage(format!("Recording insert error: {}", e)))?;
         Ok(())
@@ -459,13 +481,22 @@ impl NodeDatabase {
 
 // ─── AES-256-GCM encryption ─────────────────────────────────────────────────
 //
-// Secrets (currently just the cloud API key) are encrypted at rest with a key
-// derived from the host machine's OS-managed machine identifier — on Linux
-// `/etc/machine-id`, on Windows `HKLM\SOFTWARE\Microsoft\Cryptography\
-// MachineGuid`, on macOS `IOPlatformUUID`. These are 128-bit values set once
-// at OS install time and not user-modifiable, so an attacker who steals just
-// `node.db` can't decrypt the API key without also having code execution on
-// the original host.
+// Secrets (the cloud API key and every recording/snapshot BLOB) are encrypted
+// at rest with a key derived from the host machine's OS-managed machine
+// identifier — on Linux `/etc/machine-id`, on Windows `HKLM\SOFTWARE\Microsoft
+// \Cryptography\MachineGuid`, on macOS `IOPlatformUUID`. These are 128-bit
+// values set once at OS install time and not user-modifiable, so an attacker
+// who steals just `node.db` can't decrypt anything without also having code
+// execution on the original host.
+//
+// Two ciphertext shapes are supported:
+//   - Config strings use hex-encoded `nonce ‖ ciphertext` written via
+//     `encrypt_value` / `decrypt_value` (the older path).
+//   - BLOBs use a 5-byte magic prefix `OSE\x02\x01` followed by raw
+//     `nonce ‖ ciphertext` via `encrypt_bytes` / `decrypt_bytes`. Hex would
+//     double the on-disk footprint of multi-megabyte video segments; the
+//     magic prefix lets a future reader cleanly reject an unencrypted blob
+//     rather than pass raw bytes to AES-GCM and get a generic tag-failure.
 //
 // Earlier versions derived the key from the hostname, which is predictable
 // (most Pis ship as `raspberrypi`) and trivially guessable from a stolen DB.
@@ -686,6 +717,54 @@ fn encrypt_value(plaintext: &str) -> std::result::Result<String, String> {
     encrypt_with_key(&key, plaintext)
 }
 
+/// Magic bytes prefixing every encrypted BLOB. Chosen so it can't collide
+/// with the start of a JPEG (`FFD8FF`) or an MPEG-TS packet (`0x47`), which
+/// are the two plaintext shapes we store — keeping `decrypt_bytes` able to
+/// cleanly reject any accidentally-unencrypted blob that ever sneaks in.
+/// The last two bytes are the format version (2) and the key version (1).
+const BLOB_MAGIC: &[u8; 5] = b"OSE\x02\x01";
+
+/// Encrypt raw bytes for BLOB storage. Layout:
+///     [5-byte magic][12-byte nonce][ciphertext || 16-byte GCM tag]
+///
+/// Takes `&[u8]` (vs. `&str` for `encrypt_value`) because JPEG and MPEG-TS
+/// aren't UTF-8. Returns `Vec<u8>` so the caller can bind it straight into a
+/// rusqlite BLOB parameter — no hex roundtrip, no ~2× storage bloat.
+pub(crate) fn encrypt_bytes(plaintext: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let key = derive_key()?;
+    let cipher = Aes256Gcm::new((&key).into());
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| format!("encrypt: {}", e))?;
+    let mut out = Vec::with_capacity(BLOB_MAGIC.len() + nonce.len() + ciphertext.len());
+    out.extend_from_slice(BLOB_MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypt a BLOB written by `encrypt_bytes`. Refuses any input that isn't
+/// prefixed with `BLOB_MAGIC` so a legacy unencrypted row doesn't get passed
+/// into AES-GCM and come back with a confusing "decryption failed" error.
+#[allow(dead_code)]
+pub(crate) fn decrypt_bytes(blob: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    if blob.len() < BLOB_MAGIC.len() + 12 + 16 {
+        return Err("blob too short to be encrypted".into());
+    }
+    let (magic, rest) = blob.split_at(BLOB_MAGIC.len());
+    if magic != BLOB_MAGIC {
+        return Err("blob is not in encrypted format (missing magic prefix)".into());
+    }
+    let (nonce_bytes, ciphertext) = rest.split_at(12);
+    let key = derive_key()?;
+    let cipher = Aes256Gcm::new((&key).into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| "decryption failed (wrong key or corrupted data)".to_string())
+}
+
 /// Decrypt a hex-encoded (nonce ‖ ciphertext) → plaintext string.
 ///
 /// Tries the current (machine-id) key first. If that fails, tries the legacy
@@ -881,5 +960,75 @@ mod encryption_tests {
         let a = derive_key().expect("first derive_key");
         let b = derive_key().expect("second derive_key");
         assert_eq!(a, b);
+    }
+
+    // ── BLOB encryption (binary path) ────────────────────────────
+    //
+    // These hit the real `derive_key()` — same assumption as the smoke
+    // tests above. Keeps the end-to-end path honest: if this round-trips
+    // on the host we test on, recording segments will round-trip too.
+
+    #[test]
+    fn encrypt_bytes_roundtrip() {
+        // Use a representative binary payload — first 8 bytes of a JPEG
+        // header plus some random-ish bytes — so we catch any UTF-8
+        // assumption that might have crept in.
+        let plaintext: Vec<u8> = (0..=255).chain(0..=200).collect();
+        let ct = encrypt_bytes(&plaintext).expect("encrypt_bytes");
+        let pt = decrypt_bytes(&ct).expect("decrypt_bytes");
+        assert_eq!(pt, plaintext);
+    }
+
+    #[test]
+    fn encrypt_bytes_prepends_magic_prefix() {
+        let ct = encrypt_bytes(b"hello").expect("encrypt_bytes");
+        assert!(
+            ct.starts_with(BLOB_MAGIC),
+            "ciphertext did not start with magic prefix: {:?}",
+            &ct[..BLOB_MAGIC.len().min(ct.len())],
+        );
+    }
+
+    #[test]
+    fn encrypt_bytes_is_nondeterministic() {
+        // Re-encrypting the same plaintext must produce distinct ciphertexts
+        // (fresh nonce per call). Without this, AES-GCM confidentiality is
+        // gone — an attacker can tell when two segments match.
+        let a = encrypt_bytes(b"same plaintext").expect("encrypt a");
+        let b = encrypt_bytes(b"same plaintext").expect("encrypt b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decrypt_bytes_rejects_unencrypted_blob() {
+        // Raw JPEG-like bytes without the magic prefix must be refused
+        // cleanly — not handed to AES-GCM, which would only surface a
+        // generic tag-failure and obscure the real "this blob was never
+        // encrypted" diagnosis.
+        let raw: [u8; 40] = [0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0];
+        let err = decrypt_bytes(&raw).expect_err("must refuse missing magic");
+        assert!(err.contains("magic") || err.contains("format"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn decrypt_bytes_rejects_short_blob() {
+        // Anything shorter than magic + nonce + minimum tag bytes is
+        // rejected up front rather than handed to AES-GCM.
+        assert!(decrypt_bytes(&[]).is_err());
+        assert!(decrypt_bytes(b"OSE\x02\x01").is_err());
+        assert!(decrypt_bytes(&[0u8; 16]).is_err());
+    }
+
+    #[test]
+    fn decrypt_bytes_rejects_tampered_ciphertext() {
+        // Flip a byte in the tag region (last 16 bytes) — AES-GCM is
+        // authenticated, so this must fail cleanly rather than return
+        // garbled plaintext.
+        let mut ct = encrypt_bytes(b"hello world").expect("encrypt");
+        let last = ct.len() - 1;
+        ct[last] ^= 0xff;
+        assert!(decrypt_bytes(&ct).is_err());
     }
 }

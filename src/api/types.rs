@@ -92,7 +92,9 @@ pub struct RegisterResponse {
     #[serde(default)]
     pub cameras: std::collections::HashMap<String, String>,
 
-    /// Subscription plan of the owning org (e.g. `"free"`, `"pro"`, `"business"`).
+    /// Subscription plan of the owning org (e.g. `"free"`, `"pro"`, `"pro_plus"`).
+    /// The backend's transitional `"business"` alias is also accepted by the
+    /// dashboard's pill renderer — both colour the same.
     ///
     /// **Advisory only — the node must not enforce policy based on this field.**
     /// Any limit the backend cares about (camera counts, retention, upload rate)
@@ -121,7 +123,7 @@ pub struct RegisterResponse {
 /// `backend/app/api/nodes.py::register_node`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlanLimitHit {
-    /// Human-readable plan name, e.g. `"Free"` / `"Pro"` / `"Business"`.
+    /// Human-readable plan name, e.g. `"Free"` / `"Pro"` / `"Pro Plus"`.
     pub plan: String,
 
     /// Camera cap for the active plan (the reason the skip happened).

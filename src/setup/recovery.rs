@@ -214,7 +214,7 @@ pub fn show_plan_limit_hit(hit: &crate::api::PlanLimitHit, api_url: &str) {
     );
     panel_row_color(
         &format!(
-            "       {}  Pro allows 10 cameras  {}  Business allows 50",
+            "       {}  Pro allows 10 cameras  {}  Pro Plus allows 50",
             arrow,
             "·".bright_black(),
         ),

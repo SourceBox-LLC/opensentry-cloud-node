@@ -1512,10 +1512,17 @@ fn settings_action(cmd: &str, desc: &str) -> String {
 /// informational — see the doc comment on `api::types::RegisterResponse::plan`
 /// for why we don't enforce anything on this string.
 fn plan_badge(plan: &str) -> String {
-    let pill = format!("[ {} ]", plan.trim().to_uppercase());
-    match plan.trim().to_lowercase().as_str() {
+    // The backend strips the `_org` suffix via wire_plan_slug, so the values we
+    // see here are "free" / "pro" / "pro_plus". "business" is kept as a
+    // transitional alias so a node running against a just-upgraded backend
+    // still colours its pill correctly. For the upper-case display we swap
+    // underscores to spaces so the pill reads `[ PRO PLUS ]`, not `[ PRO_PLUS ]`.
+    let trimmed = plan.trim();
+    let display = trimmed.to_uppercase().replace('_', " ");
+    let pill = format!("[ {} ]", display);
+    match trimmed.to_lowercase().as_str() {
         "pro" => pill.cyan().bold().to_string(),
-        "business" => pill.magenta().bold().to_string(),
+        "pro_plus" | "business" => pill.magenta().bold().to_string(),
         "free" => pill.white().dimmed().to_string(),
         // Unknown plan strings from the backend still render (dimmed) so a
         // future `"enterprise"` tier shows up in the UI before we ship a

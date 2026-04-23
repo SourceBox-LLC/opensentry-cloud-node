@@ -172,6 +172,96 @@ DBs written by older CloudNode versions that derived the key from the hostname a
 
 ---
 
+## Storage — where your video goes
+
+Your live stream always goes to the cloud. A small rolling buffer stays on this machine while segments are being uploaded. Anything you explicitly **record** (and every snapshot you capture) is archived in an encrypted database on this machine — these are the only things with any real footprint.
+
+```
+             ┌────────── YOUR CAMERAS ──────────┐
+             │                                  │
+             ▼                                  ▼
+
+  ┌─────────────────────────┐      ┌───────────────────────────┐
+  │  data/hls/…/*.ts        │      │  Command Center (cloud)   │
+  │                         │──┬──▶│                           │
+  │  rolling 30-second      │  │   │  the live feed your       │
+  │  buffer, ~12 MB per cam │  │   │  dashboard plays          │
+  └─────────────────────────┘  │   └───────────────────────────┘
+            │                  │
+            │                  └── uploaded once per second, always on
+            │
+            │   if a camera is set to Record:
+            │   save a copy into the archive below
+            ▼
+
+  ┌────────────────────────────────────────────────────┐
+  │  data/node.db  — encrypted SQLite, one file        │
+  │                                                    │
+  │    • snapshots         (JPEG images)               │
+  │    • recordings        (video chunks, opt-in)      │
+  │    • config + API key  (AES-256-GCM, hardware-     │
+  │                         bound so copying the       │
+  │                         file off this machine      │
+  │                         can't impersonate it)      │
+  │    • logs              (recent dashboard history)  │
+  │                                                    │
+  │  Capped at storage.max_size_gb (default 64 GB).    │
+  │  Oldest recordings and snapshots are deleted       │
+  │  first when you hit the cap.                       │
+  └────────────────────────────────────────────────────┘
+```
+
+### The three places your video can live
+
+| Location | Holds | Retention | Size |
+|----------|-------|-----------|------|
+| **`data/hls/` on this machine** | The last ~30 seconds per camera, in 1-second video chunks | Rolling — swept every minute, keeps newest ~30 chunks | ~12 MB per camera at any moment |
+| **Command Center (cloud)** | The live stream — what your dashboard actually plays | Per your Command Center plan | Handled by the backend |
+| **`data/node.db` on this machine** | Snapshots, opt-in recordings, config, recent logs | Until it hits `storage.max_size_gb` (default 64 GB); oldest data purged first | Whatever you set |
+
+### Recording is opt-in
+
+Live streaming to the cloud is always on whenever the node is running — nothing to configure, nothing to toggle. **Recording** is a separate switch that, when enabled for a camera, *also* saves each chunk into `data/node.db` so you have a local copy even if the cloud is unreachable later.
+
+Turn it on from your Command Center dashboard: click **Record** on a camera tile; click **Stop** to go back to stream-only. While recording is on, each uploaded chunk is simultaneously written to the local archive. The same bytes that went to the cloud are archived — there's no double-read of the disk.
+
+Note: the recording flag lives in memory. If you restart the node, the flag clears and you'll need to re-enable recording from the dashboard. Your already-archived content is not affected.
+
+### Snapshots
+
+From the dashboard, **Take Snapshot** pulls one JPEG frame from that camera's most recent complete video chunk and saves it into `data/node.db`. You can list and view snapshots from the dashboard. They're also subject to the same retention cap.
+
+### What's encrypted, and what isn't
+
+**Encrypted at rest:** your API key, in the `config` table, using AES-256-GCM with a key derived from this machine's hardware ID (see the [Security](#security) section above for the full key-derivation story). Copying `data/node.db` to another machine makes the API key undecryptable there — an attacker can't impersonate your node just by lifting the file.
+
+**Not encrypted at rest:** the video chunks and JPEG snapshots themselves. The assumption is that anyone with filesystem access to `data/node.db` can already watch the live stream from the same machine, so encrypting the BLOBs would add complexity without meaningfully raising the bar. If you need at-rest encryption for the video content too, put the `data/` directory on an encrypted volume — BitLocker on Windows, LUKS on Linux, FileVault on macOS.
+
+### What happens when you're about to run out of disk
+
+Two safety nets:
+
+1. **Automatic retention.** When `data/node.db` exceeds `storage.max_size_gb`, the node deletes the oldest recordings and snapshots until it's back under the cap. You won't get an error; the node just keeps running with fresh data.
+
+2. **Disk-exhausted annotation.** On Linux, if the underlying filesystem drops under 256 MiB free, the node tags its own status with `(disk exhausted: N MiB free)` and that string flows through to your dashboard. You'll see it without having to SSH in.
+
+### How to start fresh
+
+Ordered from least to most destructive — pick the one that matches your goal:
+
+- **Just free some space.** Lower `storage.max_size_gb` in your config and let retention reclaim disk.
+- **Wipe recordings and snapshots but keep your credentials.** From the node's live dashboard (TUI), open the command bar and run `/wipe`. This clears the recording and snapshot tables in `data/node.db` and asks the backend to drop the node record; setup will re-pair on next launch if you want.
+- **Reset credentials only.** If your node has the wrong ID or API key, the dashboard will surface a red "Registration Failed" screen offering to wipe credentials and re-launch the setup wizard. Accept it and you're back at step 1.
+- **Full reinstall.** Stop the node and delete the `data/` directory. On next launch the setup wizard runs from scratch.
+
+### Can I watch or download old recordings?
+
+Yes — from the Command Center dashboard. Recorded video and snapshots show up in the camera's history view; the backend fetches them from this node's archive over the same channel it uses for everything else.
+
+The node's own local HTTP server (`127.0.0.1:8080`) only serves the 30-second live buffer — it has no endpoint for reaching into the archive. That's deliberate: the archive is private to the node and reachable only through your authenticated Command Center session.
+
+---
+
 ## Docker
 
 Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHub Container Registry on every release tag.
@@ -266,7 +356,7 @@ docker run -d \
 
 **Motion:** A second FFmpeg probe per camera emits scene-change scores. Above-threshold frames raise a `MotionEvent`, which is sent over the WebSocket (`/ws/node`) as an `event { command: "motion_detected" }`. If the socket is disconnected, the uploader falls back to `POST /api/cameras/{id}/motion`.
 
-**Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs (not exposed in open folders). Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded.
+**Local storage:** SQLite database (`data/node.db`) stores configuration, snapshots, and recordings as BLOBs (not exposed in open folders). Retention is enforced automatically — oldest data is deleted first when `max_size_gb` is exceeded. See the [Storage](#storage--where-your-video-goes) section for a full walkthrough of the three tiers (disk buffer, cloud, local archive) and how to manage them.
 
 **Hardware encoding:** At startup, CloudNode probes for a hardware encoder (NVENC, QSV, AMF) and caches the result in the database. Falls back to `libx264` if none is found.
 

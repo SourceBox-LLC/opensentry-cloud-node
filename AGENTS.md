@@ -140,7 +140,7 @@ Before this supervisor existed, an FFmpeg crash (disk-full, closed V4L2 fd, segm
 
 **Disk-exhausted annotation.** On Linux the supervisor calls `libc::statvfs` on the HLS output dir before every start and after every crash. If the filesystem is under 256 MiB free, the error string surfaced to `CameraStatus::Restarting` / `CameraStatus::Failed` is prefixed with `(disk exhausted: N MiB free)`. That string flows into heartbeats and the `get_node` MCP tool, so an operator never has to SSH in to diagnose ENOSPC — they see it directly in the dashboard. Only implemented on Linux because the Pi is where the failure mode lives; on other platforms the helper returns `None` and the error string passes through untouched.
 
-**Orphan segment sweeper** (`streaming/hls_uploader.rs` → `sweep_orphan_segments`). Belt-and-suspenders for the `-hls_flags delete_segments` guarantee. Every ~60s the uploader lists `data/hls/{cam}/segment_*.ts`, sorts by embedded sequence number, keeps the newest `local_buffer_size + 60` (~30+ MB upper bound per camera), and removes the rest. Runs on `tokio::task::spawn_blocking` so large directories don't stall the poll loop. Unit tests in `hls_uploader.rs::tests` (`sweep_keeps_newest_segments_by_sequence`, `sweep_noop_when_below_keep_count`, `sweep_ignores_non_segment_files`, `sweep_handles_nonexistent_dir`) lock the behaviour in.
+**Orphan segment sweeper** (`streaming/hls_uploader.rs` → `sweep_orphan_segments`). Sole owner of `.ts` cleanup since v0.1.17, when `-hls_flags delete_segments` was dropped — FFmpeg's own rotation-delete raced Windows Defender / NTFS lazy-close / external readers and fired `failed to delete old segment ...` on every rotation. Every ~60s the uploader lists `data/hls/{cam}/segment_*.ts`, sorts by embedded sequence number, keeps the newest `local_buffer_size + 60` (~30+ MB upper bound per camera), and removes the rest. Runs on `tokio::task::spawn_blocking` so large directories don't stall the poll loop. Unit tests in `hls_uploader.rs::tests` (`sweep_keeps_newest_segments_by_sequence`, `sweep_noop_when_below_keep_count`, `sweep_ignores_non_segment_files`, `sweep_handles_nonexistent_dir`) lock the behaviour in.
 
 ### Encoder coercion (`src/node/runner.rs:174-188`)
 
@@ -204,19 +204,142 @@ FFmpeg subprocess transcoding camera → HLS segments:
 | `h264_amf` (AMD) | Yes | `speed` | CBR |
 | `libx264` (CPU fallback) | **No** — level omitted | `ultrafast` | libx264 auto-computes level and embeds it in the SPS |
 
-**HLS muxer flags** (`HLS_FLAGS_VALUE` in `hls_generator.rs`): passed to every FFmpeg invocation as `-hls_flags append_list+delete_segments`. `append_list` is required for the uploader's playlist-polling loop (it would otherwise see an empty playlist every time FFmpeg truncates on write); `delete_segments` tells FFmpeg to reap `.ts` files when they fall off the end of the sliding `hls_list_size` window. Before v0.1.16 only `append_list` was set, which meant the HLS output dir grew without bound whenever the uploader's inline cleanup missed a file (upload failure, stall, auth error) — on a Pi 4 with a flaky uplink that filled a 32 GB SD card in ~2 days. The regression test `hls_flags_include_delete_segments_and_append_list` locks both flags in.
+**HLS muxer flags** (`HLS_FLAGS_VALUE` in `hls_generator.rs`): passed to every FFmpeg invocation as `-hls_flags append_list`. `append_list` is required for the uploader's playlist-polling loop — without it FFmpeg truncates the playlist on every write and the uploader sees an empty file. We deliberately *omit* `delete_segments` (added in v0.1.16, removed in v0.1.17): on Windows its rotation-delete races AV scanners and NTFS's lazy-close and fires `failed to delete old segment ...` warnings on every rotation. Cleanup now lives in the `sweep_orphan_segments` path (see the FFmpeg supervisor section above) — by the time that 60s-cadence sweeper runs, transient handles have closed and `std::fs::remove_file` succeeds cleanly. The regression test `hls_flags_append_list_without_delete_segments` locks both decisions in (must contain `append_list`, must *not* contain `delete_segments`).
 
 `-level auto` is a driver-specific string accepted only by the hardware encoders; passing it to libx264 errors with `Error parsing option 'level' with value 'auto'` and the encoder refuses to open. Omitting `-level` entirely lets libx264 compute the right level from resolution / framerate / bitrate and write it into the SPS — which is what hls.js / MSE needs to decode.
 
 `-preset ultrafast` (not `veryfast`) is deliberate for the Pi 4 case: at 1080p30 ultrafast runs ~1.5 cores per stream, so two simultaneous cameras fit in the Pi 4's 4-core budget with headroom for the upload / dashboard / WebSocket tasks. `veryfast` is ~2-3 cores per stream and would starve the second camera on a Pi. The regression tests `libx264_args_omit_level_flag` and `libx264_args_use_ultrafast_preset` in `hls_generator.rs` lock both decisions in.
 
-### Local storage
+### Storage architecture
 
-SQLite database (`data/node.db`):
-- Snapshots and recordings stored as BLOBs (not exposed in open folders)
-- Config stored as key-value pairs in a `config` table
-- API key encrypted with AES-256-GCM using a key derived from the OS machine ID (`/etc/machine-id` / `MachineGuid` / `IOPlatformUUID`)
-- Retention enforced by `enforce_retention()` — oldest data deleted first when `storage.max_size_gb` is exceeded
+Three tiers, each with a distinct purpose and lifetime. The mental model:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│   TRANSIENT DISK                  CLOUD (primary)              LOCAL ARCHIVE │
+│   data/hls/{cam}/*.ts             Command Center               data/node.db  │
+│                                                                (SQLite, WAL) │
+│   ────────────────                ──────────────               ───────────── │
+│   1 s MPEG-TS segments            in-memory cache              snapshots     │
+│   + stream.m3u8                   authoritative live           recording_segs│
+│   newest ~30 kept                 backend rewrites URLs        config (AES)  │
+│   swept every ~60 s               to proxy paths               logs (TUI)    │
+│                                                                              │
+│   ~12 MB/camera bounded           bounded by backend policy    bounded by    │
+│                                                                storage       │
+│                                                                .max_size_gb  │
+│                                                                (default 64G) │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Every segment always flows to the cloud** — that is the live feed. The disk tier is a pure staging buffer. The SQLite tier is *additive*: populated only when the operator opts in via the WebSocket `start_recording` command, layered on top of the existing cloud push.
+
+#### Per-segment lifecycle
+
+```
+ ┌─ FFmpeg HLS muxer ──────────────────────────────────────────┐
+ │   camera → H.264/AAC MPEG-TS → .ts (1 s) + stream.m3u8      │
+ │   muxer flags: append_list (delete_segments deliberately    │
+ │   omitted; see HLS generation section)                      │
+ └─────────────────────────┬───────────────────────────────────┘
+                           │ writes
+                           ▼
+             data/hls/{cam_id}/segment_NNNNN.ts
+                           │
+          hls_uploader.rs  │ polls playlist ~every 1 s
+                           ▼
+ ┌─ segment_uploader.push_segment() ───────────────────────────┐
+ │   tokio::fs::read → bytes::Bytes → reqwest .body()          │
+ │   POST {api_url}/api/cameras/{id}/push-segment?filename=…   │
+ │   Header: X-Node-API-Key                                    │
+ │   Content-Type: video/mp2t                                  │
+ │   retry on 408/429/5xx, capped at 4 attempts (~4 s budget)  │
+ └─────────────────────────┬───────────────────────────────────┘
+                           │ Ok(true)
+                           ▼
+            ┌──────────────────────────────────┐
+            │ Command Center in-memory cache   │  ◄── live feed
+            │  (playlist pushed separately     │
+            │   on every stream.m3u8 change)   │
+            └──────────────────────────────────┘
+                           │
+                           │ back on the node, same task…
+                           ▼
+   ┌───────────────────────────────────────────────────────┐
+   │  if recording_state[camera_id] == true:               │
+   │      db.save_recording_segment(cam, seq, date, bytes) │
+   │  always:                                              │
+   │      tokio::fs::remove_file(segment_path)             │
+   └───────────────────────────────────────────────────────┘
+
+ ┌─ orphan sweeper (every ~60 s, spawn_blocking) ─────────────┐
+ │   keep newest (local_buffer_size + 60) segments            │
+ │   by sequence number; fs::remove_file the rest             │
+ └────────────────────────────────────────────────────────────┘
+```
+
+#### SQLite schema (`data/node.db`)
+
+Created in `src/storage/database.rs` with `PRAGMA journal_mode=WAL; synchronous=NORMAL;`:
+
+| Table | Purpose | Populated by | Notes |
+|-------|---------|--------------|-------|
+| `snapshots` | JPEG BLOBs | `api/websocket.rs::cmd_take_snapshot` — on-demand WS `take_snapshot` command | FFmpeg extracts 1 frame from latest *complete* segment (via playlist, not FS scan — the current segment is still being written) |
+| `recording_segments` | TS BLOBs | `hls_uploader.rs` inline, after successful cloud push, *only while* `recording_state[camera_id]` is set | Same bytes already in memory from the upload — no second disk read |
+| `config` | KV store | Setup wizard + runtime updates | `api_key` stored via `set_config_encrypted` (AES-256-GCM); other keys plaintext |
+| `logs` | Tracing events | `DashboardLayer` (logging.rs) | Survives restarts so the TUI shows prior history |
+
+Indexes: `idx_snap_camera`, `idx_rec_camera_date`, `idx_logs_timestamp`.
+
+**Why BLOBs, not loose files?** The original design kept snapshots and recordings in `data/snapshots/` and `data/recordings/` directories. Those were trivially copied off the box by anyone with filesystem access. Moving everything into SQLite BLOBs + encrypting the `api_key` column means lifting `data/node.db` off-node doesn't yield credentials. The key for AES-256-GCM is derived from the OS machine ID (`/etc/machine-id` on Linux, `MachineGuid` in HKLM on Windows, `IOPlatformUUID` on macOS), so the DB only decrypts on the machine that wrote it.
+
+#### Recording lifecycle
+
+Recording is **opt-in and additive**. Live streaming is unconditional; recording layers BLOB archival on top while the flag is set.
+
+```
+   WebSocket (node ⟵ backend)                 recording_state                SQLite
+   ───────────────────────────                (in-memory HashSet)            ──────
+
+   ┌──────────────────────────┐   write
+   │ { command: "start_recording",│ ──────▶  HashSet<String>
+   │   payload: { camera_id } }│             .insert(cam_id)
+   └──────────────────────────┘                     │
+                                                    │ read per-segment
+   ┌──────────────────────────┐                     │ inside uploader
+   │ normal uploader path     │                     ▼
+   │ .ts pushed to cloud      │             ┌──────────────────┐
+   │ bytes still in memory    │ ──────────▶ │ save_recording_  │
+   └──────────────────────────┘             │ segment(cam, seq,│
+                                            │ date, BLOB, size)│
+                                            └──────────────────┘
+
+   ┌──────────────────────────┐   write
+   │ { command: "stop_recording",│ ──────▶ HashSet.remove(cam_id)
+   │   payload: { camera_id } }│
+   └──────────────────────────┘            (.ts keeps flowing to cloud
+                                            with no DB insert)
+```
+
+`recording_state: Arc<RwLock<HashSet<String>>>` lives only in memory, so it resets on every restart. If a future requirement calls for persistent recording across reboots, the right fix is an ADR to move the flag into the `config` table and re-hydrate at startup.
+
+#### Retention and cleanup
+
+| Data | Owner | Trigger | Policy |
+|------|-------|---------|--------|
+| `data/hls/*.ts` files | `sweep_orphan_segments` (hls_uploader.rs) | Every ~60 s | Keep segments with the top-N highest sequence numbers (N = `local_buffer_size + 60`, default ≥ 30). `fs::remove_file` succeeds because transient handles have closed by sweep time. |
+| DB size (all tables) | `enforce_retention` (database.rs) | On insert when over cap | Delete oldest `recording_segments` + `snapshots` until under `storage.max_size_gb` |
+| `logs` table | `prune_logs` (database.rs) | Bounded row count | Keep newest K rows, delete rest |
+| Credentials (`node_id`, `api_key`) | `prompt_for_reset` (setup/recovery.rs) | Interactive, after a failed registration | `DELETE FROM config WHERE key IN ('node_id','api_key')` via the live SQLite handle — not a file delete, so Windows' `FILE_SHARE_DELETE` race can't block it |
+
+#### Recovering archived content
+
+Recorded segments never leave the node through the local HTTP server — that server only serves the transient disk buffer (`data/hls/*`). Operators who want to pull archived clips go through the cloud:
+
+- **Backend MCP tools** (`mcp__opensentry__get_incident_clip`, `mcp__opensentry__attach_clip`, etc.) fetch clips via the Command Center, which in turn queries the node through the WebSocket command channel.
+- The node exposes `list_snapshots` and `list_recordings` commands in `api/websocket.rs::handle_message` — these return metadata rows from `snapshots` / `recording_segments`. Bulk retrieval of the BLOBs themselves currently runs through the cloud's own cache of pushed segments, not a per-BLOB fetch from the node; if a future incident-export feature needs the archived bytes directly, add a `get_recording` / `get_snapshot` handler next to those list commands.
 
 ### Local HTTP server (warp, port 8080)
 

@@ -91,6 +91,17 @@ pub struct RegisterResponse {
     /// Camera ID mapping (device_path -> camera_id)
     #[serde(default)]
     pub cameras: std::collections::HashMap<String, String>,
+
+    /// Subscription plan of the owning org (e.g. `"free"`, `"pro"`, `"business"`).
+    ///
+    /// **Advisory only — the node must not enforce policy based on this field.**
+    /// Any limit the backend cares about (camera counts, retention, upload rate)
+    /// lives server-side. We surface the plan in the TUI banner as a status
+    /// indicator for the operator; the source of truth is the Command Center.
+    /// `None` when the backend doesn't send the field (old backend or pre-auth
+    /// response), in which case no badge is rendered.
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 /// Node registration info (stored locally)
@@ -183,6 +194,14 @@ pub struct HeartbeatResponse {
     /// are running this on their own hardware.  `None` means we're current.
     #[serde(default)]
     pub update_available: Option<String>,
+
+    /// Current subscription plan of the owning org (see
+    /// `RegisterResponse::plan`).  Heartbeats carry this too so plan
+    /// upgrades / downgrades reflect in the node TUI without requiring
+    /// a re-register.  `None` on older backends; the node leaves the
+    /// badge unchanged in that case.
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 #[cfg(test)]

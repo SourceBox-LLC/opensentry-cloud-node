@@ -172,6 +172,11 @@ pub struct SettingsInfo {
 pub struct DashboardState {
     pub node_id: String,
     pub api_url: String,
+    /// Subscription plan of the owning org (advisory only — see the doc
+    /// comment on `api::types::RegisterResponse::plan`). `None` when the
+    /// backend hasn't reported a plan yet; the status-bar renderer hides
+    /// the pill badge in that case.
+    pub plan: Option<String>,
     pub cameras: Vec<CameraState>,
     pub logs: VecDeque<LogEntry>,
     pub total_segments: u64,
@@ -217,6 +222,7 @@ impl DashboardState {
         Self {
             node_id: node_id.into(),
             api_url: api_url.into(),
+            plan: None,
             cameras: Vec::new(),
             logs: VecDeque::new(),
             total_segments: 0,
@@ -338,6 +344,20 @@ impl Dashboard {
     pub fn set_settings(&self, info: SettingsInfo) {
         if let Ok(mut s) = self.0.lock() {
             s.settings = info;
+        }
+    }
+
+    /// Record the org's subscription plan for display in the status bar.
+    ///
+    /// Empty-string / whitespace-only values are treated as `None` so the
+    /// backend can unset the badge by sending `""` without us rendering an
+    /// empty pill. Purely informational — the node does not enforce any
+    /// plan-based limits.
+    pub fn set_plan(&self, plan: Option<String>) {
+        if let Ok(mut s) = self.0.lock() {
+            s.plan = plan
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
         }
     }
 
@@ -485,9 +505,18 @@ impl Dashboard {
         );
         let total_bytes: u64 = state.cameras.iter().map(|c| c.bytes_uploaded).sum();
         let data_str = format_bytes(total_bytes);
+        // Plan pill appears next to Node ID when the backend has reported one;
+        // empty string (and zero visual space) otherwise, so the bar still
+        // reads naturally on old backends that don't send the field.
+        let plan_part = state
+            .plan
+            .as_deref()
+            .map(|p| format!(" {}", plan_badge(p)))
+            .unwrap_or_default();
         let status_content = format!(
-            "  Node: {}   │   {}   │   ↑ {} segs  {}   │   ⏱ {}",
+            "  Node: {}{}   │   {}   │   ↑ {} segs  {}   │   ⏱ {}",
             state.node_id.cyan().bold(),
+            plan_part,
             api_short.white(),
             state.total_segments.to_string().cyan(),
             format!("({})", data_str).dimmed(),
@@ -1404,6 +1433,23 @@ fn settings_action(cmd: &str, desc: &str) -> String {
     format!("     {}   {}",
         pad_right(&cmd.cyan().bold().to_string(), visible_len(cmd), 16),
         desc.dimmed())
+}
+
+/// Render a colored pill badge for a subscription plan, matching the
+/// `[ LABEL ]` pill style of the setup-wizard progress bar.  Purely
+/// informational — see the doc comment on `api::types::RegisterResponse::plan`
+/// for why we don't enforce anything on this string.
+fn plan_badge(plan: &str) -> String {
+    let pill = format!("[ {} ]", plan.trim().to_uppercase());
+    match plan.trim().to_lowercase().as_str() {
+        "pro" => pill.cyan().bold().to_string(),
+        "business" => pill.magenta().bold().to_string(),
+        "free" => pill.white().dimmed().to_string(),
+        // Unknown plan strings from the backend still render (dimmed) so a
+        // future `"enterprise"` tier shows up in the UI before we ship a
+        // node update to colour it specially.
+        _ => pill.white().dimmed().to_string(),
+    }
 }
 
 fn section_header(label: &str, w: usize) -> String {

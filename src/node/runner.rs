@@ -127,6 +127,10 @@ impl Node {
         let registration = self.register_with_cloud(&detected_cameras, &dash).await?;
         let node_id = registration.node_id.clone();
         let camera_mapping: HashMap<String, String> = registration.cameras;
+        // Surface the plan in the status bar. Advisory only — see the doc
+        // comment on RegisterResponse::plan.  `None` on older backends that
+        // don't send the field, in which case the dashboard hides the pill.
+        dash.set_plan(registration.plan);
         dash.log_info(format!("Registered as node {}", node_id.cyan().bold()));
 
         // Attach cloud-assigned camera_id to each dashboard row so per-ID
@@ -510,6 +514,15 @@ impl Node {
                                 dash.log_warn("API key rotated by server — updating");
                                 client.update_api_key(new_key);
                             }
+                        }
+                        // Propagate any plan update (e.g. the operator upgraded
+                        // Free → Pro in Clerk) so the status-bar badge follows
+                        // without requiring a re-register.  Skip when the
+                        // backend omits the field — a rollback that drops the
+                        // wire field shouldn't clobber the badge we set at
+                        // register time.
+                        if r.plan.is_some() {
+                            dash.set_plan(r.plan.clone());
                         }
                         // Surface "update available" hints from the backend
                         // exactly once per distinct version so the operator

@@ -65,6 +65,19 @@ pub enum Error {
 
     #[error("Unknown error: {0}")]
     Unknown(String),
+
+    /// The underlying failure has already been shown to the user through a
+    /// formatted TUI message (e.g. via `setup::recovery::show_registration_error`).
+    /// Main should translate this into a non-zero exit code without re-printing.
+    #[error("(already reported)")]
+    AlreadyReported,
+
+    /// The user responded to a registration failure by confirming the
+    /// credential-reset prompt. The credential rows have been wiped; the
+    /// caller should drop the current node state, re-run the setup wizard,
+    /// and re-enter the run loop with fresh credentials.
+    #[error("(reset requested)")]
+    ResetRequested,
 }
 
 impl From<yaml_rust::ScanError> for Error {

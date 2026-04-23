@@ -18,7 +18,7 @@
 //! Provides full-width bordered panels, pill progress bars, and layout
 //! primitives that adapt to the terminal width — similar to Claude Code's UI.
 
-use colored::Colorize;
+use colored::{Color, Colorize};
 use crossterm::terminal;
 use std::io::{self, Write};
 
@@ -48,7 +48,7 @@ const SH: &str = "─";
 const SML: &str = "├";
 const SMR: &str = "┤";
 
-/// Draw a full-width double-border panel with an optional title.
+/// Draw a full-width double-border panel with an optional title (cyan border).
 ///
 /// ```
 /// ╔══ ▸ STEP 1 / 5 — PREREQUISITES ═══════════════════════════════════════╗
@@ -57,6 +57,11 @@ const SMR: &str = "┤";
 /// ╚════════════════════════════════════════════════════════════════════════╝
 /// ```
 pub fn panel_top(title: &str) {
+    panel_top_color(title, Color::Cyan);
+}
+
+/// Draw a panel top with an explicit border color.
+pub fn panel_top_color(title: &str, color: Color) {
     let w = term_width();
     // The title segment: " ▸ TITLE " padded with spaces
     let label = format!(" ▸ {} ", title.to_uppercase());
@@ -65,49 +70,103 @@ pub fn panel_top(title: &str) {
     let fill = w.saturating_sub(2 + label_len + 2); // TL + label + TR
     let top = format!(
         "{}{}{}{}{}",
-        TL.cyan().bold(),
-        H.cyan().bold(),
-        label.cyan().bold(),
-        H.repeat(fill).cyan().bold(),
-        TR.cyan().bold()
+        TL.color(color).bold(),
+        H.color(color).bold(),
+        label.color(color).bold(),
+        H.repeat(fill).color(color).bold(),
+        TR.color(color).bold()
     );
     println!("{}", top);
 }
 
-/// Draw the bottom of a panel.
+/// Draw the bottom of a panel (cyan border).
 pub fn panel_bottom() {
+    panel_bottom_color(Color::Cyan);
+}
+
+/// Draw the bottom of a panel with an explicit border color.
+pub fn panel_bottom_color(color: Color) {
     let w = term_width();
     let fill = w.saturating_sub(2);
     println!(
         "{}{}{}",
-        BL.cyan().bold(),
-        H.repeat(fill).cyan().bold(),
-        BR.cyan().bold()
+        BL.color(color).bold(),
+        H.repeat(fill).color(color).bold(),
+        BR.color(color).bold()
     );
 }
 
-/// Draw an empty panel row (just the side borders).
+/// Draw an empty panel row with cyan side borders.
 pub fn panel_blank() {
-    let w = term_width();
-    let fill = w.saturating_sub(2);
-    println!("{}{}{}", V.cyan(), " ".repeat(fill), V.cyan());
+    panel_blank_color(Color::Cyan);
 }
 
-/// Draw a panel row with content left-aligned. Content is padded to fill the row.
+/// Draw an empty panel row with explicit border color.
+pub fn panel_blank_color(color: Color) {
+    let w = term_width();
+    let fill = w.saturating_sub(2);
+    println!("{}{}{}", V.color(color), " ".repeat(fill), V.color(color));
+}
+
+/// Draw a panel row with content left-aligned (cyan borders).
 pub fn panel_row(content: &str) {
+    panel_row_color(content, Color::Cyan);
+}
+
+/// Draw a panel row with content left-aligned and explicit border color.
+pub fn panel_row_color(content: &str, color: Color) {
     let w = term_width();
     // Strip ANSI codes for length calculation
     let visible_len = strip_ansi_len(content);
     let inner_w = w.saturating_sub(4); // ║ space ... space ║
     let pad = inner_w.saturating_sub(visible_len);
-    println!("{} {}{} {}", V.cyan(), content, " ".repeat(pad), V.cyan());
+    println!(
+        "{} {}{} {}",
+        V.color(color),
+        content,
+        " ".repeat(pad),
+        V.color(color),
+    );
+}
+
+/// Draw a panel row with content centered within the panel (cyan borders).
+pub fn panel_center(content: &str) {
+    panel_center_color(content, Color::Cyan);
+}
+
+/// Draw a panel row with content centered and explicit border color.
+pub fn panel_center_color(content: &str, color: Color) {
+    let w = term_width();
+    let visible_len = strip_ansi_len(content);
+    let inner_w = w.saturating_sub(4); // ║ space ... space ║
+    let extra = inner_w.saturating_sub(visible_len);
+    let left = extra / 2;
+    let right = extra - left;
+    println!(
+        "{} {}{}{} {}",
+        V.color(color),
+        " ".repeat(left),
+        content,
+        " ".repeat(right),
+        V.color(color),
+    );
 }
 
 /// Draw a panel divider (thin single-line rule inside a double-border panel).
 pub fn panel_divider() {
+    panel_divider_color(Color::Cyan);
+}
+
+/// Draw a panel divider with explicit border color.
+pub fn panel_divider_color(color: Color) {
     let w = term_width();
     let fill = w.saturating_sub(2);
-    println!("{}{}{}", SML.cyan(), SH.repeat(fill).cyan(), SMR.cyan());
+    println!(
+        "{}{}{}",
+        SML.color(color),
+        SH.repeat(fill).color(color),
+        SMR.color(color),
+    );
 }
 
 /// Draw a mid-section header inside an open panel (double-line T-junction).

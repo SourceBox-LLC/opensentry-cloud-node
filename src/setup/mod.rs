@@ -34,7 +34,10 @@ pub use animations::{
     show_mini_celebration, Spinner,
 };
 pub use platform::PlatformInfo;
-pub use recovery::{show_registration_error, show_success, show_warning, RegistrationError};
+pub use recovery::{
+    prompt_for_reset, show_registration_error, show_success, show_warning, RegistrationError,
+    ResetOutcome,
+};
 pub use tui::run_tui_setup;
 pub use validator::ValidationResult;
 

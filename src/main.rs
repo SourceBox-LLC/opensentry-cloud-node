@@ -23,7 +23,10 @@
 //! - Stores recordings locally
 //! - Serves recordings via HTTP
 
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use opensentry_cloudnode::{Config, Node, Result};
 use opensentry_cloudnode::logging::DashboardLayer;
 use tracing::{info, Level};
@@ -107,7 +110,23 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        // Already-reported errors came through a formatted TUI path
+        // (e.g. show_registration_error); do not print a second debug line.
+        Err(opensentry_cloudnode::Error::AlreadyReported)
+        | Err(opensentry_cloudnode::Error::ResetRequested) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!();
+            eprintln!("  {} {}", "Error:".red().bold(), e);
+            eprintln!();
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run() -> Result<()> {
     // On Windows, check if we have a proper terminal attached
     // If not (double-clicked from Explorer), launch in a new terminal window
     #[cfg(target_os = "windows")]
@@ -212,6 +231,40 @@ fn run_cloudnode(
 ) -> Result<()> {
     info!("Starting SourceBox Sentry CloudNode v{}", env!("CARGO_PKG_VERSION"));
 
+    // Retry loop: if the user confirms a credential reset after a registration
+    // failure, the node returns `Error::ResetRequested`. We then re-run the
+    // setup wizard and loop to re-attempt with the fresh credentials. Ok /
+    // other errors exit immediately.
+    loop {
+        match run_cloudnode_once(
+            node_id.clone(),
+            api_key.clone(),
+            api_url.clone(),
+            once,
+            config_path.clone(),
+        ) {
+            Err(opensentry_cloudnode::Error::ResetRequested) => {
+                // Unhook the previous node's dashboard from the tracing layer
+                // so the setup wizard's events don't flow to an orphaned TUI.
+                opensentry_cloudnode::logging::clear_dashboard();
+                // Relaunch the interactive setup wizard synchronously. On
+                // success it writes fresh credentials to data/node.db, which
+                // the next loop iteration picks up via Config::load.
+                opensentry_cloudnode::setup::run_setup()?;
+                continue;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn run_cloudnode_once(
+    node_id: Option<String>,
+    api_key: Option<String>,
+    api_url: Option<String>,
+    once: bool,
+    config_path: Option<String>,
+) -> Result<()> {
     // Load configuration
     let config = Config::load(config_path.as_deref())?;
 
@@ -238,9 +291,11 @@ fn run_cloudnode(
     info!("Node name: {}", config.node.name);
     info!("API URL: {}", config.cloud.api_url);
 
-    // Create and run node
+    // Create and run node on its own tokio runtime. If this returns
+    // ResetRequested, the runtime drops here and the outer loop re-enters
+    // with a fresh one.
     let rt = tokio::runtime::Runtime::new()?;
-    
+
     rt.block_on(async {
         let node = Node::new(config).await?;
 

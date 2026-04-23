@@ -559,13 +559,19 @@ impl Node {
     ) -> Result<crate::api::RegisterResponse> {
         let camera_infos: Vec<crate::api::CameraInfo> = cameras.iter().map(|c| c.clone().into()).collect();
 
-        let node_id = self.config.node.node_id.as_ref().ok_or_else(|| {
-            let error = crate::setup::recovery::RegistrationError::ConfigError {
-                message: "Node ID not configured. Run setup first.".to_string(),
-            };
-            let _ = crate::setup::recovery::show_registration_error(&error);
-            crate::error::Error::Config("Node ID not configured".into())
-        })?;
+        let node_id = match self.config.node.node_id.as_ref() {
+            Some(id) => id,
+            None => {
+                let error = crate::setup::recovery::RegistrationError::ConfigError {
+                    message: "Node ID not configured. Run setup first.".to_string(),
+                };
+                crate::setup::recovery::show_registration_error(&error);
+                if maybe_offer_reset(&error, &self.db) {
+                    return Err(crate::error::Error::ResetRequested);
+                }
+                return Err(crate::error::Error::AlreadyReported);
+            }
+        };
 
         let codec_info = if let Some(cam) = cameras.first() {
             match crate::streaming::codec_detector::detect_codec_from_camera(&cam.device_path) {
@@ -596,17 +602,34 @@ impl Node {
             Ok(r) => Ok(r),
             Err(e) => {
                 let msg = e.to_string();
+                let api_url = self.config.cloud.api_url.clone();
                 let reg_err = if msg.contains("404") || msg.contains("not found") {
-                    crate::setup::recovery::RegistrationError::InvalidNodeId { node_id: node_id.clone() }
+                    crate::setup::recovery::RegistrationError::InvalidNodeId {
+                        node_id: node_id.clone(),
+                        api_url,
+                    }
                 } else if msg.contains("401") || msg.contains("403") {
-                    crate::setup::recovery::RegistrationError::InvalidApiKey { node_id: node_id.clone() }
+                    crate::setup::recovery::RegistrationError::InvalidApiKey {
+                        node_id: node_id.clone(),
+                        api_url,
+                    }
                 } else if msg.contains("connect") || msg.contains("timeout") {
-                    crate::setup::recovery::RegistrationError::NetworkError { message: msg.clone() }
+                    crate::setup::recovery::RegistrationError::NetworkError {
+                        api_url,
+                        message: msg.clone(),
+                    }
                 } else {
-                    crate::setup::recovery::RegistrationError::ServerError { code: 0, message: msg.clone() }
+                    crate::setup::recovery::RegistrationError::ServerError {
+                        code: 0,
+                        message: msg.clone(),
+                    }
                 };
-                let _ = crate::setup::recovery::show_registration_error(&reg_err);
-                Err(e)
+                crate::setup::recovery::show_registration_error(&reg_err);
+                if maybe_offer_reset(&reg_err, &self.db) {
+                    Err(crate::error::Error::ResetRequested)
+                } else {
+                    Err(crate::error::Error::AlreadyReported)
+                }
             }
         }
     }
@@ -621,4 +644,25 @@ fn get_local_ip() -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
     socket.local_addr().ok().map(|a| a.ip().to_string())
+}
+
+/// For registration errors where a fresh reset would help (bad credentials,
+/// broken config), ask the user interactively whether to wipe the stored
+/// credentials. The wipe runs against the live SQLite handle rather than
+/// deleting the file (Windows holds an exclusive-share lock on the open db).
+///
+/// Returns `true` if the user confirmed and credentials were wiped — the
+/// caller should propagate `Error::ResetRequested` so `main` can tear this
+/// node down, re-run the setup wizard, and retry with fresh credentials.
+/// Returns `false` if the prompt wasn't offered (non-credential error or
+/// non-interactive session) or if the user declined.
+fn maybe_offer_reset(
+    error: &crate::setup::recovery::RegistrationError,
+    db: &NodeDatabase,
+) -> bool {
+    if !error.offers_reset() {
+        return false;
+    }
+    crate::setup::recovery::prompt_for_reset(db)
+        == crate::setup::recovery::ResetOutcome::Reset
 }

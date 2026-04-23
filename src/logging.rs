@@ -45,6 +45,15 @@ pub fn set_dashboard(dash: Dashboard) {
     }
 }
 
+/// Remove the installed [`Dashboard`], if any, so subsequent tracing events
+/// are silently discarded. Used when we tear down the live node to re-enter
+/// the setup wizard (setup output would otherwise bleed into an orphaned TUI).
+pub fn clear_dashboard() {
+    if let Ok(mut slot) = DASHBOARD.lock() {
+        *slot = None;
+    }
+}
+
 /// A [`tracing_subscriber::Layer`] that formats each event into a single line
 /// and pushes it into the dashboard's log buffer (which also persists to SQLite).
 pub struct DashboardLayer;

@@ -537,6 +537,13 @@ impl Node {
                         if r.plan.is_some() {
                             dash.set_plan(r.plan.clone());
                         }
+                        // Push the authoritative set of plan-suspended cameras
+                        // into the dashboard.  Replaces the previous set
+                        // wholesale on every heartbeat, so a newly-disabled
+                        // camera shows up within one heartbeat and a newly-
+                        // re-enabled one clears on the same cadence. The
+                        // setter logs transitions — steady state is silent.
+                        dash.set_disabled_cameras(r.disabled_cameras.clone());
                         // Surface "update available" hints from the backend
                         // exactly once per distinct version so the operator
                         // sees the nudge without the heartbeat loop turning

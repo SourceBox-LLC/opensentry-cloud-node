@@ -277,6 +277,16 @@ impl HlsUploader {
                 // concurrent uploads to avoid unbounded task growth.
                 let sem = UPLOAD_SEMAPHORE.clone();
                 tokio::spawn(async move {
+                    // Skip cameras the backend has suspended by plan cap.
+                    // Pushing would return 402 on every segment and flood
+                    // the log with non-retryable failures. The suspended
+                    // set is kept fresh by the heartbeat loop; a plan
+                    // upgrade clears it within one heartbeat (~30s) and
+                    // pushes resume automatically on the next segment.
+                    if dash.is_camera_suspended(&camera_id) {
+                        return;
+                    }
+
                     let _permit = sem.acquire().await.expect("semaphore closed");
                     let uploader = SegmentUploader::new(uploader_config);
                     let file_size = tokio::fs::metadata(&segment_path).await.map(|m| m.len()).unwrap_or(0);

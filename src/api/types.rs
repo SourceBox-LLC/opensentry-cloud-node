@@ -236,6 +236,18 @@ pub struct HeartbeatResponse {
     /// badge unchanged in that case.
     #[serde(default)]
     pub plan: Option<String>,
+
+    /// Camera IDs on *this* node that the backend has suspended by the
+    /// plan cap (see `backend/app/core/plans.py::enforce_camera_cap`).
+    /// The node uses this to (a) mark those camera rows `suspended` in
+    /// the TUI and (b) stop pushing segments for them — pushes would
+    /// otherwise return 402 on every cycle and flood the log.
+    ///
+    /// Empty on the happy path.  Missing on older backends (defaults
+    /// to empty via serde).  Authoritative within one heartbeat of a
+    /// plan change.
+    #[serde(default)]
+    pub disabled_cameras: Vec<String>,
 }
 
 #[cfg(test)]

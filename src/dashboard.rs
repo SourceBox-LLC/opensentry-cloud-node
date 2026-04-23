@@ -32,7 +32,7 @@
 //! ╚════════════════════════════════════════════════════════════════════════╝
 //! ```
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -177,6 +177,12 @@ pub struct DashboardState {
     /// backend hasn't reported a plan yet; the status-bar renderer hides
     /// the pill badge in that case.
     pub plan: Option<String>,
+    /// `camera_id`s on this node that the backend has suspended by the
+    /// plan cap. Populated by `Dashboard::set_disabled_cameras` on each
+    /// heartbeat; consulted by the HLS uploader before every push to
+    /// skip futile segment uploads, and by the camera-row renderer to
+    /// show a `⚠ suspended` marker. Empty on the happy path.
+    pub disabled_cameras: HashSet<String>,
     pub cameras: Vec<CameraState>,
     pub logs: VecDeque<LogEntry>,
     pub total_segments: u64,
@@ -223,6 +229,7 @@ impl DashboardState {
             node_id: node_id.into(),
             api_url: api_url.into(),
             plan: None,
+            disabled_cameras: HashSet::new(),
             cameras: Vec::new(),
             logs: VecDeque::new(),
             total_segments: 0,
@@ -359,6 +366,58 @@ impl Dashboard {
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty());
         }
+    }
+
+    /// Replace the set of camera_ids suspended by the plan cap, as
+    /// reported by the backend in the heartbeat response.  Logs a
+    /// transition line for every camera that newly went suspended or
+    /// newly returned — called once per heartbeat, so steady-state is
+    /// silent but a plan downgrade / upgrade shows up in the log.
+    pub fn set_disabled_cameras(&self, camera_ids: Vec<String>) {
+        // Build and diff outside the lock-holding block so we don't hold
+        // the state mutex across `log_warn` / `log_info`, which also lock.
+        let incoming: HashSet<String> = camera_ids.into_iter().collect();
+
+        let (newly_suspended, newly_resumed): (Vec<String>, Vec<String>) =
+            if let Ok(mut s) = self.0.lock() {
+                let newly_suspended: Vec<String> = incoming
+                    .difference(&s.disabled_cameras)
+                    .cloned()
+                    .collect();
+                let newly_resumed: Vec<String> = s
+                    .disabled_cameras
+                    .difference(&incoming)
+                    .cloned()
+                    .collect();
+                s.disabled_cameras = incoming;
+                (newly_suspended, newly_resumed)
+            } else {
+                return;
+            };
+
+        for cam_id in &newly_suspended {
+            self.log_warn(format!(
+                "Camera {} suspended by plan cap — upload paused until upgrade",
+                cam_id
+            ));
+        }
+        for cam_id in &newly_resumed {
+            self.log_info(format!(
+                "Camera {} resumed — plan cap cleared",
+                cam_id
+            ));
+        }
+    }
+
+    /// Whether the given camera_id is currently suspended by the backend's
+    /// plan cap.  Called by the HLS uploader before every push to skip
+    /// segments that the backend would 402.  Takes a short-lived read lock;
+    /// callers should not hold the result across await points.
+    pub fn is_camera_suspended(&self, camera_id: &str) -> bool {
+        self.0
+            .lock()
+            .map(|s| s.disabled_cameras.contains(camera_id))
+            .unwrap_or(false)
     }
 
     pub fn set_db(&self, db: NodeDatabase, hls_dir: PathBuf) {
@@ -582,15 +641,19 @@ impl Dashboard {
             lines.push(settings_divider(
                 &format!("CAMERAS  {}", format!("({})", state.cameras.len()).dimmed()), divider_w));
             for cam in &state.cameras {
-                let status_str = match &cam.status {
-                    CameraStatus::Streaming => "streaming".bright_green().to_string(),
-                    CameraStatus::Starting  => "starting".yellow().to_string(),
-                    CameraStatus::Offline   => "offline".dimmed().to_string(),
-                    CameraStatus::Error(e)  => truncate(e, 16).bright_red().to_string(),
-                    CameraStatus::Restarting { attempt, .. } =>
-                        format!("restarting ({})", attempt).yellow().to_string(),
-                    CameraStatus::Failed { last_error } =>
-                        format!("failed: {}", truncate(last_error, 10)).bright_red().to_string(),
+                let status_str = if state.disabled_cameras.contains(&cam.camera_id) {
+                    "suspended (plan)".yellow().bold().to_string()
+                } else {
+                    match &cam.status {
+                        CameraStatus::Streaming => "streaming".bright_green().to_string(),
+                        CameraStatus::Starting  => "starting".yellow().to_string(),
+                        CameraStatus::Offline   => "offline".dimmed().to_string(),
+                        CameraStatus::Error(e)  => truncate(e, 16).bright_red().to_string(),
+                        CameraStatus::Restarting { attempt, .. } =>
+                            format!("restarting ({})", attempt).yellow().to_string(),
+                        CameraStatus::Failed { last_error } =>
+                            format!("failed: {}", truncate(last_error, 10)).bright_red().to_string(),
+                    }
                 };
                 lines.push(format!("     {}  {}  {}",
                     pad_right(&cam.name.white().to_string(), visible_len(&cam.name), kw),
@@ -673,21 +736,30 @@ impl Dashboard {
                 out.push('\n');
 
                 for cam in &state.cameras {
-                    let status_str = match &cam.status {
-                        CameraStatus::Streaming => "● streaming".bright_green().bold().to_string(),
-                        CameraStatus::Starting => "◌ starting…".yellow().to_string(),
-                        CameraStatus::Offline => "○ offline".dimmed().to_string(),
-                        CameraStatus::Error(e) => {
-                            format!("✗ {}", truncate(e, 18)).bright_red().to_string()
-                        }
-                        CameraStatus::Restarting { attempt, .. } => {
-                            format!("↻ restarting ({})", attempt).yellow().bold().to_string()
-                        }
-                        CameraStatus::Failed { last_error } => {
-                            format!("✗ failed: {}", truncate(last_error, 12))
-                                .bright_red()
-                                .bold()
-                                .to_string()
+                    // Plan-cap suspension overrides the pipeline status —
+                    // even if FFmpeg is happily producing segments locally,
+                    // the backend is rejecting every push with 402, so the
+                    // user needs to see "suspended (plan)" in the table
+                    // rather than "streaming".
+                    let status_str = if state.disabled_cameras.contains(&cam.camera_id) {
+                        "⚠ suspended (plan)".yellow().bold().to_string()
+                    } else {
+                        match &cam.status {
+                            CameraStatus::Streaming => "● streaming".bright_green().bold().to_string(),
+                            CameraStatus::Starting => "◌ starting…".yellow().to_string(),
+                            CameraStatus::Offline => "○ offline".dimmed().to_string(),
+                            CameraStatus::Error(e) => {
+                                format!("✗ {}", truncate(e, 18)).bright_red().to_string()
+                            }
+                            CameraStatus::Restarting { attempt, .. } => {
+                                format!("↻ restarting ({})", attempt).yellow().bold().to_string()
+                            }
+                            CameraStatus::Failed { last_error } => {
+                                format!("✗ failed: {}", truncate(last_error, 12))
+                                    .bright_red()
+                                    .bold()
+                                    .to_string()
+                            }
                         }
                     };
                     let codec = if cam.video_codec.is_empty() {

@@ -214,7 +214,7 @@ pub fn show_plan_limit_hit(hit: &crate::api::PlanLimitHit, api_url: &str) {
     );
     panel_row_color(
         &format!(
-            "       {}  Pro allows 10 cameras  {}  Pro Plus allows 50",
+            "       {}  Pro allows 25 cameras  {}  Pro Plus allows 200",
             arrow,
             "·".bright_black(),
         ),
@@ -553,21 +553,21 @@ mod tests {
         // Plan-limit panel — backend drops extra cameras on Free tier.
         let hit = crate::api::PlanLimitHit {
             plan: "Free".to_string(),
-            max_cameras: 2,
+            max_cameras: 5,
             skipped: vec![
                 "Backyard Cam".to_string(),
                 "Kitchen".to_string(),
             ],
-            detail: "Plan limit reached (2 on Free). Upgrade to add: Backyard Cam, Kitchen.".to_string(),
+            detail: "Plan limit reached (5 on Free). Upgrade to add: Backyard Cam, Kitchen.".to_string(),
         };
         show_plan_limit_hit(&hit, "https://opensentry-command.fly.dev");
 
         // And the overflow case — more skipped cameras than a panel row fits.
         let hit_many = crate::api::PlanLimitHit {
             plan: "Free".to_string(),
-            max_cameras: 2,
+            max_cameras: 5,
             skipped: (3..=12).map(|i| format!("Camera {}", i)).collect(),
-            detail: "Plan limit reached (2 on Free). Upgrade to add 10 cameras.".to_string(),
+            detail: "Plan limit reached (5 on Free). Upgrade to add 10 cameras.".to_string(),
         };
         show_plan_limit_hit(&hit_many, "https://opensentry-command.fly.dev");
     }

@@ -129,6 +129,15 @@ impl SegmentUploader {
     /// previous implementation did prefix-string matching against the
     /// human-readable error message and silently broke when the producer's
     /// format changed — see the ``ApiStatus`` docstring.
+    ///
+    /// HTTP 402 (plan-limit-hit) is intentionally absent from the retry
+    /// list. The backend returns 402 from ``POST /push-segment`` when a
+    /// camera is over the org's plan cap (see Command Center's
+    /// ``app.api.hls.push_segment``); retrying just hammers the cloud
+    /// with rejections that are guaranteed to fail until either the org
+    /// upgrades or the next heartbeat populates ``disabled_cameras`` and
+    /// the dashboard skips the upload entirely. Same logic applies to
+    /// 401/403/404/422 — all caller-side mistakes that retry can't fix.
     fn is_retryable(err: &Error) -> bool {
         match err {
             Error::ApiStatus { status, .. } => matches!(
@@ -185,10 +194,27 @@ mod tests {
     fn not_retryable_for_client_errors() {
         // 401/403 mean the node's key is wrong — retrying won't help.
         // 400/404 mean the request is malformed — ditto.
-        for status in [400u16, 401, 403, 404, 422] {
+        // 402 means the camera is plan-suspended — retrying hammers the
+        //   cloud with rejections; the dashboard will pick up the
+        //   suspension on the next heartbeat and skip the upload anyway.
+        // 422 means the body validation failed.
+        for status in [400u16, 401, 402, 403, 404, 422] {
             let e = Error::ApiStatus { status, message: "x".into() };
             assert!(!SegmentUploader::is_retryable(&e), "status {status} should NOT retry");
         }
+    }
+
+    #[test]
+    fn plan_limit_hit_402_is_terminal() {
+        // Locks in the contract from is_retryable's docstring: a 402
+        // (plan_limit_hit) returned by the push-segment endpoint must
+        // surface immediately, not get retried. The dashboard's
+        // disabled_cameras tracking handles the rest.
+        let e = Error::ApiStatus {
+            status: 402,
+            message: "plan_limit_hit: camera over Free-tier cap".into(),
+        };
+        assert!(!SegmentUploader::is_retryable(&e));
     }
 
     #[test]

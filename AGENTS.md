@@ -451,7 +451,7 @@ cargo run -- --once     # Run one detection cycle and exit (if supported by curr
 
 **Build:** `docker build -t opensentry-cloudnode:latest .`
 
-Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.16`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
+Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.17`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
 
 **Run:**
 ```bash

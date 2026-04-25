@@ -744,25 +744,85 @@ pub(crate) fn encrypt_bytes(plaintext: &[u8]) -> std::result::Result<Vec<u8>, St
     Ok(out)
 }
 
+/// Reasons a `decrypt_bytes` call can fail.
+///
+/// Splitting these out (rather than returning a single `String`) lets a
+/// caller log "this row was never encrypted" differently from "this host
+/// can't read this row" differently from "this ciphertext was tampered
+/// with" — three diagnoses with three different operator responses.
+///
+/// Cryptographically you can't tell `WrongKeyOrCorrupted` apart from a
+/// single blob; AES-GCM's auth tag fails identically in both cases. The
+/// distinction emerges from context (does decrypt also fail for *other*
+/// blobs in the same DB? Then it's a key issue, not corruption).
+#[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DecryptError {
+    /// Input shorter than `magic + nonce + GCM tag`. Definitely not a
+    /// valid encrypted blob; either truncated on disk or never written.
+    BlobTooShort,
+    /// First 5 bytes don't match `BLOB_MAGIC`. The row was never written
+    /// through `encrypt_bytes` — likely a legacy plaintext row from
+    /// before encryption shipped, or arbitrary bytes that ended up in
+    /// the blob column.
+    NotEncrypted,
+    /// AES-GCM verification failed. Either the host's machine-id-derived
+    /// key doesn't match what wrote this blob (DB cloned to a new
+    /// machine?) or the ciphertext was modified after write.
+    WrongKeyOrCorrupted,
+    /// `derive_key()` itself failed — couldn't read the OS machine
+    /// identifier, etc. Carries the original error for diagnosis.
+    KeyDerivation(String),
+}
+
+impl std::fmt::Display for DecryptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BlobTooShort => write!(
+                f,
+                "blob too short to be encrypted (need >= {} bytes for magic + nonce + GCM tag)",
+                BLOB_MAGIC.len() + 12 + 16,
+            ),
+            Self::NotEncrypted => write!(
+                f,
+                "blob is not in encrypted format (missing OSE magic prefix); \
+                 likely an unencrypted legacy row",
+            ),
+            Self::WrongKeyOrCorrupted => write!(
+                f,
+                "decryption failed: AES-GCM auth tag mismatch — wrong key for this host \
+                 (DB cloned from a different machine?) or ciphertext was tampered with",
+            ),
+            Self::KeyDerivation(msg) => write!(f, "could not derive encryption key: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for DecryptError {}
+
 /// Decrypt a BLOB written by `encrypt_bytes`. Refuses any input that isn't
 /// prefixed with `BLOB_MAGIC` so a legacy unencrypted row doesn't get passed
-/// into AES-GCM and come back with a confusing "decryption failed" error.
+/// into AES-GCM and come back with a confusing generic "decryption failed".
+///
+/// Returns a typed `DecryptError` so the caller can log the root cause
+/// rather than guessing from a string-matched message. See `DecryptError`
+/// docstrings for what each variant means operationally.
 #[allow(dead_code)]
-pub(crate) fn decrypt_bytes(blob: &[u8]) -> std::result::Result<Vec<u8>, String> {
+pub(crate) fn decrypt_bytes(blob: &[u8]) -> std::result::Result<Vec<u8>, DecryptError> {
     if blob.len() < BLOB_MAGIC.len() + 12 + 16 {
-        return Err("blob too short to be encrypted".into());
+        return Err(DecryptError::BlobTooShort);
     }
     let (magic, rest) = blob.split_at(BLOB_MAGIC.len());
     if magic != BLOB_MAGIC {
-        return Err("blob is not in encrypted format (missing magic prefix)".into());
+        return Err(DecryptError::NotEncrypted);
     }
     let (nonce_bytes, ciphertext) = rest.split_at(12);
-    let key = derive_key()?;
+    let key = derive_key().map_err(DecryptError::KeyDerivation)?;
     let cipher = Aes256Gcm::new((&key).into());
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|_| "decryption failed (wrong key or corrupted data)".to_string())
+        .map_err(|_| DecryptError::WrongKeyOrCorrupted)
 }
 
 /// Decrypt a hex-encoded (nonce ‖ ciphertext) → plaintext string.
@@ -1009,26 +1069,56 @@ mod encryption_tests {
                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                              0, 0, 0, 0, 0, 0, 0, 0];
         let err = decrypt_bytes(&raw).expect_err("must refuse missing magic");
-        assert!(err.contains("magic") || err.contains("format"), "unexpected error: {}", err);
+        assert_eq!(err, DecryptError::NotEncrypted);
     }
 
     #[test]
     fn decrypt_bytes_rejects_short_blob() {
         // Anything shorter than magic + nonce + minimum tag bytes is
         // rejected up front rather than handed to AES-GCM.
-        assert!(decrypt_bytes(&[]).is_err());
-        assert!(decrypt_bytes(b"OSE\x02\x01").is_err());
-        assert!(decrypt_bytes(&[0u8; 16]).is_err());
+        assert_eq!(decrypt_bytes(&[]).unwrap_err(), DecryptError::BlobTooShort);
+        assert_eq!(
+            decrypt_bytes(b"OSE\x02\x01").unwrap_err(),
+            DecryptError::BlobTooShort,
+        );
+        assert_eq!(
+            decrypt_bytes(&[0u8; 16]).unwrap_err(),
+            DecryptError::BlobTooShort,
+        );
     }
 
     #[test]
     fn decrypt_bytes_rejects_tampered_ciphertext() {
         // Flip a byte in the tag region (last 16 bytes) — AES-GCM is
         // authenticated, so this must fail cleanly rather than return
-        // garbled plaintext.
+        // garbled plaintext. From a single blob we can't tell tamper
+        // apart from "wrong key for this host", so both surface as
+        // ``WrongKeyOrCorrupted`` — the operator triages by checking
+        // whether *other* blobs from the same DB also fail.
         let mut ct = encrypt_bytes(b"hello world").expect("encrypt");
         let last = ct.len() - 1;
         ct[last] ^= 0xff;
-        assert!(decrypt_bytes(&ct).is_err());
+        assert_eq!(
+            decrypt_bytes(&ct).unwrap_err(),
+            DecryptError::WrongKeyOrCorrupted,
+        );
+    }
+
+    #[test]
+    fn decrypt_error_messages_distinguish_root_causes() {
+        // The Display impl is what ends up in operator logs, so it must
+        // make each variant grep-able to its diagnosis.
+        assert!(DecryptError::NotEncrypted.to_string().contains("magic"));
+        assert!(DecryptError::BlobTooShort.to_string().contains("too short"));
+        assert!(
+            DecryptError::WrongKeyOrCorrupted
+                .to_string()
+                .contains("auth tag mismatch"),
+        );
+        assert!(
+            DecryptError::KeyDerivation("permission denied".into())
+                .to_string()
+                .contains("permission denied"),
+        );
     }
 }

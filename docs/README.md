@@ -13,6 +13,8 @@ Step-by-step procedures for when something's gone wrong. Each runbook names the 
 One decision per file, numbered in order. ADRs capture the *why* behind a non-obvious choice so future maintainers don't re-litigate it. Format per Michael Nygard's template (Context / Decision / Consequences).
 
 - [0001-pi-software-encoding.md](adr/0001-pi-software-encoding.md) — why the Raspberry Pi path uses libx264 and not the hardware `h264_v4l2m2m` encoder
+- [0002-machine-id-encryption-key.md](adr/0002-machine-id-encryption-key.md) — why the at-rest encryption key derives from the OS machine identifier, not a user passphrase or the OS keychain
+- [0003-sqlite-recording-store.md](adr/0003-sqlite-recording-store.md) — why recordings and snapshots live in SQLite BLOB columns rather than flat files or an embedded KV store
 
 ## Writing new docs
 

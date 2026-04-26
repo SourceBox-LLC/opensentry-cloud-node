@@ -1,6 +1,6 @@
 [package]
 name = "opensentry-cloudnode"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 authors = ["SourceBox LLC"]
 description = "SourceBox Sentry camera node for cloud-connected surveillance"

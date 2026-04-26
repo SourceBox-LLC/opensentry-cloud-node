@@ -1334,7 +1334,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opensentry-cloudnode"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -282,7 +282,7 @@ docker run -d \
   ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
 ```
 
-Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.17`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases) for the current version.
+Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.18`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases) for the current version.
 
 ### Docker Compose
 

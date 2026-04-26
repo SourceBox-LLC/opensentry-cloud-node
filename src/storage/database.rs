@@ -22,11 +22,17 @@
 //! anywhere else; the attacker also needs code execution on the original
 //! host so they can read `/etc/machine-id` (or the Windows/macOS equivalent).
 //!
-//! BLOB layout (written by `encrypt_bytes`):
-//!     [5-byte magic "OSE\x02\x01"][12-byte nonce][ciphertext || 16-byte GCM tag]
+//! BLOB layout (written by `encrypt_bytes`, since v0.1.18):
+//!     [5-byte magic "OSE\x02\x02"][12-byte nonce][ciphertext || 16-byte GCM tag]
 //! The magic lets future code cleanly refuse an un-encrypted blob rather
 //! than hand raw bytes to the AES-GCM decrypt routine, which would just
-//! return a generic "decryption failed" error.
+//! return a generic "decryption failed" error. The v0.1.18 V2 format binds
+//! the row's identity (`(camera_id, kind, identifier)`) into the auth tag
+//! as additional authenticated data — see the `snapshot_aad` /
+//! `recording_aad` helpers — so a swap-row attack pasting an encrypted
+//! blob into a different row's `data` column fails decryption cleanly.
+//! The pre-v0.1.18 V1 format ("OSE\x02\x01") is still readable for nodes
+//! upgrading in place; new writes always use V2.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -133,7 +139,12 @@ impl NodeDatabase {
         // accounting by ~33 bytes per blob, which compounds across millions
         // of segments and breaks the user's quota intuition.
         let plaintext_len = data.len() as i64;
-        let encrypted = encrypt_bytes(data)
+        // Bind the row's identity into the AES-GCM auth tag so a swap-row
+        // attack — pasting this blob into a different snapshot row — fails
+        // decryption when the reader recomputes the AAD against the wrong
+        // (camera_id, filename, timestamp) tuple. See ADR 0002.
+        let aad = snapshot_aad(camera_id, filename, timestamp);
+        let encrypted = encrypt_bytes(data, &aad)
             .map_err(|e| Error::Storage(format!("Snapshot encrypt error: {}", e)))?;
         let conn = self.lock()?;
         conn.execute(
@@ -207,7 +218,10 @@ impl NodeDatabase {
     ) -> Result<()> {
         // See `save_snapshot` for why `size_bytes` is the plaintext length.
         let plaintext_len = data.len() as i64;
-        let encrypted = encrypt_bytes(data)
+        // Bind (camera_id, segment_seq, date) into the auth tag — see the
+        // matching comment in `save_snapshot` for the rationale.
+        let aad = recording_aad(camera_id, segment_seq, date);
+        let encrypted = encrypt_bytes(data, &aad)
             .map_err(|e| Error::Storage(format!("Recording encrypt error: {}", e)))?;
         let conn = self.lock()?;
         conn.execute(
@@ -505,7 +519,7 @@ impl NodeDatabase {
 // legacy key, and immediately re-encrypt with the new key.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit, OsRng, Payload},
     Aes256Gcm, AeadCore, Nonce,
 };
 use sha2::{Digest, Sha256};
@@ -721,8 +735,40 @@ fn encrypt_value(plaintext: &str) -> std::result::Result<String, String> {
 /// with the start of a JPEG (`FFD8FF`) or an MPEG-TS packet (`0x47`), which
 /// are the two plaintext shapes we store — keeping `decrypt_bytes` able to
 /// cleanly reject any accidentally-unencrypted blob that ever sneaks in.
-/// The last two bytes are the format version (2) and the key version (1).
-const BLOB_MAGIC: &[u8; 5] = b"OSE\x02\x01";
+///
+/// The last two bytes are the format version + key version:
+///   - `\x02\x01` (V1) — original format, no AAD bound to the auth tag.
+///     Read-only legacy support: `decrypt_bytes` will still accept these
+///     blobs, ignoring the caller's `aad` argument.
+///   - `\x02\x02` (V2) — current format. The caller's `aad` (typically
+///     `(kind, camera_id, identifier)` per the helpers below) is fed into
+///     AES-GCM along with the plaintext, so a swapped-row attack — pasting
+///     an encrypted blob from row A into row B — fails decryption when the
+///     reader recomputes the AAD against row B's identity.
+///
+/// Bumping the version byte (rather than keeping a single magic and letting
+/// AAD-mismatch produce `WrongKeyOrCorrupted`) means existing recordings
+/// keep playing back after this change ships — a fresh-install node writes
+/// V2 from the first segment, but an upgrade-in-place node still reads its
+/// pre-existing V1 blobs without re-encryption.
+const BLOB_MAGIC_V1: &[u8; 5] = b"OSE\x02\x01";
+const BLOB_MAGIC_V2: &[u8; 5] = b"OSE\x02\x02";
+
+/// Build the AAD string for a snapshot blob. Stable per row — derived from
+/// fields that never change after write — so the auth tag the writer baked
+/// in still verifies for every legitimate read.
+///
+/// A blob written for one snapshot row decrypts under exactly that row's
+/// AAD; pasting it into another row's `data` column produces a mismatch
+/// and `decrypt_bytes` returns `WrongKeyOrCorrupted`.
+pub(crate) fn snapshot_aad(camera_id: &str, filename: &str, timestamp: i64) -> Vec<u8> {
+    format!("snapshot|{}|{}|{}", camera_id, filename, timestamp).into_bytes()
+}
+
+/// AAD for a recording-segment blob. See [`snapshot_aad`] for the rationale.
+pub(crate) fn recording_aad(camera_id: &str, segment_seq: u64, date: &str) -> Vec<u8> {
+    format!("recording|{}|{}|{}", camera_id, segment_seq, date).into_bytes()
+}
 
 /// Encrypt raw bytes for BLOB storage. Layout:
 ///     [5-byte magic][12-byte nonce][ciphertext || 16-byte GCM tag]
@@ -730,15 +776,21 @@ const BLOB_MAGIC: &[u8; 5] = b"OSE\x02\x01";
 /// Takes `&[u8]` (vs. `&str` for `encrypt_value`) because JPEG and MPEG-TS
 /// aren't UTF-8. Returns `Vec<u8>` so the caller can bind it straight into a
 /// rusqlite BLOB parameter — no hex roundtrip, no ~2× storage bloat.
-pub(crate) fn encrypt_bytes(plaintext: &[u8]) -> std::result::Result<Vec<u8>, String> {
+///
+/// `aad` is bound to the auth tag so a downstream `decrypt_bytes` call has
+/// to present the same byte string to recover the plaintext. Use the
+/// `snapshot_aad` / `recording_aad` helpers above so writers and readers
+/// agree on the encoding. An empty `aad` is permitted (mirrors V1
+/// behaviour) but loses the swap-row defense.
+pub(crate) fn encrypt_bytes(plaintext: &[u8], aad: &[u8]) -> std::result::Result<Vec<u8>, String> {
     let key = derive_key()?;
     let cipher = Aes256Gcm::new((&key).into());
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
+        .encrypt(&nonce, Payload { msg: plaintext, aad })
         .map_err(|e| format!("encrypt: {}", e))?;
-    let mut out = Vec::with_capacity(BLOB_MAGIC.len() + nonce.len() + ciphertext.len());
-    out.extend_from_slice(BLOB_MAGIC);
+    let mut out = Vec::with_capacity(BLOB_MAGIC_V2.len() + nonce.len() + ciphertext.len());
+    out.extend_from_slice(BLOB_MAGIC_V2);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
     Ok(out)
@@ -781,7 +833,7 @@ impl std::fmt::Display for DecryptError {
             Self::BlobTooShort => write!(
                 f,
                 "blob too short to be encrypted (need >= {} bytes for magic + nonce + GCM tag)",
-                BLOB_MAGIC.len() + 12 + 16,
+                BLOB_MAGIC_V1.len() + 12 + 16,
             ),
             Self::NotEncrypted => write!(
                 f,
@@ -801,27 +853,42 @@ impl std::fmt::Display for DecryptError {
 impl std::error::Error for DecryptError {}
 
 /// Decrypt a BLOB written by `encrypt_bytes`. Refuses any input that isn't
-/// prefixed with `BLOB_MAGIC` so a legacy unencrypted row doesn't get passed
-/// into AES-GCM and come back with a confusing generic "decryption failed".
+/// prefixed with a recognized magic so a legacy unencrypted row doesn't get
+/// passed into AES-GCM and come back with a confusing generic "decryption
+/// failed".
+///
+/// `aad` is the additional authenticated data the caller used at write time.
+/// For V2 blobs the auth tag covers it, so a mismatch produces
+/// `WrongKeyOrCorrupted`. For V1 blobs (legacy, pre-AAD format) the
+/// argument is ignored — those rows decrypt with no AAD verification, since
+/// the writer never bound any.
 ///
 /// Returns a typed `DecryptError` so the caller can log the root cause
 /// rather than guessing from a string-matched message. See `DecryptError`
 /// docstrings for what each variant means operationally.
 #[allow(dead_code)]
-pub(crate) fn decrypt_bytes(blob: &[u8]) -> std::result::Result<Vec<u8>, DecryptError> {
-    if blob.len() < BLOB_MAGIC.len() + 12 + 16 {
+pub(crate) fn decrypt_bytes(blob: &[u8], aad: &[u8]) -> std::result::Result<Vec<u8>, DecryptError> {
+    if blob.len() < BLOB_MAGIC_V1.len() + 12 + 16 {
         return Err(DecryptError::BlobTooShort);
     }
-    let (magic, rest) = blob.split_at(BLOB_MAGIC.len());
-    if magic != BLOB_MAGIC {
-        return Err(DecryptError::NotEncrypted);
-    }
+    let (magic, rest) = blob.split_at(BLOB_MAGIC_V1.len());
+
+    // Decide which AAD to use for verification:
+    //   V2 — caller's aad
+    //   V1 — empty bytes (the writer didn't bind any AAD to the tag, so
+    //        passing the caller's aad here would produce a false negative)
+    let verification_aad: &[u8] = match magic {
+        m if m == BLOB_MAGIC_V2 => aad,
+        m if m == BLOB_MAGIC_V1 => b"",
+        _ => return Err(DecryptError::NotEncrypted),
+    };
+
     let (nonce_bytes, ciphertext) = rest.split_at(12);
     let key = derive_key().map_err(DecryptError::KeyDerivation)?;
     let cipher = Aes256Gcm::new((&key).into());
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(nonce, Payload { msg: ciphertext, aad: verification_aad })
         .map_err(|_| DecryptError::WrongKeyOrCorrupted)
 }
 
@@ -1034,18 +1101,19 @@ mod encryption_tests {
         // header plus some random-ish bytes — so we catch any UTF-8
         // assumption that might have crept in.
         let plaintext: Vec<u8> = (0..=255).chain(0..=200).collect();
-        let ct = encrypt_bytes(&plaintext).expect("encrypt_bytes");
-        let pt = decrypt_bytes(&ct).expect("decrypt_bytes");
+        let aad = b"snapshot|cam_test|frame.jpg|1700000000";
+        let ct = encrypt_bytes(&plaintext, aad).expect("encrypt_bytes");
+        let pt = decrypt_bytes(&ct, aad).expect("decrypt_bytes");
         assert_eq!(pt, plaintext);
     }
 
     #[test]
-    fn encrypt_bytes_prepends_magic_prefix() {
-        let ct = encrypt_bytes(b"hello").expect("encrypt_bytes");
+    fn encrypt_bytes_prepends_v2_magic_prefix() {
+        let ct = encrypt_bytes(b"hello", b"aad").expect("encrypt_bytes");
         assert!(
-            ct.starts_with(BLOB_MAGIC),
-            "ciphertext did not start with magic prefix: {:?}",
-            &ct[..BLOB_MAGIC.len().min(ct.len())],
+            ct.starts_with(BLOB_MAGIC_V2),
+            "ciphertext did not start with V2 magic prefix: {:?}",
+            &ct[..BLOB_MAGIC_V2.len().min(ct.len())],
         );
     }
 
@@ -1054,9 +1122,49 @@ mod encryption_tests {
         // Re-encrypting the same plaintext must produce distinct ciphertexts
         // (fresh nonce per call). Without this, AES-GCM confidentiality is
         // gone — an attacker can tell when two segments match.
-        let a = encrypt_bytes(b"same plaintext").expect("encrypt a");
-        let b = encrypt_bytes(b"same plaintext").expect("encrypt b");
+        let a = encrypt_bytes(b"same plaintext", b"aad").expect("encrypt a");
+        let b = encrypt_bytes(b"same plaintext", b"aad").expect("encrypt b");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decrypt_bytes_rejects_aad_mismatch() {
+        // The whole point of the AAD plumbing: a blob that was encrypted
+        // for snapshot row A must NOT decrypt when the reader thinks it's
+        // for row B. That's the swap-row defence — fail closed, surface as
+        // WrongKeyOrCorrupted.
+        let plaintext = b"row A's secret";
+        let ct = encrypt_bytes(
+            plaintext,
+            &snapshot_aad("cam_a", "frame.jpg", 1_700_000_000),
+        )
+        .expect("encrypt");
+        // Same camera, same filename, *different* timestamp — the kind of
+        // forgery a swap-row attacker would attempt.
+        let err = decrypt_bytes(
+            &ct,
+            &snapshot_aad("cam_a", "frame.jpg", 1_700_000_001),
+        )
+        .expect_err("AAD mismatch must fail");
+        assert_eq!(err, DecryptError::WrongKeyOrCorrupted);
+    }
+
+    #[test]
+    fn decrypt_bytes_reads_v1_legacy_blobs_with_any_aad() {
+        // Pre-v0.1.18 nodes wrote V1 blobs (no AAD bound). Existing
+        // recordings on an upgraded node must keep playing back, so V1
+        // decrypt ignores the caller's AAD argument.
+        //
+        // We can't load a real v0.1.16 blob in a unit test, but we can
+        // hand-build one: encrypt with empty AAD under the V2 path, then
+        // patch the magic to V1. That's byte-identical to what the old
+        // code would have produced.
+        let mut ct = encrypt_bytes(b"legacy payload", b"").expect("encrypt");
+        ct[..BLOB_MAGIC_V1.len()].copy_from_slice(BLOB_MAGIC_V1);
+
+        // Caller passes any AAD it wants — V1 path ignores it.
+        let pt = decrypt_bytes(&ct, b"this gets ignored").expect("V1 decrypt");
+        assert_eq!(pt, b"legacy payload");
     }
 
     #[test]
@@ -1068,7 +1176,7 @@ mod encryption_tests {
         let raw: [u8; 40] = [0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                              0, 0, 0, 0, 0, 0, 0, 0];
-        let err = decrypt_bytes(&raw).expect_err("must refuse missing magic");
+        let err = decrypt_bytes(&raw, b"").expect_err("must refuse missing magic");
         assert_eq!(err, DecryptError::NotEncrypted);
     }
 
@@ -1076,13 +1184,13 @@ mod encryption_tests {
     fn decrypt_bytes_rejects_short_blob() {
         // Anything shorter than magic + nonce + minimum tag bytes is
         // rejected up front rather than handed to AES-GCM.
-        assert_eq!(decrypt_bytes(&[]).unwrap_err(), DecryptError::BlobTooShort);
+        assert_eq!(decrypt_bytes(&[], b"").unwrap_err(), DecryptError::BlobTooShort);
         assert_eq!(
-            decrypt_bytes(b"OSE\x02\x01").unwrap_err(),
+            decrypt_bytes(b"OSE\x02\x01", b"").unwrap_err(),
             DecryptError::BlobTooShort,
         );
         assert_eq!(
-            decrypt_bytes(&[0u8; 16]).unwrap_err(),
+            decrypt_bytes(&[0u8; 16], b"").unwrap_err(),
             DecryptError::BlobTooShort,
         );
     }
@@ -1095,12 +1203,30 @@ mod encryption_tests {
         // apart from "wrong key for this host", so both surface as
         // ``WrongKeyOrCorrupted`` — the operator triages by checking
         // whether *other* blobs from the same DB also fail.
-        let mut ct = encrypt_bytes(b"hello world").expect("encrypt");
+        let aad = b"recording|cam_x|42|2026-04-25";
+        let mut ct = encrypt_bytes(b"hello world", aad).expect("encrypt");
         let last = ct.len() - 1;
         ct[last] ^= 0xff;
         assert_eq!(
-            decrypt_bytes(&ct).unwrap_err(),
+            decrypt_bytes(&ct, aad).unwrap_err(),
             DecryptError::WrongKeyOrCorrupted,
+        );
+    }
+
+    #[test]
+    fn aad_helpers_format_deterministically() {
+        // The helpers must produce byte-identical AAD given the same inputs
+        // — otherwise reads would silently fail to verify against writes.
+        // Pin the format so a future "let's just rearrange the fields"
+        // refactor lights this up before it ships and silently breaks the
+        // read path.
+        assert_eq!(
+            snapshot_aad("cam_garage", "10-30-15.jpg", 1_700_000_000),
+            b"snapshot|cam_garage|10-30-15.jpg|1700000000".to_vec(),
+        );
+        assert_eq!(
+            recording_aad("cam_garage", 42, "2026-04-25"),
+            b"recording|cam_garage|42|2026-04-25".to_vec(),
         );
     }
 

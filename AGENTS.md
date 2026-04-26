@@ -51,7 +51,16 @@ Loading priority (in `Config::load()`):
 src/
 ├── main.rs             # CLI entry point (clap)
 ├── lib.rs              # Library re-exports
-├── dashboard.rs        # Live TUI dashboard + slash commands
+├── dashboard/          # Live TUI dashboard + slash commands (split from
+│   │                   # 1,761-line dashboard.rs in commit 654e88e)
+│   ├── mod.rs          # module routing + pub re-exports of Dashboard, types
+│   ├── types.rs        # LogLevel, LogEntry, CameraState, CameraStatus, View, SettingsInfo
+│   ├── state.rs        # DashboardState struct + state-mutation methods
+│   ├── handle.rs       # Dashboard wrapper struct + lifecycle/setup methods
+│   │                   # (new, log_*, set_db, set_disabled_cameras, etc.)
+│   ├── render.rs       # Dashboard::render + format helpers (panel rows,
+│   │                   # plan badge, ANSI-aware truncation, box-drawing)
+│   └── commands.rs     # run_render_loop + execute_command + confirm flow + tests
 ├── error.rs            # Custom Error enum + Result alias
 ├── logging.rs          # tracing subscriber setup
 ├── api/                # Cloud API client + WebSocket
@@ -295,6 +304,8 @@ Indexes: `idx_snap_camera`, `idx_rec_camera_date`, `idx_logs_timestamp`.
 
 **Why BLOBs, not loose files?** The original design kept snapshots and recordings in `data/snapshots/` and `data/recordings/` directories. Those were trivially copied off the box by anyone with filesystem access. Moving everything into SQLite BLOBs + encrypting the `api_key` column means lifting `data/node.db` off-node doesn't yield credentials. The key for AES-256-GCM is derived from the OS machine ID (`/etc/machine-id` on Linux, `MachineGuid` in HKLM on Windows, `IOPlatformUUID` on macOS), so the DB only decrypts on the machine that wrote it.
 
+**BLOB encryption:** since v0.1.16, recording-segment and snapshot BLOBs are encrypted in addition to the API key. The pair is `encrypt_bytes` / `decrypt_bytes` in `storage/database.rs`. Wire format: `[5-byte magic "OSE\x02\x01"][12-byte nonce][ciphertext || 16-byte GCM tag]`. The magic prefix lets `decrypt_bytes` cleanly reject any blob that was never encrypted (legacy plaintext rows, accidental writes) instead of handing them to AES-GCM and surfacing a confusing tag-mismatch error. Decrypt failures are returned as a typed `DecryptError` enum (`BlobTooShort` / `NotEncrypted` / `WrongKeyOrCorrupted` / `KeyDerivation`) introduced in v0.1.17 so callers can log the root cause specifically — a stolen DB on a different machine produces `WrongKeyOrCorrupted`, while a legacy plaintext row produces `NotEncrypted`. See `docs/adr/0002-machine-id-encryption-key.md` for the full threat-model rationale and `docs/adr/0003-sqlite-recording-store.md` for why blobs live in SQLite at all.
+
 #### Recording lifecycle
 
 Recording is **opt-in and additive**. Live streaming is unconditional; recording layers BLOB archival on top while the flag is set.
@@ -374,7 +385,22 @@ All outbound calls use `ApiClient` in `src/api/client.rs`:
 - Node → Backend: `heartbeat`, `command_result`, `event` (with `command: "motion_detected"`)
 - Backend → Node: `ack`, `command` (e.g. capture snapshot, start/stop recording), `error`
 
-## Dashboard TUI (`dashboard.rs`)
+## Dashboard TUI (`src/dashboard/`)
+
+Pre-split this was one 1,761-line file mixing data types, state mutations, ANSI rendering, slash-command dispatch, and the input event loop. Split into 6 focused files in commit `654e88e`:
+
+| File | Holds |
+|------|-------|
+| `mod.rs` | Module routing + `pub use` re-exports — public API surface (`Dashboard`, `CameraState`, etc.) |
+| `types.rs` | Pure data types — `LogLevel`, `LogEntry`, `CameraState`, `CameraStatus`, `View`, `SettingsInfo` |
+| `state.rs` | `DashboardState` struct + state-mutation methods (`log`, `add_camera`, `record_upload`, …) + `CONFIRM_TIMEOUT` const |
+| `handle.rs` | `pub struct Dashboard(pub Arc<Mutex<DashboardState>>)` + lifecycle/setup methods (`new`, `log_*`, `set_db`, `set_disabled_cameras`, `is_camera_suspended`, etc.) |
+| `render.rs` | `Dashboard::render` + format helpers (panel rows, settings divider, plan badge, ANSI-aware truncation, box-drawing constants). Helpers are `pub(super)` so `commands.rs` can borrow `format_bytes` for the `/status` output. |
+| `commands.rs` | `Dashboard::run_render_loop` (input event loop), `execute_command` (slash dispatcher), and the destructive-command confirm flow. The 7 `pending_confirm` unit tests live here next to `check_or_arm_confirm`. |
+
+External callers see exactly the same API path: `crate::dashboard::Dashboard`, `crate::dashboard::CameraState`, etc. all still resolve through `mod.rs`'s re-exports, so `api/websocket.rs`, `logging.rs`, `node/runner.rs`, and `streaming/{hls_uploader,supervisor}.rs` were unaffected by the split.
+
+Highlights:
 
 - Full-screen live dashboard with camera status, upload stats, log viewer
 - Slash command bar (`/help`, `/settings`, `/wipe`, `/export-logs`, `/reauth`, `/clear`, `/status`, `/quit`)
@@ -385,7 +411,7 @@ All outbound calls use `ApiClient` in `src/api/client.rs`:
 
 `/wipe` and `/reauth` don't execute the first time they're entered. They arm a `pending_confirm: Option<(command, Instant)>` on the dashboard; the **same command typed again within 30 seconds** (or the explicit `confirm` argument, e.g. `/wipe confirm`) actually runs it. Any unrelated command entered in between (including `/clear` or `/status`) drops the pending confirmation so an operator can't accidentally confirm a stale `/wipe` hours later.
 
-The logic lives in `Dashboard::check_or_arm_confirm(cmd, explicit_arg, bare)` and is exercised by the test block near the bottom of `dashboard.rs` (look for `check_or_arm_confirm` assertions). Both commands also call `ApiClient::notify_wipe_started` / `notify_reauth` before the local action runs, so the backend logs the intent before the node potentially takes itself offline.
+The logic lives in `Dashboard::check_or_arm_confirm(cmd, explicit_arg, bare)` in `dashboard/commands.rs` and is exercised by the test block at the bottom of that file (look for `check_or_arm_confirm` assertions). Both commands also call `ApiClient::notify_wipe_started` / `notify_reauth` before the local action runs, so the backend logs the intent before the node potentially takes itself offline.
 
 ## Key Patterns
 
@@ -451,7 +477,7 @@ cargo run -- --once     # Run one detection cycle and exit (if supported by curr
 
 **Build:** `docker build -t opensentry-cloudnode:latest .`
 
-Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.17`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
+Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.18`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
 
 **Run:**
 ```bash

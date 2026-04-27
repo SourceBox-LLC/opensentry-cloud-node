@@ -117,18 +117,17 @@
                                Guid='8C9F6DAB-5E3F-4B2C-AF4D-B1F7E9C36F58'>
 
                         <!-- Source path matches the GitHub Actions
-                             build step:
-                                 cargo build --release --target x86_64-pc-windows-msvc
+                             build step (cargo build with the
+                             x86_64-pc-windows-msvc target triple),
                              which lands the binary under
-                             target/<target-triple>/release/, NOT
-                             target/release/. cargo-wix doesn't rewrite
-                             this attribute — light.exe reads it
-                             verbatim — so we have to hardcode the
-                             target subdirectory here. The MSI is only
-                             ever built on x86_64-pc-windows-msvc, so
-                             the hardcode is fine; if we ever add a
-                             second Windows arch we'll need a wxs per
-                             arch (or a build-time variable). -->
+                             target\x86_64-pc-windows-msvc\release\,
+                             NOT target\release\. cargo-wix does not
+                             rewrite this attribute; light.exe reads
+                             it verbatim, so the target subdirectory
+                             is hardcoded here. The MSI is only ever
+                             built on x86_64-pc-windows-msvc; a future
+                             ARM64 Windows build would need a wxs per
+                             arch or a build-time variable. -->
                         <File Id='filServiceExe'
                               Source='target\x86_64-pc-windows-msvc\release\opensentry-cloudnode.exe'
                               KeyPath='yes'

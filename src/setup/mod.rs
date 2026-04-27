@@ -18,6 +18,7 @@
 //! Beautiful animated terminal-based setup experience
 
 pub mod animations;
+pub mod ffmpeg_installer;
 pub mod platform;
 pub mod recovery;
 pub mod tui;

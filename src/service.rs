@@ -93,11 +93,76 @@ pub fn run() -> windows_service::Result<()> {
 /// returning.
 fn service_main(_arguments: Vec<OsString>) {
     if let Err(e) = run_service() {
-        // File logging may already be set up. If it isn't, fall back to
-        // Windows Event Log via eprintln, which the SCM dispatcher can
-        // sometimes capture (when stderr is wired to the service stub).
+        // Two-layer error reporting because the failure mode of the
+        // first layer (`init_file_logging` itself failing) silently
+        // dropped errors before this fallback existed:
+        //
+        //   1. tracing::error!  — works only if init_file_logging
+        //      succeeded. If it failed, this macro has no installed
+        //      subscriber and the line goes nowhere.
+        //   2. eprintln!         — services have no console, so this
+        //      also goes nowhere unless a debugger is attached.
+        //   3. write_fatal_startup_error  — synchronous file write,
+        //      no tracing dependency, guaranteed audit trail.
+        //
+        // Prior to layer 3, an init_file_logging failure made the
+        // service silently exit with services.msc reporting "started
+        // and immediately stopped" and nothing in any log to explain.
         tracing::error!("Service exited with error: {}", e);
         eprintln!("Service error: {}", e);
+        write_fatal_startup_error(&format!("{}", e));
+    }
+}
+
+/// Append a one-line crash report to a guaranteed-writable location.
+///
+/// Order tried:
+///   1. `%ProgramData%\OpenSentry\fatal-startup-error.txt` — the
+///      "right" place; any operator already looking at our data dir
+///      will find it. Fails if the dir creation itself was the cause
+///      of the original error (ACL denial on ProgramData write).
+///   2. `%TEMP%\opensentry-cloudnode-fatal-startup-error.txt` — the
+///      "always works" fallback; %TEMP% is writable for every account
+///      including LocalSystem.
+///
+/// Best-effort: silently swallows file errors (an unwritable %TEMP%
+/// is a system pathology beyond our scope to diagnose). Append-only:
+/// the operator gets a chronological list across multiple failed
+/// starts.
+fn write_fatal_startup_error(message: &str) {
+    use std::io::Write;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let line = format!(
+        "[{}] OpenSentry CloudNode service failed to start: {}\n",
+        timestamp, message
+    );
+
+    let candidates = [
+        crate::paths::data_dir().join("fatal-startup-error.txt"),
+        std::env::temp_dir().join("opensentry-cloudnode-fatal-startup-error.txt"),
+    ];
+
+    for path in &candidates {
+        // Try to ensure the parent dir exists for the ProgramData
+        // candidate. The %TEMP% candidate's parent always exists.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            if f.write_all(line.as_bytes()).is_ok() {
+                // Wrote successfully; stop iterating.
+                return;
+            }
+        }
     }
 }
 

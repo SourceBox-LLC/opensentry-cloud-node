@@ -370,14 +370,79 @@ fn init_logging(log_level: &str) {
         .init();
 }
 
+/// Detect whether the running binary was installed by the Windows MSI.
+///
+/// Heuristic: the MSI installs `opensentry-cloudnode.exe` under
+/// `C:\Program Files\OpenSentry CloudNode\` (or the `(x86)` mirror on
+/// 32-bit emulation, though we only build x86_64 today). The legacy
+/// PowerShell installer dropped the binary under `%LOCALAPPDATA%\
+/// OpenSentry\` which doesn't match either path, so this test
+/// reliably distinguishes the two.
+///
+/// Used by `uninstall_cloudnode` to redirect MSI-installed users to
+/// Settings → Apps instead of running the dev-cleanup logic, which
+/// would do nothing useful for an MSI install (cwd is unrelated to
+/// the install path; the service stays registered; ProgramData isn't
+/// touched).
+#[cfg(target_os = "windows")]
+fn is_msi_install() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // Windows path comparison is case-insensitive; normalise to lowercase
+    // before substring matching.
+    let path = exe.to_string_lossy().to_lowercase();
+    path.contains(r"\program files\opensentry cloudnode\")
+        || path.contains(r"\program files (x86)\opensentry cloudnode\")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_msi_install() -> bool {
+    // No MSI on Linux/macOS — `cloudnode uninstall` always falls
+    // through to the dev-cleanup path on those platforms.
+    false
+}
+
 fn uninstall_cloudnode(force: bool) -> Result<()> {
     use colored::Colorize;
-    
+
+    // Detect the MSI-install case first and bail with a Settings →
+    // Apps pointer. The dev-cleanup logic below is meaningful for
+    // `cargo build` / `cargo install` users; for an MSI-installed
+    // binary it would just remove unrelated files in the user's cwd
+    // (or, worst case, fail to find anything and leave the user
+    // wondering whether the uninstall worked).
+    if is_msi_install() {
+        println!();
+        println!("  This is an MSI install — uninstall via Windows Settings:");
+        println!();
+        println!("    Settings → Apps → Installed apps → OpenSentry CloudNode → Uninstall");
+        println!();
+        println!("  Settings → Apps cleanly stops the service, removes the binary,");
+        println!("  removes the Windows Service registration, and (on a real");
+        println!("  uninstall) wipes data under C:\\ProgramData\\OpenSentry\\.");
+        println!();
+
+        // Best-effort: try to open Settings → Apps directly via the
+        // ms-settings: URI scheme. Saves the user from clicking through
+        // the Start menu. Falls through silently if the spawn fails —
+        // the printed instructions above are still useful.
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", "ms-settings:appsfeatures"])
+                .spawn();
+        }
+
+        return Ok(());
+    }
+
     println!("{}", "╔════════════════════════════════════════════════════╗".red());
     println!("{}", "║          SourceBox Sentry CloudNode Uninstall           ║".red());
     println!("{}", "╚════════════════════════════════════════════════════╝".red());
     println!();
-    
+
     // Check for files to remove
     let env_path = std::env::current_dir()?.join(".env");
     let data_dir = std::env::current_dir()?.join("data");

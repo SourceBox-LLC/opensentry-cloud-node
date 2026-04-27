@@ -221,21 +221,19 @@ pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()
     // ── Auto-detect GPU encoder ──────────────────────────────────
     print!("  Detecting video encoder... ");
 
-    let ffmpeg_path = {
-        #[cfg(target_os = "windows")]
-        {
-            let local = output_dir.join("ffmpeg").join("bin").join("ffmpeg.exe");
-            if local.exists() {
-                local.to_string_lossy().to_string()
-            } else {
-                "ffmpeg".to_string()
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            "ffmpeg".to_string()
-        }
-    };
+    // Delegate to the shared lookup so this non-interactive setup
+    // path matches what `run_tui_setup` and the running node both use
+    // — including the new data-dir bundled-copy candidate that the
+    // auto-installer drops ffmpeg into.
+    //
+    // Note: the non-interactive path doesn't auto-install ffmpeg (no
+    // way to prompt). If ffmpeg is missing, encoder detection returns
+    // None and we fall through to libx264 logged as the encoder; the
+    // node will fail later at camera detection. Scripted callers are
+    // expected to install ffmpeg as a separate step before invoking
+    // `setup --url ... --node-id ... --key ...`.
+    let _ = &output_dir;
+    let ffmpeg_path = crate::streaming::find_ffmpeg();
 
     let hw_encoder =
         crate::streaming::hls_generator::HlsGenerator::detect_hw_encoder(&ffmpeg_path);

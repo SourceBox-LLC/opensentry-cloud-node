@@ -103,6 +103,29 @@ fn show_animated_header() -> Result<()> {
 // ─── Step 1: Prerequisites ───────────────────────────────────────────────────
 
 fn check_prerequisites() -> Result<PlatformInfo> {
+    // Detect platform silently before opening the Step 1 panel — we
+    // need to know whether to OFFER the auto-install (Windows) vs
+    // hint at a package manager (Linux/macOS) before the user sees
+    // any UI. Cheap; ~ms.
+    let platform = PlatformInfo::detect()?;
+
+    // Pre-flight: handle missing FFmpeg BEFORE opening the panel.
+    //
+    // The previous flow checked FFmpeg AFTER camera detection. That
+    // was wrong: on Windows, camera detection itself runs
+    // `ffmpeg -list_devices`, so a missing FFmpeg makes camera
+    // detection fail with a misleading "program not found" partway
+    // through Step 1's spinner. Catching it here means the panel
+    // only ever opens when prereqs are guaranteed satisfied.
+    //
+    // Doing the prompt + progress bar OUTSIDE the panel also keeps
+    // them from competing with a half-rendered TUI — `inquire` and
+    // `indicatif` both write to stdout in their own format, and
+    // mixing them with the panel's box-drawing characters is ugly.
+    if !super::platform::check_ffmpeg()? {
+        prompt_and_install_ffmpeg(&platform)?;
+    }
+
     panel_top("Step 1 / 5 — Prerequisites");
     panel_blank();
 
@@ -117,15 +140,16 @@ fn check_prerequisites() -> Result<PlatformInfo> {
 
     let mut spinner = Spinner::new();
 
-    // Platform
-    panel_spinner_row(&spinner.advance(), "Detecting platform...");
-    flush();
-    thread::sleep(Duration::from_millis(300));
-    let platform = PlatformInfo::detect()?;
-    // Overwrite spinner row with result
-    print!("\r");
-    flush();
+    // Platform — already detected above, just announce it.
     panel_check(&format!("Platform: {}", platform.display()));
+
+    // FFmpeg — guaranteed present at this point (we either found it
+    // above, just installed it, or returned Err already).
+    if let Some(ver) = super::platform::get_ffmpeg_version() {
+        panel_check(&format!("FFmpeg v{}", ver));
+    } else {
+        panel_check("FFmpeg: installed");
+    }
 
     // Camera — Pi USB enumeration can lag up to ~10s after boot, so we
     // probe repeatedly instead of giving up on the first empty result.
@@ -155,33 +179,6 @@ fn check_prerequisites() -> Result<PlatformInfo> {
         }
     }
 
-    // FFmpeg
-    panel_spinner_row(&spinner.advance(), "Checking FFmpeg...");
-    flush();
-    thread::sleep(Duration::from_millis(300));
-    let has_ffmpeg = super::platform::check_ffmpeg()?;
-    print!("\r");
-    flush();
-    if has_ffmpeg {
-        if let Some(ver) = super::platform::get_ffmpeg_version() {
-            panel_check(&format!("FFmpeg v{}", ver));
-        } else {
-            panel_check("FFmpeg: installed");
-        }
-    } else if platform.is_windows {
-        // Windows auto-downloads a bundled ffmpeg later in the wizard
-        // (see `download_ffmpeg_with_progress`). Linux/macOS don't have
-        // that path — say so explicitly so a Pi user doesn't sit waiting
-        // for a download that never fires.
-        panel_warn("FFmpeg not found — will be downloaded automatically");
-    } else if platform.is_linux {
-        panel_warn("FFmpeg not found — install with: sudo apt install ffmpeg");
-    } else if platform.is_macos {
-        panel_warn("FFmpeg not found — install with: brew install ffmpeg");
-    } else {
-        panel_warn("FFmpeg not found — install via your system package manager");
-    }
-
     // Network
     panel_spinner_row(&spinner.advance(), "Checking network...");
     flush();
@@ -195,6 +192,91 @@ fn check_prerequisites() -> Result<PlatformInfo> {
     println!();
 
     Ok(platform)
+}
+
+/// Pre-flight FFmpeg handling when `check_ffmpeg()` returns false.
+///
+/// On **Windows** this prompts the user and, on confirmation, runs
+/// `super::ffmpeg_installer::install` with an indicatif progress bar.
+/// On **Linux/macOS** the package manager is the right answer; we
+/// surface a clear `apt`/`brew` hint and fail fast, since we can't
+/// cleanly auto-install on those platforms (different distros, no
+/// vendor consensus, sudo prompt UX problems).
+///
+/// Errors here propagate up through `run_tui_setup` to the catch-all
+/// in `setup/mod.rs::run_setup`. That catch-all has FFmpeg-aware
+/// messaging too, so the user sees a sensible message either way —
+/// but the message we render here is the primary one and is more
+/// specific (e.g. "Download and install FFmpeg now? [Y/n]").
+fn prompt_and_install_ffmpeg(platform: &PlatformInfo) -> Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    println!();
+    println!("  ⚠  FFmpeg not found");
+    println!();
+    println!("  CloudNode shells out to FFmpeg for camera capture and HLS encoding.");
+    println!();
+
+    if platform.is_windows {
+        let install = Confirm::new("  Download and install FFmpeg now? (~150 MB)")
+            .with_default(true)
+            .with_help_message("Installs into %ProgramData%\\OpenSentry\\ffmpeg\\ (one-time, ~150 MB).")
+            .prompt()?;
+
+        if !install {
+            return Err(anyhow::anyhow!(
+                "FFmpeg is required. Install manually with: winget install Gyan.FFmpeg\n  \
+                 Then re-run setup in a fresh terminal."
+            ));
+        }
+
+        println!();
+        println!("  Installing FFmpeg...");
+        println!();
+
+        let pb = ProgressBar::new(0);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("  {spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}")
+                .expect("valid template")
+                .progress_chars("█▉▊▋▌▍▎▏ "),
+        );
+
+        match super::ffmpeg_installer::install(&pb) {
+            Ok(path) => {
+                pb.finish_and_clear();
+                println!();
+                println!("  ✓ FFmpeg installed at {}", path.display());
+                println!();
+                Ok(())
+            }
+            Err(e) => {
+                pb.abandon();
+                println!();
+                // Best-effort cleanup so a retry starts from scratch.
+                super::ffmpeg_installer::cleanup_partial_install();
+                Err(anyhow::anyhow!(
+                    "FFmpeg install failed: {}\n  \
+                     Try installing manually: winget install Gyan.FFmpeg",
+                    e
+                ))
+            }
+        }
+    } else if platform.is_linux {
+        Err(anyhow::anyhow!(
+            "FFmpeg is required. Install with: sudo apt install ffmpeg  (Debian/Ubuntu)\n  \
+             For other distros, use your package manager. Then re-run setup."
+        ))
+    } else if platform.is_macos {
+        Err(anyhow::anyhow!(
+            "FFmpeg is required. Install with: brew install ffmpeg\n  \
+             Then re-run setup."
+        ))
+    } else {
+        Err(anyhow::anyhow!(
+            "FFmpeg is required. Install via your system package manager, then re-run setup."
+        ))
+    }
 }
 
 /// Probe for cameras repeatedly while the spinner animates.
@@ -486,26 +568,14 @@ fn install_dependencies(config: &SetupConfig, platform: &PlatformInfo) -> Result
     flush();
     panel_check("Configuration saved to database (API key encrypted)");
 
-    // FFmpeg on Windows
+    // FFmpeg + GPU encoder detection (Windows path).
+    //
+    // FFmpeg installation moved to Step 1 (`prompt_and_install_ffmpeg`) —
+    // by the time we reach Step 3, ffmpeg is guaranteed present (or the
+    // wizard would have bailed earlier with a clear error). All we still
+    // do here is the per-camera GPU encoder probe, which is purely a
+    // performance optimisation that depends on ffmpeg being callable.
     if matches!(config.deployment_method, DeploymentMethod::WindowsNative) {
-        if !super::platform::check_ffmpeg()? {
-            panel_blank();
-            panel_mid("Downloading FFmpeg");
-            panel_blank();
-            panel_bottom();
-            println!();
-
-            download_ffmpeg_with_progress()?;
-
-            println!();
-            panel_top("Step 3 / 5 — Installing Dependencies");
-            panel_blank();
-            panel_check("FFmpeg installed successfully");
-            show_mini_celebration()?;
-        } else {
-            panel_check("FFmpeg already available");
-        }
-
         // GPU encoder detection
         panel_blank();
         panel_mid("Video Encoder Detection");
@@ -779,11 +849,10 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     // Next steps
     match config.deployment_method {
         DeploymentMethod::WindowsNative => {
-            panel_row(&format!(
-                "  {}  {}",
-                "Optional — add FFmpeg to PATH:".white().bold(),
-                config.output_dir.join("ffmpeg\\bin").display()
-            ));
+            // No hint needed: FFmpeg lives at
+            // %ProgramData%\OpenSentry\ffmpeg\bin\ and the node's
+            // streaming::find_tool lookup finds it there without any
+            // shell-PATH gymnastics from the user.
         }
         DeploymentMethod::Docker => {
             panel_row(&format!(
@@ -891,59 +960,6 @@ fn create_directories(_config: &SetupConfig) -> Result<()> {
     Ok(())
 }
 
-fn download_ffmpeg_with_progress() -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
-    use std::fs::File;
-    use std::io::Write;
-
-    let ffmpeg_dir = std::env::current_dir()?.join("ffmpeg");
-    if ffmpeg_dir.join("bin").join("ffmpeg.exe").exists() {
-        return Ok(());
-    }
-
-    let url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
-    let zip_file = std::env::temp_dir().join("ffmpeg.zip");
-
-    let response = reqwest::blocking::get(url)?;
-    let bytes = response.bytes()?;
-    let total = bytes.len() as u64;
-
-    let pb = ProgressBar::new(total);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("  {spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ETA:{eta}")
-            .expect("valid template")
-            .progress_chars("█▉▊▋▌▍▎▏ "),
-    );
-
-    let mut file = File::create(&zip_file)?;
-    let mut written = 0u64;
-    for chunk in bytes.chunks(8192) {
-        file.write_all(chunk)?;
-        written += chunk.len() as u64;
-        pb.set_position(written);
-    }
-    pb.finish_with_message("Download complete");
-
-    // Extract
-    let extract_dir = std::env::temp_dir().join("ffmpeg-extract");
-    extract_zip(&zip_file, &extract_dir)?;
-
-    let extracted = extract_dir
-        .read_dir()?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Extract dir empty"))??
-        .path();
-
-    if ffmpeg_dir.exists() {
-        std::fs::remove_dir_all(&ffmpeg_dir)?;
-    }
-    std::fs::rename(extracted, &ffmpeg_dir)?;
-    std::fs::remove_file(&zip_file).ok();
-
-    Ok(())
-}
-
 /// Find FFmpeg path for setup probing — delegates to the shared
 /// `streaming::find_ffmpeg` so the setup detection matches what the
 /// running node will actually use (including Linux/macOS fallback paths).
@@ -961,31 +977,3 @@ fn save_config_to_db(_config: &SetupConfig, key: &str, value: &str) -> Result<()
     Ok(())
 }
 
-fn extract_zip(zip_path: &std::path::Path, extract_to: &std::path::Path) -> Result<()> {
-    use std::fs::create_dir_all;
-    use zip::ZipArchive;
-
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = ZipArchive::new(file)?;
-    create_dir_all(extract_to)?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let outpath = match entry.enclosed_name() {
-            Some(p) => extract_to.join(p),
-            None => continue,
-        };
-        if entry.name().ends_with('/') {
-            create_dir_all(&outpath)?;
-        } else {
-            if let Some(parent) = outpath.parent() {
-                if !parent.exists() {
-                    create_dir_all(parent)?;
-                }
-            }
-            let mut out = std::fs::File::create(&outpath)?;
-            std::io::copy(&mut entry, &mut out)?;
-        }
-    }
-    Ok(())
-}

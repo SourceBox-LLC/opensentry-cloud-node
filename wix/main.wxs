@@ -90,6 +90,62 @@
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Uninstall it first if you really need to roll back.' />
 
+        <!-- ========================================================
+             Wipe %ProgramData%\OpenSentry on real uninstall
+             ========================================================
+             By default the MSI removes Program Files but leaves
+             %ProgramData%\OpenSentry\ in place so an upgrade-uninstall
+             (the first half of MajorUpgrade) preserves the user's
+             config + recordings + auto-installed ffmpeg. That's
+             correct behaviour for upgrades.
+
+             For a *real* uninstall (Settings → Apps → Uninstall, or
+             `msiexec /x ...` directly) the user expects "uninstall"
+             to mean "gone" — leaving their encrypted node.db with
+             API credentials on disk after they explicitly asked the
+             OS to remove the program is a privacy footgun. Honouring
+             the expectation is also the principle of least surprise.
+
+             The condition `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`
+             is Microsoft's documented idiom for "this is a real
+             uninstall, not the uninstall pass of an upgrade." During
+             a MajorUpgrade, UPGRADINGPRODUCTCODE is set on the old
+             product's uninstall pass, so this CustomAction is skipped
+             and the data survives. On Settings → Apps → Uninstall
+             (or msiexec /x) UPGRADINGPRODUCTCODE is unset, so this
+             fires and ProgramData is purged.
+
+             Implementation:
+               - Execute='deferred' Impersonate='no'  → runs in the
+                 elevated installer context (LocalSystem), which has
+                 write access to %ProgramData%.
+               - cmd.exe /c rmdir /s /q                → simplest tool
+                 for the job; no need for a Rust helper or WiX util ext.
+                 The "/s" recurses, "/q" suppresses prompts.
+               - Return='ignore'                       → a stuck file
+                 (AV scanning, in-use handle) shouldn't fail the whole
+                 uninstall. Better to have the binary gone than to
+                 refuse to uninstall over a leftover log.
+
+             Caveat: this hardcodes the path. If we ever move from
+             %ProgramData%\OpenSentry to a different location, BOTH
+             this CustomAction AND `paths::data_dir()` in the Rust
+             code need to change in lockstep — they're the source of
+             truth for the same directory. -->
+        <CustomAction
+            Id='WipeProgramData'
+            Directory='APPLICATIONFOLDER'
+            ExeCommand='cmd.exe /c rmdir /s /q "[CommonAppDataFolder]OpenSentry"'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore' />
+
+        <InstallExecuteSequence>
+            <Custom Action='WipeProgramData' After='InstallInitialize'>
+                REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
+            </Custom>
+        </InstallExecuteSequence>
+
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' />
 
         <!-- Properties surfaced in Add/Remove Programs / Settings → Apps. -->

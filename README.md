@@ -85,11 +85,11 @@ cargo build --release
 
 The setup wizard handles everything automatically:
 
-1. Detects your platform and connected cameras
-2. Downloads FFmpeg if needed (Windows)
+1. Detects your platform and verifies connected cameras
+2. Verifies FFmpeg — on Windows, offers to download + install it for you (~150 MB, lands under `%ProgramData%\OpenSentry\ffmpeg\`); on Linux/macOS, points you at the right `apt`/`brew` command and waits for you to install + retry
 3. Prompts for your Node ID, API Key, and Command Center URL
 4. Detects the best available hardware encoder (NVENC, QSV, AMF)
-5. Encrypts and stores credentials locally in `data/node.db`
+5. Encrypts and stores credentials locally in the SQLite config DB (path varies by platform — see [Configuration](#configuration))
 
 After setup, start the node:
 

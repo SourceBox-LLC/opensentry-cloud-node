@@ -178,6 +178,17 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/**/*
+          # Mark hyphen-suffixed tags (v0.1.18-msi-rc3, v0.1.19-beta, etc.)
+          # as prereleases so the GitHub `/releases/latest/download/...`
+          # redirect — used by install.ps1, the landing page MSI link,
+          # and curl-style users — keeps pointing at the most recent
+          # *stable* release. A bare `vX.Y.Z` tag has no hyphen and
+          # ships as the default-latest; any hyphen suffix is per
+          # SemVer prerelease territory and we honour that. Without
+          # this gate, an RC tag temporarily bumps GitHub's "latest"
+          # pointer and the public install URLs serve the unverified
+          # RC binary to anyone who curls it.
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   docker-publish:
     name: Publish Docker image (multi-arch → GHCR)

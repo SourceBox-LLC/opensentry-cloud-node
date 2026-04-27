@@ -68,12 +68,59 @@ pub fn run_setup() -> Result<bool> {
     match tui::run_tui_setup() {
         Ok(auto_start) => Ok(auto_start),
         Err(e) => {
-            // If TUI fails, show simple prompt-based setup
             eprintln!("\n  Interactive setup failed: {}", e);
-            eprintln!("  This can happen when running without a proper terminal.");
-            eprintln!("\n  To run setup, open a terminal and run:");
-            eprintln!("    opensentry-cloudnode.exe setup");
-            eprintln!("\n  Config is stored in data/node.db (run setup to configure).");
+
+            // Specialise the hint based on what actually went wrong. The
+            // catch-all "you're not running in a real terminal" line we
+            // used to print here was misleading whenever the failure was
+            // anything else — and the most common "anything else" by far
+            // is FFmpeg being missing, because the camera-detection step
+            // shells out to `ffmpeg -list_devices` and surfaces an
+            // Io::NotFound that propagates here as Error::Io.
+            //
+            // We can't be 100% certain a NotFound came from ffmpeg (any
+            // missing file would qualify), but at this point in the wizard
+            // ffmpeg is the only external program we've tried to invoke,
+            // so the heuristic is safe.
+            // run_tui_setup returns anyhow::Result, so `e` here is an
+            // anyhow::Error wrapping (potentially) a crate::Error wrapping
+            // (potentially) the std::io::Error from `Command::new("ffmpeg")
+            // .output()`. Walk the chain and look for any std::io::Error
+            // with kind = NotFound — that's the most reliable signal,
+            // independent of how many wrappers it went through.
+            let is_not_found = e.chain()
+                .filter_map(|inner| inner.downcast_ref::<std::io::Error>())
+                .any(|io_err| io_err.kind() == std::io::ErrorKind::NotFound);
+
+            if is_not_found {
+                eprintln!();
+                eprintln!("  A required external program was not found. The most likely");
+                eprintln!("  cause is that FFmpeg is missing — CloudNode shells out to");
+                eprintln!("  ffmpeg for camera detection and HLS encoding.");
+                eprintln!();
+                eprintln!("  Install FFmpeg, then re-run setup in a fresh terminal so");
+                eprintln!("  the new PATH takes effect:");
+                eprintln!();
+                #[cfg(target_os = "windows")]
+                eprintln!("    winget install Gyan.FFmpeg");
+                #[cfg(target_os = "macos")]
+                eprintln!("    brew install ffmpeg");
+                #[cfg(target_os = "linux")]
+                eprintln!("    sudo apt install ffmpeg     # Debian/Ubuntu");
+                eprintln!();
+                eprintln!("  Then:");
+                eprintln!("    opensentry-cloudnode setup");
+            } else {
+                // Generic fallback. Avoid the old "without a proper terminal"
+                // claim — that was only true for one of N possible causes
+                // and confused users hitting the others.
+                eprintln!();
+                eprintln!("  To retry, open a terminal and run:");
+                eprintln!("    opensentry-cloudnode setup");
+                eprintln!();
+                eprintln!("  If the error above is unclear, run with debug logs:");
+                eprintln!("    RUST_LOG=debug opensentry-cloudnode setup");
+            }
 
             // Pause on Windows so user sees the error before window closes
             #[cfg(target_os = "windows")]

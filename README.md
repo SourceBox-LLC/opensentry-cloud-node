@@ -57,12 +57,27 @@ The fastest way to install CloudNode:
 curl -fsSL https://opensentry-command.fly.dev/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+**Windows — MSI installer (recommended):**
+
+1. Download `opensentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases/latest).
+2. Run the MSI (UAC prompt — installer needs admin to register the service).
+3. SmartScreen will warn "Windows protected your PC" because the installer is unsigned. Click **More info → Run anyway**. (Code signing is on the roadmap.)
+4. From the Start menu, launch **OpenSentry CloudNode Setup**, or open an admin command prompt and run `opensentry-cloudnode setup`.
+5. After setup completes, start the service:
+   ```powershell
+   Start-Service OpenSentryCloudNode
+   ```
+
+The MSI registers a Windows Service (`OpenSentryCloudNode`) that auto-starts on boot once enabled. Config + recordings live under `C:\ProgramData\OpenSentry\`. See [Running as a Windows Service](#running-as-a-windows-service) below for service management.
+
+**Windows — PowerShell one-liner (alternative):**
 ```powershell
 irm https://opensentry-command.fly.dev/install.ps1 | iex
 ```
 
-The installer downloads the latest release, checks for FFmpeg, and guides you through setup.
+This puts the binary under `%LOCALAPPDATA%\OpenSentry\` and runs in a foreground terminal — fine for quick tests, but the MSI is the right path for an always-on camera node.
+
+The installers download the latest release, check for FFmpeg, and guide you through setup.
 
 <details>
 <summary><strong>Manual install (build from source)</strong></summary>
@@ -127,7 +142,11 @@ Press **Esc** to return from settings. Destructive commands (`/wipe`, `/reauth`)
 
 CloudNode resolves configuration in this order (highest priority last):
 
-1. **SQLite database** (`data/node.db`) — created by the setup wizard, primary source of truth
+1. **SQLite database** — created by the setup wizard, primary source of truth. The database lives at:
+   - **`$OPENSENTRY_DATA_DIR/node.db`** if the env var is set (Docker)
+   - **`./data/node.db`** if it already exists (legacy / `cargo build` installs)
+   - **`C:\ProgramData\OpenSentry\node.db`** on Windows-MSI installs
+   - **`./data/node.db`** otherwise (fresh manual install on Linux/macOS)
 2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to the DB on first load
 3. **Environment variables** — override any stored values
 4. **CLI flags** — highest priority
@@ -169,6 +188,84 @@ The API key is **encrypted at rest** using AES-256-GCM with a machine-derived ke
 DBs written by older CloudNode versions that derived the key from the hostname are transparently re-encrypted with the new machine-ID-derived key on first load.
 
 **Docker:** Alpine-based images don't ship with `/etc/machine-id`, so CloudNode generates a per-container ID on first run and stores it inside the mounted data volume (`$OPENSENTRY_DATA_DIR/.machine-id`). The ID persists across container rebuilds because it lives in the volume. For stronger encryption — a key tied to the host rather than the data volume — run the container with `-v /etc/machine-id:/etc/machine-id:ro`.
+
+---
+
+## Running as a Windows Service
+
+The Windows MSI installer registers CloudNode as a Windows Service named `OpenSentryCloudNode`. The service runs as `LocalSystem` (so it can access USB cameras and write under `%ProgramData%`) and is configured for **manual start** by default — you run setup first, then start it explicitly. Once it's running stably, switch it to auto-start so the node comes up after a reboot.
+
+### First-run flow
+
+```powershell
+# 1. After installing the MSI, open an admin PowerShell.
+#    Run setup — this writes node.db under %ProgramData%\OpenSentry\.
+opensentry-cloudnode setup
+
+# 2. Start the service.
+Start-Service OpenSentryCloudNode
+
+# 3. Confirm it's running.
+Get-Service OpenSentryCloudNode
+#  Status   Name                DisplayName
+#  ------   ----                -----------
+#  Running  OpenSentryCloudNode OpenSentry CloudNode
+```
+
+If the service fails to start, the most common cause is that setup wasn't run or didn't complete. Check the log file at `C:\ProgramData\OpenSentry\logs\cloudnode-service.<date>` — the service writes a clear "CloudNode is not configured" error to that file when no config is present.
+
+### Make the service auto-start on boot
+
+```powershell
+Set-Service -Name OpenSentryCloudNode -StartupType Automatic
+```
+
+### Stop / restart / status
+
+```powershell
+Stop-Service OpenSentryCloudNode
+Restart-Service OpenSentryCloudNode
+Get-Service OpenSentryCloudNode
+```
+
+### Where things live
+
+| Path | Purpose |
+|------|---------|
+| `C:\Program Files\OpenSentry CloudNode\opensentry-cloudnode.exe` | Service binary (read-only after install) |
+| `C:\ProgramData\OpenSentry\node.db` | Encrypted SQLite — config + (optionally) recordings |
+| `C:\ProgramData\OpenSentry\logs\` | Daily-rotating service log files (text) |
+
+### Tail the log
+
+```powershell
+Get-Content -Wait "C:\ProgramData\OpenSentry\logs\cloudnode-service.$(Get-Date -Format yyyy-MM-dd)"
+```
+
+### Reconfigure an enrolled node
+
+Stop the service, re-run setup, restart:
+
+```powershell
+Stop-Service OpenSentryCloudNode
+opensentry-cloudnode setup
+Start-Service OpenSentryCloudNode
+```
+
+### Uninstalling
+
+Use **Settings → Apps → OpenSentry CloudNode → Uninstall**, or:
+
+```powershell
+# Stop + remove the service first to free %ProgramData% files.
+Stop-Service OpenSentryCloudNode -ErrorAction SilentlyContinue
+# Then run the MSI uninstall (or use Add/Remove Programs).
+msiexec /x "{ProductCode}" /qn   # if you have the ProductCode
+```
+
+The MSI uninstaller leaves `C:\ProgramData\OpenSentry\` in place by design — your encrypted recordings are not deleted. If you want a clean slate, delete that folder by hand after uninstall.
+
+> **Heads up:** the MSI is **unsigned** today. SmartScreen flags unsigned installers with "Windows protected your PC" — click **More info → Run anyway** to proceed. Code signing is deferred until we have a sustained release cadence worth the EV-cert fee; the binary itself is open source and reproducibly buildable from this repository if you want to verify.
 
 ---
 

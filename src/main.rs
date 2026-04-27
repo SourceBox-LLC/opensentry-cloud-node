@@ -108,6 +108,13 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+
+    /// Run as a Windows Service. Invoked by the Service Control Manager —
+    /// not intended for direct use. The MSI registers
+    /// `opensentry-cloudnode service` as the service binary path.
+    /// See src/service.rs for the SCM handshake details.
+    #[command(hide = true)]
+    Service,
 }
 
 fn main() -> ExitCode {
@@ -127,6 +134,38 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
+    // Load .env file if it exists (legacy — config now stored in data/node.db).
+    // Parsing args before the terminal-check is intentional: the `service`
+    // subcommand must short-circuit BEFORE `launch_in_terminal()` would
+    // try to spawn a console (the SCM has no console for us to attach to,
+    // and any spawned cmd window gets orphaned anyway).
+    dotenvy::dotenv().ok();
+    let args = Args::parse();
+
+    // ── Windows Service short-circuit ────────────────────────────────
+    // SCM invokes us as `opensentry-cloudnode.exe service`. From here we
+    // hand off to the windows-service dispatcher which blocks until the
+    // service exits. Don't reach the terminal-check or interactive flow.
+    #[cfg(target_os = "windows")]
+    if matches!(args.command, Some(Commands::Service)) {
+        opensentry_cloudnode::service::run().map_err(|e| {
+            opensentry_cloudnode::Error::Unknown(format!(
+                "Service dispatcher failed: {}",
+                e
+            ))
+        })?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    if matches!(args.command, Some(Commands::Service)) {
+        return Err(opensentry_cloudnode::Error::Config(
+            "The `service` subcommand is Windows-only — \
+             use systemd / launchd / your platform's service manager \
+             to run CloudNode as a daemon on Linux/macOS."
+                .to_string(),
+        ));
+    }
+
     // On Windows, check if we have a proper terminal attached
     // If not (double-clicked from Explorer), launch in a new terminal window
     #[cfg(target_os = "windows")]
@@ -145,11 +184,6 @@ fn run() -> Result<()> {
             pause_on_exit();
         }
     }
-
-    // Load .env file if it exists (legacy — config now stored in data/node.db)
-    dotenvy::dotenv().ok();
-
-    let args = Args::parse();
 
     // Determine if we're launching setup or running the node.
     // IMPORTANT: Do NOT initialize the tracing subscriber until AFTER setup
@@ -213,6 +247,13 @@ fn run() -> Result<()> {
         }
         Some(Commands::Setup { .. }) => {
             // Already handled above via needs_setup path.
+        }
+        Some(Commands::Service) => {
+            // Already handled at the top of run() via the Windows
+            // short-circuit. Reaching this arm means the cfg gate
+            // skipped (non-Windows) — but we already returned an
+            // error for that case, so this branch is unreachable.
+            unreachable!("Service subcommand handled before reaching this match");
         }
         None => {
             run_cloudnode(args.node_id, args.api_key, args.api_url, args.once, args.config)?;

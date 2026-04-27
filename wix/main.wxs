@@ -1,0 +1,189 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  WiX Toolset 3.x source for the OpenSentry CloudNode MSI.
+
+  Built by `cargo wix` (which shells out to `candle.exe` and `light.exe`
+  from the WiX toolset) and emitted to `target/wix/opensentry-cloudnode-
+  <version>-x86_64.msi`. The release.yml workflow attaches the MSI to
+  the GitHub Release alongside the existing .zip artifact.
+
+  ## Stable identifiers
+
+  - Product/Id="*" — auto-generated per build. Required by MajorUpgrade
+    so the new MSI gets a fresh ProductCode.
+  - Product/UpgradeCode — IMMUTABLE. Renaming this string for any
+    reason will leave existing installs un-upgradeable; an MSI with a
+    different UpgradeCode is, from Windows Installer's perspective, a
+    completely different product. Generated 2026-04-26 for this
+    project; do not change.
+  - Component GUIDs — stable across versions so MSI tracks them as
+    "the same component" (matters for the service install in
+    particular: changing the component GUID on an upgrade can leave
+    a duplicate ServiceInstall registration behind).
+
+  ## Service registration
+
+  ServiceInstall registers the service with SCM. Start='demand' (NOT
+  'auto') means the service is installed but doesn't try to launch
+  itself the moment the MSI finishes — the user runs
+  `opensentry-cloudnode setup` from an admin console first to write
+  config to %ProgramData%\OpenSentry\node.db, THEN starts the service
+  manually. Starting before setup would just produce an SCM error +
+  log line ("CloudNode is not configured") which is honest but ugly
+  for a fresh install.
+
+  We can flip to Start='auto' once the setup wizard reliably writes
+  config + (optionally) calls into the SCM API to flip the start type
+  itself.
+
+  ServiceControl Stop='both' Remove='uninstall' makes the uninstaller
+  clean: stops the running service, then removes the SCM registration
+  so a re-install doesn't see a duplicate.
+
+  ## Install scope
+
+  InstallScope='perMachine' — the binary lives under Program Files,
+  the service runs as LocalSystem, and config is shared across all
+  users on the machine. A per-user install would have meaningfully
+  different semantics (per-user service?) and isn't what we want for
+  what's essentially server-class software.
+
+  ## What we deliberately don't do
+
+  - **License agreement dialog.** WixUI_Minimal would show one but
+    requires a License.rtf and adds a click users mostly skim. Users
+    have already seen the GPL-3 LICENSE on GitHub before downloading.
+    Add later if a sales context demands it.
+  - **PATH modification.** The user can call the binary by full path
+    once; after that the installer added a Start menu shortcut they
+    can use, OR they Add-Path themselves. Skipping PATH avoids the
+    "logout required for env var to take effect" footgun.
+  - **Bundled FFmpeg.** FFmpeg is a separate prerequisite documented
+    in the README. Bundling would bloat the MSI from ~5 MB to ~80 MB.
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='OpenSentry CloudNode'
+        UpgradeCode='7B8E5C9A-4D2F-4A1B-9E3C-A0F6D8B25E47'
+        Manufacturer='SourceBox LLC'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='OpenSentry CloudNode Installer'
+            Manufacturer='SourceBox LLC'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252' />
+
+        <!-- Major-upgrade chain: a newer MSI uninstalls the older one
+             before installing itself. Schedule afterInstallInitialize
+             is the recommended slot per WiX docs (handles in-flight
+             services correctly via the Stop=both we set below). -->
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Uninstall it first if you really need to roll back.' />
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' />
+
+        <!-- Properties surfaced in Add/Remove Programs / Settings → Apps. -->
+        <Property Id='ARPHELPLINK'>https://github.com/SourceBox-LLC/opensentry-cloud-node</Property>
+        <Property Id='ARPURLINFOABOUT'>https://opensentry-command.fly.dev</Property>
+        <Property Id='ARPNOREPAIR' Value='yes' Secure='yes' />
+        <Property Id='ARPNOMODIFY' Value='yes' Secure='yes' />
+
+        <!-- ProgramData/OpenSentry/  — runtime config + recordings.
+             We don't *create* the folder here (that happens in the
+             setup wizard or run_log_cleanup, which already does
+             create_dir_all); we only ensure the dir is referenced so
+             a hypothetical future RemoveFolder element has somewhere
+             to point. -->
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+
+            <Directory Id='ProgramFiles64Folder'>
+                <Directory Id='APPLICATIONFOLDER' Name='OpenSentry CloudNode'>
+
+                    <!-- Component: the binary + the service registration.
+                         Tying these together means the service can't
+                         get installed without the exe (or vice versa) —
+                         atomic per-component upgrade behaviour. -->
+                    <Component Id='cmpServiceBinary'
+                               Guid='8C9F6DAB-5E3F-4B2C-AF4D-B1F7E9C36F58'>
+
+                        <File Id='filServiceExe'
+                              Source='target\release\opensentry-cloudnode.exe'
+                              KeyPath='yes'
+                              Checksum='yes' />
+
+                        <ServiceInstall
+                            Id='svcCloudNode'
+                            Name='OpenSentryCloudNode'
+                            DisplayName='OpenSentry CloudNode'
+                            Description='Streams local USB cameras to the OpenSentry Command Center cloud. Configure with: opensentry-cloudnode setup.'
+                            Type='ownProcess'
+                            Start='demand'
+                            ErrorControl='normal'
+                            Account='LocalSystem'
+                            Arguments='service'
+                            Vital='yes'
+                            Interactive='no' />
+
+                        <ServiceControl
+                            Id='svcCloudNodeControl'
+                            Name='OpenSentryCloudNode'
+                            Stop='both'
+                            Remove='uninstall'
+                            Wait='yes' />
+
+                    </Component>
+
+                </Directory>
+            </Directory>
+
+            <!-- Start menu shortcut so the user can launch a console
+                 invocation of the binary without typing the full path.
+                 The shortcut runs `opensentry-cloudnode setup` since
+                 that's the most likely first action after install. -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='OpenSentry CloudNode'>
+                    <Component Id='cmpStartMenu'
+                               Guid='9DAB7EBC-6F4F-4C3D-B05E-C2F8FAD47069'>
+                        <Shortcut Id='ShortcutSetup'
+                                  Name='OpenSentry CloudNode Setup'
+                                  Description='Run the interactive setup wizard to enrol this machine.'
+                                  Target='[#filServiceExe]'
+                                  Arguments='setup'
+                                  WorkingDirectory='APPLICATIONFOLDER' />
+                        <RemoveFolder Id='RemoveProgramsFolder'
+                                      Directory='ApplicationProgramsFolder'
+                                      On='uninstall' />
+                        <RegistryValue Root='HKCU'
+                                       Key='Software\SourceBox\OpenSentryCloudNode'
+                                       Name='installed'
+                                       Type='integer'
+                                       Value='1'
+                                       KeyPath='yes' />
+                    </Component>
+                </Directory>
+            </Directory>
+
+        </Directory>
+
+        <Feature Id='Default'
+                 Title='Main'
+                 Description='OpenSentry CloudNode service binary and Start menu shortcut.'
+                 Display='expand'
+                 ConfigurableDirectory='APPLICATIONFOLDER'
+                 Level='1'>
+            <ComponentRef Id='cmpServiceBinary' />
+            <ComponentRef Id='cmpStartMenu' />
+        </Feature>
+
+    </Product>
+</Wix>

@@ -669,7 +669,7 @@ fn install_dependencies(config: &SetupConfig, platform: &PlatformInfo) -> Result
 
 // ─── Step 4: Verify ──────────────────────────────────────────────────────────
 
-fn verify_setup(config: &SetupConfig) -> Result<()> {
+fn verify_setup(_config: &SetupConfig) -> Result<()> {
     panel_top("Step 4 / 5 — Verification");
     panel_blank();
 
@@ -685,7 +685,7 @@ fn verify_setup(config: &SetupConfig) -> Result<()> {
 
     panel_spinner_row(&spinner.advance(), "Verifying database configuration...");
     flush();
-    let db_path = config.output_dir.join("data").join("node.db");
+    let db_path = crate::paths::config_db_path();
     if !db_path.exists() {
         print!("\r");
         flush();
@@ -858,7 +858,7 @@ fn progress_bar_str(steps: &[(&'static str, StepState)]) -> String {
 
 fn save_config_to_database(config: &SetupConfig) -> Result<()> {
     // Store config in the SQLite database with the API key encrypted.
-    let db_path = config.output_dir.join("data").join("node.db");
+    let db_path = crate::paths::config_db_path();
     std::fs::create_dir_all(db_path.parent().unwrap())?;
     let db = crate::storage::NodeDatabase::new(&db_path)
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
@@ -883,8 +883,10 @@ fn save_config_to_database(config: &SetupConfig) -> Result<()> {
     Ok(())
 }
 
-fn create_directories(config: &SetupConfig) -> Result<()> {
-    let data = config.output_dir.join("data");
+fn create_directories(_config: &SetupConfig) -> Result<()> {
+    // Data dir resolution moved to crate::paths to support Windows
+    // Service installs (cwd = System32) under %ProgramData%\OpenSentry\.
+    let data = crate::paths::data_dir();
     std::fs::create_dir_all(data.join("hls"))?;
     Ok(())
 }
@@ -950,8 +952,8 @@ fn find_ffmpeg_for_setup() -> String {
 }
 
 /// Save a config key-value pair to the SQLite database.
-fn save_config_to_db(config: &SetupConfig, key: &str, value: &str) -> Result<()> {
-    let db_path = config.output_dir.join("data").join("node.db");
+fn save_config_to_db(_config: &SetupConfig, key: &str, value: &str) -> Result<()> {
+    let db_path = crate::paths::config_db_path();
     let db = crate::storage::NodeDatabase::new(&db_path)
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     db.set_config(key, value)

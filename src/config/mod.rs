@@ -33,10 +33,15 @@ pub struct CliOverrides {
 impl Config {
     /// Load configuration: try DB first, then fall back to YAML/env.
     pub fn load(path: Option<&str>) -> Result<Self> {
-        // 1. Try loading from the SQLite database (new path)
-        let db_path = std::path::Path::new("./data/node.db");
+        // 1. Try loading from the SQLite database (new path).
+        //
+        // Path resolution lives in `crate::paths::config_db_path()` so a
+        // Windows-Service install (cwd = System32) finds its DB under
+        // %ProgramData%\OpenSentry\ instead of trying to write inside
+        // System32. See paths::data_dir() for the full resolution order.
+        let db_path = crate::paths::config_db_path();
         if db_path.exists() {
-            if let Ok(db) = NodeDatabase::new(db_path) {
+            if let Ok(db) = NodeDatabase::new(&db_path) {
                 if db.has_config() {
                     tracing::info!("Loading config from database");
                     return Self::load_from_db(&db);
@@ -54,9 +59,15 @@ impl Config {
         config = config.with_env_overrides();
 
         // 3. If we loaded from legacy sources and have credentials,
-        //    migrate them to the database for next time.
+        //    migrate them to the database for next time. Make sure the
+        //    parent dir exists — on a fresh MSI install %ProgramData%\
+        //    OpenSentry\ may not exist yet because the WiX template
+        //    only creates the install dir, not the data dir.
         if !config.cloud.api_key.is_empty() && config.node.node_id.is_some() {
-            if let Ok(db) = NodeDatabase::new(db_path) {
+            if let Some(parent) = db_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(db) = NodeDatabase::new(&db_path) {
                 if let Err(e) = config.save_to_db(&db) {
                     tracing::warn!("Config migration to DB failed: {}", e);
                 } else {

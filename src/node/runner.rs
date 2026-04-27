@@ -84,8 +84,35 @@ impl Node {
         }
     }
 
-    /// Run the node with live dashboard
-    pub async fn run(mut self) -> Result<()> {
+    /// Run the node with the live TUI dashboard.
+    ///
+    /// This is the path the binary takes when launched from a terminal —
+    /// the dashboard renders, raw-mode input is handled, and Ctrl+C
+    /// triggers shutdown. The Windows Service path uses
+    /// [`Self::run_headless`] instead because services have no terminal
+    /// and SCM owns shutdown signalling.
+    pub async fn run(self) -> Result<()> {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        self.run_internal(stop_flag, /* render_tui = */ true).await
+    }
+
+    /// Run the node without the TUI render/input loop.
+    ///
+    /// Used by [`crate::service`] (Windows Service entry point). The
+    /// caller owns the `stop_flag` and flips it when SCM signals Stop.
+    /// Logging still flows through the Dashboard's tracing layer (so the
+    /// SQLite log buffer keeps populating); the only difference from
+    /// [`Self::run`] is that nothing tries to enable crossterm raw-mode
+    /// or write to stdout, both of which would hang under SCM.
+    pub async fn run_headless(self, stop_flag: Arc<AtomicBool>) -> Result<()> {
+        self.run_internal(stop_flag, /* render_tui = */ false).await
+    }
+
+    async fn run_internal(
+        mut self,
+        stop_flag: Arc<AtomicBool>,
+        render_tui: bool,
+    ) -> Result<()> {
         // ── Create dashboard ────────────────────────────────────────────────
         let node_id = self.config.node.node_id
             .clone()
@@ -160,9 +187,10 @@ impl Node {
         let recording_state: Arc<RwLock<HashSet<String>>> =
             Arc::new(RwLock::new(HashSet::new()));
 
-        // Shared shutdown flag — set on Ctrl+C or /quit. Created here
-        // (not at section 7) so every supervisor task gets a clone.
-        let stop_flag = Arc::new(AtomicBool::new(false));
+        // Shared shutdown flag — set on Ctrl+C, /quit, or by the Windows
+        // Service Control Manager via the public run_headless entry point.
+        // Owned by the caller now (was created here in older versions);
+        // every supervisor task gets a clone below.
 
         // Motion event channel — uploaders send, WebSocket client receives
         let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<
@@ -394,16 +422,28 @@ impl Node {
         };
 
         // ── 7. Start dashboard render loop in a background thread ─────────────
-        // stop_flag was created earlier so supervisors could share it.
-        let stop_clone = stop_flag.clone();
-        let dash_clone = dash.clone();
-        let render_thread = std::thread::spawn(move || {
-            dash_clone.run_render_loop(Duration::from_millis(500), stop_clone);
-        });
+        // Skip in headless mode (Windows Service): there's no terminal,
+        // and `run_render_loop` calls `crossterm::terminal::enable_raw_mode`
+        // which fails or hangs without a real TTY. The dashboard *object*
+        // still exists and still receives tracing events — the SQLite log
+        // buffer keeps populating — we just don't render.
+        let render_thread = if render_tui {
+            let stop_clone = stop_flag.clone();
+            let dash_clone = dash.clone();
+            Some(std::thread::spawn(move || {
+                dash_clone.run_render_loop(Duration::from_millis(500), stop_clone);
+            }))
+        } else {
+            None
+        };
 
         // ── 8. Wait for shutdown (Ctrl+C from OS or /quit from dashboard) ────
         // In raw mode Ctrl+C is captured by the dashboard input loop and sets
         // the stop flag directly, so we poll it alongside the OS signal.
+        // In headless mode, the caller (service main) flips stop_flag from
+        // the SCM event handler — Ctrl+C is still installed as a fallback
+        // for cases where the binary is run as `opensentry-cloudnode service`
+        // from a console for debugging.
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 dash.log_warn("Shutdown signal received — stopping…");
@@ -416,9 +456,12 @@ impl Node {
             } => {}
         }
 
-        // Give dashboard one last render cycle to show shutdown message
-        std::thread::sleep(Duration::from_millis(600));
-        let _ = render_thread.join();
+        // Give dashboard one last render cycle to show shutdown message.
+        // No-op in headless mode (no thread to join).
+        if let Some(handle) = render_thread {
+            std::thread::sleep(Duration::from_millis(600));
+            let _ = handle.join();
+        }
 
         // Stop streams. The supervisor tasks already saw `stop_flag` flip
         // above and should be in the middle of killing FFmpeg cleanly
@@ -433,7 +476,15 @@ impl Node {
         ws_handle.abort();
         retention_handle.abort();
 
-        println!("\n  {}", "CloudNode stopped.".yellow());
+        // Headless mode runs without a terminal, so writing to stdout is
+        // pointless and would clutter the service log if stdout were
+        // redirected to it. The shutdown is already reflected in the
+        // SQLite log buffer + tracing-appender file.
+        if render_tui {
+            println!("\n  {}", "CloudNode stopped.".yellow());
+        } else {
+            tracing::info!("CloudNode stopped (headless).");
+        }
 
         Ok(())
     }

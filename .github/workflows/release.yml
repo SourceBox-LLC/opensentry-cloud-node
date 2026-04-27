@@ -85,11 +85,79 @@ jobs:
           Compress-Archive -Path opensentry-cloudnode.exe -DestinationPath ../../../opensentry-cloudnode-${{ matrix.platform }}-${{ matrix.arch }}.zip
           cd ../../..
 
+      # ── Build the Windows MSI ──────────────────────────────────────
+      # Runs only on the Windows matrix entry, only after the binary
+      # has compiled (cargo-wix consumes target/release/...exe). Has
+      # two side effects worth knowing about:
+      #
+      # 1. Installs the WiX Toolset 3.x via the official MSI. WiX 4 is
+      #    out, but cargo-wix as of 0.3 still emits 3.x-compatible
+      #    XML, so we pin to 3.14 — the latest 3.x release.
+      # 2. Installs the cargo-wix subcommand. ~1m of build time the
+      #    first time, cached after that.
+      #
+      # The MSI itself is unsigned. SmartScreen will warn the user on
+      # first install; the README documents the "More info → Run anyway"
+      # workaround. Code signing is deferred (see docs/LAUNCH_HANDOFF
+      # in the Command Center repo).
+      - name: Install WiX Toolset (Windows only)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          # WiX 3.14 — last 3.x release. cargo-wix 0.3 emits 3.x XML.
+          $url = 'https://github.com/wixtoolset/wix3/releases/download/wix314rtm/wix314-binaries.zip'
+          $zip = "$env:RUNNER_TEMP\wix314.zip"
+          $dst = "$env:RUNNER_TEMP\wix"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          # Add to PATH for subsequent steps.
+          echo $dst | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install cargo-wix (Windows only)
+        if: matrix.platform == 'windows'
+        run: cargo install cargo-wix --locked
+        shell: pwsh
+
+      - name: Build MSI (Windows only)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          # --no-build because the cargo build step above already
+          # produced target\release\opensentry-cloudnode.exe with the
+          # right release-profile flags (LTO, strip). Letting cargo-wix
+          # rebuild would also use a stripped exe but pays the cost twice.
+          cargo wix --no-build --nocapture --output target/wix/
+
+      - name: Rename MSI to standard naming (Windows only)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          # cargo-wix names the MSI `opensentry-cloudnode-<version>-<arch>.msi`
+          # by default. Move it to the predictable name the install
+          # script + landing page link to. We keep the version-stamped
+          # name in the GitHub release URL by also uploading the
+          # original; this rename produces the "always-latest" copy
+          # the install scripts pull.
+          $generated = Get-ChildItem target/wix -Filter '*.msi' | Select-Object -First 1
+          if (-not $generated) { throw "No MSI generated under target/wix/" }
+          Copy-Item $generated.FullName -Destination "opensentry-cloudnode-${{ matrix.platform }}-${{ matrix.arch }}.msi"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: opensentry-cloudnode-${{ matrix.platform }}-${{ matrix.arch }}
           path: opensentry-cloudnode-${{ matrix.platform }}-${{ matrix.arch }}.${{ matrix.ext }}
+
+      # Separate upload for the MSI so the `release` job's
+      # `download-artifact` step picks it up alongside the .zip.
+      # Conditional on Windows matrix entry — others would have nothing
+      # to upload.
+      - name: Upload MSI artifact (Windows only)
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensentry-cloudnode-${{ matrix.platform }}-${{ matrix.arch }}-msi
+          path: opensentry-cloudnode-${{ matrix.platform }}-${{ matrix.arch }}.msi
 
   release:
     name: Create Release

@@ -605,8 +605,8 @@ fn pick_distro(wsl: &WslStatus, usable: &[&DistroInfo]) -> Result<String> {
 /// Persist the selected WSL distro to the node database so the runtime
 /// launcher (Scope B) knows which distro to invoke.  Errors here are
 /// non-fatal — we log them but don't interrupt setup.
-fn save_wsl_distro(config: &SetupConfig, distro: &str) -> Result<()> {
-    let db_path = config.output_dir.join("data").join("node.db");
+fn save_wsl_distro(_config: &SetupConfig, distro: &str) -> Result<()> {
+    let db_path = crate::paths::config_db_path();
     let db = crate::storage::NodeDatabase::new(&db_path)
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
     db.set_config("wsl.distro", distro)

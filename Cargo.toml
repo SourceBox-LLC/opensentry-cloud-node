@@ -88,6 +88,18 @@ rand = "0.8"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# Windows-only: service control + non-blocking file logger.
+#   - windows-service handles the Service Control Manager handshake
+#     (Start/Stop notifications, status reporting). Used by src/service.rs
+#     when the binary is invoked as a Windows Service via the `service`
+#     subcommand.
+#   - tracing-appender provides a daily-rolling file logger so the
+#     service has *somewhere* to write — the standard `tracing` →
+#     DashboardLayer path is TUI-only and a Service has no terminal.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.7"
+tracing-appender = "0.2"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
@@ -96,3 +108,18 @@ tempfile = "3"
 opt-level = 3
 lto = true
 strip = true
+
+# ── cargo-wix MSI build configuration ───────────────────────────────
+#
+# `cargo wix` reads from this section but most of the knobs we care
+# about — culture, no-build, locale — are CLI flags rather than metadata
+# fields. The release.yml workflow passes them via the command line
+# (`--culture en-US --no-build`).
+#
+# UpgradeCode and component GUIDs live in wix/main.wxs (NOT here) so
+# they stay stable across releases — Windows Installer treats a changed
+# UpgradeCode as a brand-new product, breaking the upgrade chain.
+[package.metadata.wix]
+# Reserved for future use. Empty today; kept so cargo-wix recognises
+# this project as wix-aware and doesn't try to scaffold from scratch
+# the next time someone runs `cargo wix init`.

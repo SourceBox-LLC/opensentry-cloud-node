@@ -140,8 +140,14 @@ pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()
 
     // ── Save config to database ──────────────────────────────────
     print!("  Saving configuration...   ");
+    // `output_dir` is the install root (where the binary + bundled
+    // ffmpeg live). The DB path comes from `paths::config_db_path()`
+    // so a Windows-Service install lands the DB under %ProgramData%
+    // \OpenSentry\node.db rather than next to the exe in Program Files
+    // (which a service running as LocalSystem would still be able to
+    // write to, but conventionally Program Files is read-only).
     let output_dir = std::env::current_dir()?;
-    let db_path = output_dir.join("data").join("node.db");
+    let db_path = crate::paths::config_db_path();
     std::fs::create_dir_all(db_path.parent().unwrap())?;
 
     let db = crate::storage::NodeDatabase::new(&db_path)
@@ -208,7 +214,7 @@ pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()
 
     // ── Create data directories ──────────────────────────────────
     print!("  Creating directories...   ");
-    std::fs::create_dir_all(output_dir.join("data").join("hls"))?;
+    std::fs::create_dir_all(crate::paths::data_dir().join("hls"))?;
     println!("{}", "OK".green().bold());
 
     // ── Check FFmpeg availability ────────────────────────────────

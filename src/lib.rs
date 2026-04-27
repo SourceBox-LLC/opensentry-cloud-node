@@ -23,11 +23,18 @@ pub mod config;
 pub mod dashboard;
 pub mod error;
 pub mod logging;
+pub mod paths;
 pub mod server;
 pub mod storage;
 pub mod streaming;
 pub mod node;
 pub mod setup;
+
+// Windows Service entry point. Compiled only on Windows because
+// `windows-service` isn't a portable crate; on other platforms the
+// `service` subcommand short-circuits with a friendly error.
+#[cfg(target_os = "windows")]
+pub mod service;
 
 // Re-exports for convenience
 pub use config::{Config, CliOverrides};

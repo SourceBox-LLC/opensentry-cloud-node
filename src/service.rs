@@ -233,6 +233,36 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ── 4b. Validate config BEFORE we tell SCM we're Running ────
+    //
+    // 🔴 fix #2 from yesterday's code review. Previously Config::load
+    // happened inside run_node_blocking, AFTER status=Running was
+    // sent — so a misconfigured install would briefly flicker Running
+    // → Stopped within milliseconds. SCM (and its consumers like the
+    // services.msc UI) momentarily believe the service started
+    // successfully and then crashed, which is misleading: the service
+    // never even reached "starting normally."
+    //
+    // Now: load + validate while still in StartPending. On failure,
+    // skip Running entirely and go directly StartPending → Stopped(1).
+    // SCM never reports Running for a service that can't actually run.
+    let config = match load_and_validate_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Service config validation failed: {}", e);
+            status_handle.set_service_status(ServiceStatus {
+                service_type: SERVICE_TYPE,
+                current_state: ServiceState::Stopped,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::Win32(1),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            })?;
+            return Err(e);
+        }
+    };
+
     // Service is up — accept Stop notifications now. (Pause/Continue
     // intentionally not in the accepted list; see event_handler above.)
     status_handle.set_service_status(ServiceStatus {
@@ -246,7 +276,7 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // ── 5. Run the node ─────────────────────────────────────────
-    let result = run_node_blocking(stop_flag);
+    let result = run_node_blocking(config, stop_flag);
 
     // ── 6. Tell SCM we stopped ──────────────────────────────────
     // Always send Stopped, even on error — SCM otherwise thinks the
@@ -269,11 +299,13 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-/// Build the tokio runtime and run [`crate::Node::run_headless`] inside it.
-/// Blocks until the node returns (which happens when `stop_flag` flips
-/// or a fatal error occurs).
-fn run_node_blocking(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::{Config, Node};
+/// Load + validate config. Split out from `run_node_blocking` so the
+/// service main can call this BEFORE flipping status to Running —
+/// otherwise a misconfigured install briefly shows Running before
+/// transitioning to Stopped, which looks to SCM like a successful
+/// start followed by a crash. See run_service for the ordering rationale.
+fn load_and_validate_config() -> Result<crate::Config, Box<dyn std::error::Error>> {
+    use crate::Config;
 
     let config = Config::load(None).map_err(|e| {
         format!(
@@ -292,6 +324,18 @@ fn run_node_blocking(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn std::erro
                 .into(),
         );
     }
+
+    Ok(config)
+}
+
+/// Build the tokio runtime and run [`crate::Node::run_headless`] inside it.
+/// Blocks until the node returns (which happens when `stop_flag` flips
+/// or a fatal error occurs).
+fn run_node_blocking(
+    config: crate::Config,
+    stop_flag: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::Node;
 
     tracing::info!("Node ID: {:?}", config.node.node_id);
     tracing::info!("API URL: {}", config.cloud.api_url);

@@ -31,8 +31,8 @@
 //! `ffmpeg-release-essentials.zip` (~100 MB extracted) which contains
 //! `bin\ffmpeg.exe` + `bin\ffprobe.exe`. The "essentials" build omits
 //! the kitchen-sink codecs in the "full" build that we don't use, in
-//! exchange for a smaller download. Same vendor as
-//! `backend/scripts/install.ps1` already uses.
+//! exchange for a smaller download. Same vendor that the legacy
+//! Windows install.ps1 used (now retired in favour of the MSI).
 //!
 //! If gyan.dev disappears we'd need a backup vendor. Today the
 //! `ffmpeg-release-essentials.zip` URL is stable across releases —

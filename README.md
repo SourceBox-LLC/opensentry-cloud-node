@@ -57,27 +57,18 @@ The fastest way to install CloudNode:
 curl -fsSL https://opensentry-command.fly.dev/install.sh | bash
 ```
 
-**Windows — MSI installer (recommended):**
+**Windows:**
 
 1. Download `opensentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases/latest).
 2. Run the MSI (UAC prompt — installer needs admin to register the service).
 3. SmartScreen will warn "Windows protected your PC" because the installer is unsigned. Click **More info → Run anyway**. (Code signing is on the roadmap.)
-4. From the Start menu, launch **OpenSentry CloudNode Setup**, or open an admin command prompt and run `opensentry-cloudnode setup`.
+4. From the Start menu, launch **OpenSentry CloudNode Setup**, or open an admin PowerShell and run `opensentry-cloudnode setup`.
 5. After setup completes, start the service:
    ```powershell
    Start-Service OpenSentryCloudNode
    ```
 
-The MSI registers a Windows Service (`OpenSentryCloudNode`) that auto-starts on boot once enabled. Config + recordings live under `C:\ProgramData\OpenSentry\`. See [Running as a Windows Service](#running-as-a-windows-service) below for service management.
-
-**Windows — PowerShell one-liner (alternative):**
-```powershell
-irm https://opensentry-command.fly.dev/install.ps1 | iex
-```
-
-This puts the binary under `%LOCALAPPDATA%\OpenSentry\` and runs in a foreground terminal — fine for quick tests, but the MSI is the right path for an always-on camera node.
-
-The installers download the latest release, check for FFmpeg, and guide you through setup.
+The MSI registers a Windows Service (`OpenSentryCloudNode`) that auto-starts on boot once enabled. Config + recordings live under `C:\ProgramData\OpenSentry\`. See [Running as a Windows Service](#running-as-a-windows-service) below for service management. The setup wizard offers to download FFmpeg automatically if it isn't already installed.
 
 <details>
 <summary><strong>Manual install (build from source)</strong></summary>

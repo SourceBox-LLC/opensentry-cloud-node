@@ -180,9 +180,10 @@ jobs:
           files: artifacts/**/*
           # Mark hyphen-suffixed tags (v0.1.18-msi-rc3, v0.1.19-beta, etc.)
           # as prereleases so the GitHub `/releases/latest/download/...`
-          # redirect — used by install.ps1, the landing page MSI link,
-          # and curl-style users — keeps pointing at the most recent
-          # *stable* release. A bare `vX.Y.Z` tag has no hyphen and
+          # redirect — used by the landing page MSI link, the docs
+          # download buttons, and any curl-style consumers — keeps
+          # pointing at the most recent *stable* release. A bare
+          # `vX.Y.Z` tag has no hyphen and
           # ships as the default-latest; any hyphen suffix is per
           # SemVer prerelease territory and we honour that. Without
           # this gate, an RC tag temporarily bumps GitHub's "latest"

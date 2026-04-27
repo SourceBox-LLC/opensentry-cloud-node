@@ -57,23 +57,54 @@ pub fn find_ffprobe() -> String {
 ///
 /// `name` is the bare name ("ffmpeg" or "ffprobe"); the Windows branch
 /// appends `.exe` automatically.
+///
+/// # Lookup precedence
+///
+/// 1. **Cwd-bundled copy** (`<cwd>/ffmpeg/bin/<name>`) — preserves the
+///    legacy `cargo run` developer flow where ffmpeg lives next to the
+///    repo root, and the foreground PowerShell installer's
+///    `%LOCALAPPDATA%\OpenSentry\ffmpeg\bin\` layout when invoked from
+///    that dir.
+/// 2. **Data-dir bundled copy** (`<data_dir>/ffmpeg/bin/<name>`) — where
+///    the setup wizard's auto-install lands ffmpeg, and where the MSI
+///    service (cwd = `C:\Windows\System32`) finds it. Without this
+///    step the service couldn't see the auto-installed binary at all,
+///    because cwd is wrong and there's no symlink machinery on Windows
+///    we want to lean on.
+/// 3. **Well-known absolute paths** (Linux/macOS) — handles the
+///    "works in my shell but not as a service" trap where systemd runs
+///    with PATH=/usr/bin:/bin and a brew-installed `ffmpeg` at
+///    `/opt/homebrew/bin/ffmpeg` becomes invisible.
+/// 4. **System PATH** (last resort) — bare `name`, lets the OS resolve.
 fn find_tool(name: &str) -> String {
     #[cfg(target_os = "windows")]
     {
-        // Bundled copy shipped by the setup wizard (./ffmpeg/bin/name.exe).
         let exe_name = format!("{}.exe", name);
+
+        // 1. Cwd-bundled copy.
         if let Ok(cwd) = std::env::current_dir() {
             let local = cwd.join("ffmpeg").join("bin").join(&exe_name);
             if local.exists() {
                 return local.to_string_lossy().to_string();
             }
         }
-        return name.to_string(); // fall through to PATH
+
+        // 2. Data-dir bundled copy. Critical for the MSI Service path —
+        //    that process runs with cwd = System32, so step 1 misses
+        //    even when the auto-install dropped ffmpeg into
+        //    %ProgramData%\OpenSentry\ffmpeg\bin\.
+        let data_local = crate::paths::data_dir().join("ffmpeg").join("bin").join(&exe_name);
+        if data_local.exists() {
+            return data_local.to_string_lossy().to_string();
+        }
+
+        // 3. PATH fallback.
+        return name.to_string();
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        // 1. Bundled copy next to the binary (./ffmpeg/bin/name), if any.
+        // 1. Cwd-bundled copy.
         if let Ok(cwd) = std::env::current_dir() {
             let local = cwd.join("ffmpeg").join("bin").join(name);
             if local.exists() {
@@ -81,7 +112,14 @@ fn find_tool(name: &str) -> String {
             }
         }
 
-        // 2. Well-known absolute paths.  Apt/dnf/pacman land in /usr/bin;
+        // 2. Data-dir bundled copy. Mirrors the Windows behaviour so
+        //    the auto-install path works identically across platforms.
+        let data_local = crate::paths::data_dir().join("ffmpeg").join("bin").join(name);
+        if data_local.exists() {
+            return data_local.to_string_lossy().to_string();
+        }
+
+        // 3. Well-known absolute paths.  Apt/dnf/pacman land in /usr/bin;
         //    source or manual installs in /usr/local/bin; Homebrew on Apple
         //    Silicon uses /opt/homebrew/bin; Intel macOS uses /usr/local/bin.
         //    Checking these explicitly is the difference between "works when
@@ -99,7 +137,7 @@ fn find_tool(name: &str) -> String {
             }
         }
 
-        // 3. Last resort: bare name — let the OS resolve via PATH.
+        // 4. Last resort: bare name — let the OS resolve via PATH.
         name.to_string()
     }
 }

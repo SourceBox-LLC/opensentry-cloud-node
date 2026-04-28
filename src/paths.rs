@@ -58,10 +58,37 @@ pub fn data_dir() -> PathBuf {
     }
 
     // 2. Legacy in-place ./data/ takes priority over the platform
-    //    default so existing installs don't migrate themselves on the
-    //    next launch (which would silently abandon their config DB).
+    //    default so existing cargo-build installs don't migrate
+    //    themselves on the next launch (which would silently abandon
+    //    their config DB).
+    //
+    //    CRITICAL: this check requires `./data/node.db` to exist, NOT
+    //    just `./data/`. Original logic checked only `./data` existence
+    //    which produced a footgun for MSI users:
+    //
+    //      - User puts the test .bat or any random binary on their
+    //        Desktop where they happen to have a folder named "data"
+    //        (from some other project, or auto-created by an earlier
+    //        confused invocation, or whatever).
+    //      - cwd at launch = Desktop. `./data` resolves to
+    //        `C:\Users\<x>\Desktop\data` and exists.
+    //      - data_dir returns `./data`. Config::load reads
+    //        `./data/node.db` — doesn't exist — needs_setup=true,
+    //        wizard re-runs.
+    //      - find_tool looks for ffmpeg at `./data/ffmpeg/bin/ffmpeg.exe`
+    //        — doesn't exist — falls through to bare "ffmpeg" — PATH
+    //        search fails — `Io error: program not found`.
+    //      - Meanwhile the REAL data is at C:\ProgramData\SourceBoxSentry
+    //        with node.db + ffmpeg/ all present and the binary just
+    //        ignores it.
+    //
+    //    Requiring `node.db` inside `./data` anchors the legacy check to
+    //    actual CloudNode state, not a coincidentally-named directory.
+    //    Cargo-build dev workflows are unaffected: their `./data` always
+    //    has node.db once setup has run there. Empty or unrelated
+    //    `./data` folders fall through to the platform default.
     let legacy = PathBuf::from("./data");
-    if legacy.exists() {
+    if legacy.join("node.db").exists() {
         return legacy;
     }
 

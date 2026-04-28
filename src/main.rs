@@ -710,57 +710,137 @@ fn start_msi_service_after_setup() -> Result<()> {
     }
 }
 
-/// Poll `sc query <name>` up to `max_attempts` times with `interval_ms`
-/// between checks, returning true once the service shows STATE 4
-/// (RUNNING). Returns false if it stays in any other state through the
-/// whole budget.
+/// Service-state codes returned by `QueryServiceStatus` and printed by
+/// `sc query`. Used by [`poll_service_until_running`] and
+/// [`query_service_state`] to compare states without locale-dependent
+/// string matching.
+#[cfg(target_os = "windows")]
+mod sc_state {
+    pub const STOPPED: u32 = 1;
+    #[allow(dead_code)]
+    pub const START_PENDING: u32 = 2;
+    #[allow(dead_code)]
+    pub const STOP_PENDING: u32 = 3;
+    pub const RUNNING: u32 = 4;
+}
+
+/// Parse the numeric state from `sc query` output without depending on
+/// the English keyword. The output format on every Windows locale is:
 ///
-/// Why poll vs. blocking on a service-status notification: SCM offers
-/// `NotifyServiceStatusChangeW` for asynchronous status delivery, but
-/// it requires an APC pump on the calling thread which complicates the
-/// otherwise-synchronous setup-completion code path. Polling sc query
-/// is ~10ms per call and the post-setup window is brief enough that
-/// the cost is invisible.
+/// ```text
+///         STATE              : 4  RUNNING
+/// ```
 ///
-/// Why parse stdout instead of using `service_manager` from
-/// windows-service: that crate's `query_status` requires SC_MANAGER
-/// handles + ServiceAccess plumbing for what's a one-shot read of a
-/// status enum. sc.exe is already in the binary's call path
-/// (start_msi_service_after_setup uses it) and its output format is
-/// stable across all supported Windows versions.
+/// — but the right-hand keyword (`RUNNING`, `STOPPED`, etc.) is
+/// translated on non-English Windows installs. The leading digit is
+/// universal. We match on the structural pattern: a line containing
+/// `STATE` followed by `:` followed by a digit.
+///
+/// Returns `None` if no STATE line is found (e.g. service not
+/// registered, sc.exe failed) — callers treat that as "transitional,
+/// keep polling."
+#[cfg(target_os = "windows")]
+fn query_service_state(service_name: &str) -> Option<u32> {
+    let output = std::process::Command::new("sc.exe")
+        .args(["query", service_name])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        // Look for a line that contains "STATE" and a colon. After the
+        // colon, skip whitespace, then read the first digit run as
+        // the state code. Whatever comes after the digit (the
+        // translated keyword + flags like "NOT_STOPPABLE") we ignore.
+        if !line.contains("STATE") {
+            continue;
+        }
+        let after_colon = match line.split_once(':') {
+            Some((_, rest)) => rest.trim_start(),
+            None => continue,
+        };
+        let digits: String = after_colon
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(state) = digits.parse::<u32>() {
+            return Some(state);
+        }
+    }
+    None
+}
+
+/// Poll `sc query <name>` until the service reaches STATE 4 (RUNNING).
+///
+/// Two-phase verification:
+///
+///   Phase 1: poll up to `max_attempts` times with `interval_ms`
+///   between checks, looking for transition to RUNNING. Bails fast if
+///   we observe STOPPED (means the service crashed during init).
+///
+///   Phase 2: after observing RUNNING, sleep `stability_ms` and
+///   re-query. Returns true only if the service is STILL RUNNING.
+///   Catches the "service flickers Running → Stopped during async
+///   init" failure mode: tokio runtime can transition the service to
+///   Running and then panic during `Node::new`, which would otherwise
+///   present as a false positive to the caller.
+///
+/// First poll runs IMMEDIATELY (no leading sleep) — on a fast machine
+/// the service can be RUNNING by the time `sc.exe start` returns. The
+/// sleep is in the loop tail, so we only pay it on transitional
+/// states.
+///
+/// Why poll instead of `NotifyServiceStatusChangeW`: that API requires
+/// an APC pump on the caller, which complicates the otherwise-
+/// synchronous setup-completion path. Polling is ~10ms per call and
+/// the post-setup verification window is brief enough that the cost
+/// is invisible.
 #[cfg(target_os = "windows")]
 fn poll_service_until_running(
     service_name: &str,
     max_attempts: u32,
     interval_ms: u64,
 ) -> bool {
-    for _ in 0..max_attempts {
-        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
-        let output = std::process::Command::new("sc.exe")
-            .args(["query", service_name])
-            .output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // sc query stdout includes a line like:
-            //   "        STATE              : 4  RUNNING"
-            // — the leading number (1=STOPPED, 2=START_PENDING,
-            // 3=STOP_PENDING, 4=RUNNING, 5=CONTINUE_PENDING,
-            // 6=PAUSE_PENDING, 7=PAUSED) is what we're matching. The
-            // textual name is also parseable but the numeric form is
-            // less locale-sensitive.
-            if stdout.contains("STATE") && stdout.contains("4  RUNNING") {
-                return true;
+    let interval = std::time::Duration::from_millis(interval_ms);
+
+    // Phase 1: wait for transition to RUNNING.
+    let mut reached_running = false;
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            std::thread::sleep(interval);
+        }
+        match query_service_state(service_name) {
+            Some(sc_state::RUNNING) => {
+                reached_running = true;
+                break;
             }
-            // Detect terminal failure states early so we don't waste
-            // the rest of the budget polling a service that's already
-            // gone Stopped.
-            if stdout.contains("1  STOPPED") {
-                // Service crashed during start; no point continuing.
+            Some(sc_state::STOPPED) => {
+                // Service has crashed back to STOPPED. No point
+                // burning the rest of the budget.
                 return false;
             }
+            // START_PENDING / STOP_PENDING / unknown / no STATE line
+            // → keep polling.
+            _ => {}
         }
     }
-    false
+
+    if !reached_running {
+        return false;
+    }
+
+    // Phase 2: stability check. The service might have transitioned
+    // through RUNNING briefly during a `set_service_status(Running)`
+    // call inside service.rs::run_service that's followed by a
+    // synchronous panic during tokio runtime construction. Wait a few
+    // seconds and re-verify the service is STILL RUNNING.
+    //
+    // 3 seconds is enough to catch the common pattern (panic during
+    // Runtime::new() or Node::new() inside block_on, both of which
+    // happen within milliseconds of the Running transition) without
+    // making the post-setup wait obnoxiously long.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    matches!(query_service_state(service_name), Some(sc_state::RUNNING))
 }
 
 fn uninstall_cloudnode(force: bool) -> Result<()> {

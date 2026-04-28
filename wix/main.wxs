@@ -191,9 +191,56 @@
             Impersonate='yes'
             Return='asyncNoWait' />
 
+        <!-- ========================================================
+             One-time cleanup of stale runtime-created residue
+             ========================================================
+             v0.1.20-v0.1.33 had a bug in `paths::data_dir()` where
+             the cwd-relative `./data` legacy lookup could resolve to
+             `Program Files\SourceBox Sentry CloudNode\data\` when
+             the binary was launched from a Start menu shortcut whose
+             WorkingDirectory was the install dir. The binary then
+             called `create_dir_all` and SQLite created `node.db`
+             inside Program Files — files MSI never knew about.
+
+             MSI's normal uninstall only removes files declared in
+             `<File>` elements. Runtime-created files survive every
+             uninstall as orphans. Even after v0.1.36 (which
+             eliminates the bug) re-installs, the residue persists
+             and re-poisons the `./data` lookup on older versions.
+
+             This CustomAction runs on every fresh install and wipes
+             any stray `data\` directory inside the install root. It
+             runs from the elevated installer context (Execute=
+             'deferred' Impersonate='no' → LocalSystem), which has
+             write access to Program Files even when the operator is
+             a UAC-filtered admin.
+
+             Safe to run unconditionally because v0.1.36+ never
+             creates `<install_root>\data\` (data_dir on Windows
+             always returns ProgramData). The directory only exists
+             at all if it's residue from an older buggy version.
+
+             Return='ignore' so a stuck file (AV, in-use handle)
+             doesn't fail the whole install over a leftover artifact. -->
+        <CustomAction
+            Id='WipeStaleInstallDirData'
+            Directory='APPLICATIONFOLDER'
+            ExeCommand='cmd.exe /c rmdir /s /q "[APPLICATIONFOLDER]data"'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore' />
+
         <InstallExecuteSequence>
+            <!-- On real uninstall, wipe ProgramData. -->
             <Custom Action='WipeProgramData' After='InstallInitialize'>
                 REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
+            </Custom>
+            <!-- On every install (fresh or upgrade), nuke any stale
+                 `data\` directory residue from v0.1.20-v0.1.33. Runs
+                 BEFORE InstallFiles so the directory is clean before
+                 the new binary is laid down. -->
+            <Custom Action='WipeStaleInstallDirData' Before='InstallFiles'>
+                NOT REMOVE
             </Custom>
         </InstallExecuteSequence>
 

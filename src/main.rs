@@ -220,11 +220,39 @@ fn run() -> Result<()> {
             // Non-interactive quick setup
             init_logging(&args.log_level);
             sourcebox_sentry_cloudnode::setup::run_quick_setup(&url, &node_id, &key)?;
+            // Same MSI-vs-foreground decision as the interactive path below.
+            #[cfg(target_os = "windows")]
+            {
+                if is_msi_install() {
+                    return start_msi_service_after_setup();
+                }
+            }
             return run_cloudnode(None, None, None, args.once, args.config);
         }
 
         // Interactive TUI setup with logging completely suppressed.
         let auto_start = sourcebox_sentry_cloudnode::setup::run_setup()?;
+
+        // On Windows MSI installs, the binary the user just ran is also
+        // registered as the SourceBoxSentryCloudNode Windows Service.
+        // Setup wrote the config; the *service* is what actually streams
+        // video to Command Center. Running this same binary in the
+        // foreground from the post-setup console would:
+        //   - Conflict with the service if it ever starts
+        //   - Die when the user closes the console window
+        //   - Not survive a reboot
+        // None of those match what the operator expects after clicking
+        // through an MSI installer. So for MSI installs we kick off the
+        // service via sc.exe and exit cleanly — the service takes over
+        // from there. For source / cargo / Linux / Docker installs the
+        // foreground path below is still correct.
+        #[cfg(target_os = "windows")]
+        {
+            if is_msi_install() {
+                return start_msi_service_after_setup();
+            }
+        }
+
         if !auto_start {
             println!("\n  Press Enter to start CloudNode...");
             let mut input = String::new();
@@ -256,6 +284,16 @@ fn run() -> Result<()> {
             unreachable!("Service subcommand handled before reaching this match");
         }
         None => {
+            // Bare invocation with credentials already on disk. Same
+            // logic as the post-setup branch above: on an MSI install
+            // the *service* is what should stream, so kick that off
+            // instead of running the node in this transient console.
+            #[cfg(target_os = "windows")]
+            {
+                if is_msi_install() {
+                    return start_msi_service_after_setup();
+                }
+            }
             run_cloudnode(args.node_id, args.api_key, args.api_url, args.once, args.config)?;
         }
     }
@@ -409,6 +447,144 @@ fn is_msi_install() -> bool {
     // No MSI on Linux/macOS — `cloudnode uninstall` always falls
     // through to the dev-cleanup path on those platforms.
     false
+}
+
+/// Kick off the Windows Service after a successful MSI-context setup.
+///
+/// The MSI registers `SourceBoxSentryCloudNode` as a Windows Service
+/// pointing at the same exe the operator just ran setup with. After
+/// setup writes credentials to `%ProgramData%\SourceBoxSentry\node.db`,
+/// the service is the right place for the actual node logic to live —
+/// it runs as LocalSystem (USB camera + ProgramData write access),
+/// it can be set to auto-start on boot, and it doesn't die when the
+/// post-install console window closes.
+///
+/// The previous behaviour was to fall through to `run_cloudnode` after
+/// setup, which spun up a foreground node in the install console. That
+/// console gets closed approximately one second after the user reads
+/// the success screen, killing the node — and the actual service was
+/// still in Stopped state, so the dashboard never saw a heartbeat. The
+/// effect was "setup completes, dashboard says PENDING forever." This
+/// function fixes that.
+///
+/// On non-MSI installs (cargo build, Linux, Docker) the foreground
+/// `run_cloudnode` is correct — the binary IS the node, there's no
+/// service to delegate to. The caller gates on `is_msi_install()`
+/// before invoking this.
+#[cfg(target_os = "windows")]
+fn start_msi_service_after_setup() -> Result<()> {
+    use colored::Colorize;
+    use sourcebox_sentry_cloudnode::service::SERVICE_NAME;
+
+    println!();
+    println!(
+        "  {}  Starting {} service...",
+        "⚙".cyan(),
+        SERVICE_NAME.cyan().bold()
+    );
+    println!();
+
+    // sc.exe start <name>: tells the SCM to transition the service to
+    // START_PENDING / RUNNING. Returns 0 on success, non-zero with a
+    // Win32 error code in stdout/stderr on failure.
+    //
+    // Using sc.exe (built-in, always present) rather than the
+    // windows-service crate's ServiceManager because:
+    //   - sc.exe is the canonical operator-facing tool; the error
+    //     messages it prints match what users will see if they later
+    //     run `sc query` themselves.
+    //   - The windows-service crate would add a dependency on
+    //     ServiceManagerAccess + ServiceAccess flag plumbing for what
+    //     amounts to one shell-out.
+    let output = std::process::Command::new("sc.exe")
+        .args(["start", SERVICE_NAME])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            println!("  {}  Service started.", "✓".green().bold());
+            println!();
+            println!("  Your camera should appear in the Command Center dashboard");
+            println!("  within ~30 seconds. To make the service survive reboots,");
+            println!("  flip it to auto-start (one time, from an admin PowerShell):");
+            println!();
+            println!(
+                "    {}",
+                format!(
+                    "Set-Service -Name {} -StartupType Automatic",
+                    SERVICE_NAME
+                )
+                .cyan()
+            );
+            println!();
+            Ok(())
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+
+            // 1056 = ERROR_SERVICE_ALREADY_RUNNING. Common when the
+            // operator re-runs setup on a node that's already up — not
+            // really an error, just guidance on how to pick up the new
+            // config.
+            let already_running =
+                stdout.contains("1056") || stderr.contains("1056");
+
+            if already_running {
+                println!(
+                    "  {}  Service is already running.",
+                    "ℹ".cyan().bold()
+                );
+                println!();
+                println!("  Restart it to pick up the new configuration:");
+                println!();
+                println!(
+                    "    {}",
+                    format!("Restart-Service {}", SERVICE_NAME).cyan()
+                );
+                println!();
+            } else {
+                println!(
+                    "  {}  Could not start the service automatically.",
+                    "⚠".yellow().bold()
+                );
+                println!();
+                let msg = format!("{}{}", stdout.trim(), stderr.trim());
+                if !msg.is_empty() {
+                    println!("  sc.exe said: {}", msg.dimmed());
+                    println!();
+                }
+                println!("  Start it manually from an admin PowerShell:");
+                println!();
+                println!(
+                    "    {}",
+                    format!("Start-Service {}", SERVICE_NAME).cyan()
+                );
+                println!();
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // sc.exe is a built-in Windows tool — failing to invoke
+            // it almost always means PATH was clobbered or the user is
+            // on a stripped-down Windows variant. Surface the error and
+            // fall back to manual instructions.
+            println!(
+                "  {}  Could not invoke sc.exe: {}",
+                "⚠".yellow().bold(),
+                e
+            );
+            println!();
+            println!("  Start the service manually from an admin PowerShell:");
+            println!();
+            println!(
+                "    {}",
+                format!("Start-Service {}", SERVICE_NAME).cyan()
+            );
+            println!();
+            Ok(())
+        }
+    }
 }
 
 fn uninstall_cloudnode(force: bool) -> Result<()> {

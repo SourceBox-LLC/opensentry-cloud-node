@@ -143,8 +143,9 @@ impl CameraDetector for WindowsDetector {
 
 impl WindowsDetector {
     /// Find FFmpeg executable — delegates to the shared
-    /// `streaming::find_ffmpeg` so detection and runtime use the same
-    /// search order (bundled ./ffmpeg/bin/ffmpeg.exe, then PATH).
+    /// `streaming::find_ffmpeg` so detection and runtime resolve the
+    /// same binary.  Since v0.1.35 that's PATH only — the bundled
+    /// `./ffmpeg/bin/ffmpeg.exe` path was removed.
     fn find_ffmpeg(&self) -> String {
         crate::streaming::find_ffmpeg()
     }

@@ -433,14 +433,14 @@ mod linux;
 mod windows;
 ```
 
-**FFmpeg binary:** `find_ffmpeg()` in `src/streaming/mod.rs` prefers `./ffmpeg/bin/ffmpeg.exe` on Windows (setup-wizard-downloaded), falling back to `ffmpeg` on PATH.
+**FFmpeg binary:** `find_ffmpeg()` in `src/streaming/mod.rs` looks for `ffmpeg` on PATH only. The setup wizard offers to install via the OS package manager (`winget` / `brew` / `apt` / `dnf` / `pacman`) when missing — there is no bundled-FFmpeg path anymore (removed in v0.1.35).
 
 **Retry policy:** `SegmentUploader` retries on 408/429/5xx and `reqwest` transport errors with exponential backoff (100ms, 200ms, 200ms).
 
 ## Development Workflow
 
 1. **First Run:** `cargo run` → launches setup wizard
-2. **Setup Wizard:** detects platform, cameras, downloads FFmpeg (Windows), prompts for credentials, validates against `POST /api/nodes/validate`
+2. **Setup Wizard:** detects platform, cameras, verifies FFmpeg on PATH (offers `winget`/`brew`/`apt` install if missing), prompts for credentials, validates against `POST /api/nodes/validate`
 3. **Config stored in DB:** saves to `data/node.db` (API key encrypted with AES-256-GCM)
 4. **Subsequent Runs:** `cargo run` → loads config from DB, starts dashboard TUI
 
@@ -509,7 +509,7 @@ docker run -d \
 - Under-voltage: `vcgencmd get_throttled` — anything non-zero means the PSU is sagging and FFmpeg restarts will follow.
 
 **Windows:** production-ready (DirectShow)
-- FFmpeg auto-downloaded during setup to `./ffmpeg/bin/`
+- FFmpeg installed via `winget install Gyan.FFmpeg` (offered by the setup wizard when missing). No bundled copy.
 - Camera names: `MEE USB Camera`, `Integrated Webcam`, etc.
 
 **Windows + WSL2:** alternative deployment path

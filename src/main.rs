@@ -134,6 +134,27 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
+    // Enable Virtual Terminal Processing on Windows so the setup TUI's
+    // ANSI escape codes (colors, cursor moves, panel borders) are
+    // interpreted by the console instead of printed as literal
+    // `<ESC>[36m` garbage. Modern Windows Terminal auto-enables this,
+    // but classic conhost — which is what `cmd.exe /c start` opens
+    // (the console the MSI's LaunchSetup CustomAction spawns the
+    // setup wizard in) — leaves it OFF unless the process explicitly
+    // calls SetConsoleMode with ENABLE_VIRTUAL_TERMINAL_PROCESSING.
+    //
+    // Without this, the setup wizard's rainbow header, panel borders,
+    // and the live dashboard's box-drawing all show up as a wall of
+    // `←[1;36m` codes that looks like a crash. The `colored` crate
+    // wraps the underlying SetConsoleMode call. Best-effort: on the
+    // rare host where it fails (extremely old Windows, output
+    // redirected to a file), we silently fall through and the user
+    // gets uncolored text — still readable, just less pretty.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = colored::control::set_virtual_terminal(true);
+    }
+
     // Load .env file if it exists (legacy — config now stored in data/node.db).
     // Parsing args before the terminal-check is intentional: the `service`
     // subcommand must short-circuit BEFORE `launch_in_terminal()` would

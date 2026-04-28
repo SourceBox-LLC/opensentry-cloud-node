@@ -11,7 +11,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
     cargo build --release && \
-    rm -rf src target/release/opensentry-cloudnode*
+    rm -rf src target/release/sourcebox-sentry-cloudnode*
 
 # Build application
 COPY src ./src
@@ -37,7 +37,7 @@ RUN adduser -D -s /bin/sh opensentry
 WORKDIR /app
 
 # Copy binary
-COPY --from=builder /app/target/release/opensentry-cloudnode /usr/local/bin/
+COPY --from=builder /app/target/release/sourcebox-sentry-cloudnode /usr/local/bin/
 
 # Create storage directories
 RUN mkdir -p /app/data/hls && \
@@ -63,4 +63,4 @@ VOLUME ["/app/data"]
 # volume), run with `-v /etc/machine-id:/etc/machine-id:ro`.
 ENV OPENSENTRY_DATA_DIR=/app/data
 
-ENTRYPOINT ["opensentry-cloudnode"]
+ENTRYPOINT ["sourcebox-sentry-cloudnode"]

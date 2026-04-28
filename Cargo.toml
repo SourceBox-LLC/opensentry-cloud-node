@@ -1,9 +1,14 @@
 [package]
-name = "opensentry-cloudnode"
+# Package name = binary name. The repo URL still says "opensentry-cloud-node"
+# (rename deferred per the brand-transition note in MEMORY.md), but the
+# product is now "SourceBox Sentry" and the binary that users invoke
+# should reflect that. Going from `opensentry-cloudnode` to
+# `sourcebox-sentry-cloudnode` keeps the binary name explicit + branded.
+name = "sourcebox-sentry-cloudnode"
 version = "0.1.23"
 edition = "2021"
 authors = ["SourceBox LLC"]
-description = "SourceBox Sentry camera node for cloud-connected surveillance"
+description = "SourceBox Sentry CloudNode — turns a USB webcam into a cloud-connected security camera."
 license = "GPL-3.0"
 repository = "https://github.com/SourceBox-LLC/opensentry-cloud-node"
 homepage = "https://opensentry-command.fly.dev"

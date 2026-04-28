@@ -261,9 +261,15 @@
                              is hardcoded here. The MSI is only ever
                              built on x86_64-pc-windows-msvc; a future
                              ARM64 Windows build would need a wxs per
-                             arch or a build-time variable. -->
+                             arch or a build-time variable.
+
+                             Binary filename comes from the Cargo
+                             package name (sourcebox-sentry-cloudnode).
+                             If you rename the package, this Source
+                             attribute and the workflow's Compress-
+                             Archive command both need updating. -->
                         <File Id='filServiceExe'
-                              Source='target\x86_64-pc-windows-msvc\release\opensentry-cloudnode.exe'
+                              Source='target\x86_64-pc-windows-msvc\release\sourcebox-sentry-cloudnode.exe'
                               KeyPath='yes'
                               Checksum='yes' />
 

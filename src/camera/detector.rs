@@ -65,7 +65,7 @@ pub struct DetectedCamera {
 /// # Example
 ///
 /// ```rust,no_run
-/// use opensentry_cloudnode::camera::detect_cameras;
+/// use sourcebox_sentry_cloudnode::camera::detect_cameras;
 ///
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let cameras = detect_cameras()?;

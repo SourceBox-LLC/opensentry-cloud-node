@@ -27,8 +27,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use opensentry_cloudnode::{Config, Node, Result};
-use opensentry_cloudnode::logging::DashboardLayer;
+use sourcebox_sentry_cloudnode::{Config, Node, Result};
+use sourcebox_sentry_cloudnode::logging::DashboardLayer;
 use tracing::{info, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -122,8 +122,8 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         // Already-reported errors came through a formatted TUI path
         // (e.g. show_registration_error); do not print a second debug line.
-        Err(opensentry_cloudnode::Error::AlreadyReported)
-        | Err(opensentry_cloudnode::Error::ResetRequested) => ExitCode::from(1),
+        Err(sourcebox_sentry_cloudnode::Error::AlreadyReported)
+        | Err(sourcebox_sentry_cloudnode::Error::ResetRequested) => ExitCode::from(1),
         Err(e) => {
             eprintln!();
             eprintln!("  {} {}", "Error:".red().bold(), e);
@@ -148,8 +148,8 @@ fn run() -> Result<()> {
     // service exits. Don't reach the terminal-check or interactive flow.
     #[cfg(target_os = "windows")]
     if matches!(args.command, Some(Commands::Service)) {
-        opensentry_cloudnode::service::run().map_err(|e| {
-            opensentry_cloudnode::Error::Unknown(format!(
+        sourcebox_sentry_cloudnode::service::run().map_err(|e| {
+            sourcebox_sentry_cloudnode::Error::Unknown(format!(
                 "Service dispatcher failed: {}",
                 e
             ))
@@ -158,7 +158,7 @@ fn run() -> Result<()> {
     }
     #[cfg(not(target_os = "windows"))]
     if matches!(args.command, Some(Commands::Service)) {
-        return Err(opensentry_cloudnode::Error::Config(
+        return Err(sourcebox_sentry_cloudnode::Error::Config(
             "The `service` subcommand is Windows-only — \
              use systemd / launchd / your platform's service manager \
              to run CloudNode as a daemon on Linux/macOS."
@@ -219,12 +219,12 @@ fn run() -> Result<()> {
         if let Some((url, node_id, key)) = quick_args {
             // Non-interactive quick setup
             init_logging(&args.log_level);
-            opensentry_cloudnode::setup::run_quick_setup(&url, &node_id, &key)?;
+            sourcebox_sentry_cloudnode::setup::run_quick_setup(&url, &node_id, &key)?;
             return run_cloudnode(None, None, None, args.once, args.config);
         }
 
         // Interactive TUI setup with logging completely suppressed.
-        let auto_start = opensentry_cloudnode::setup::run_setup()?;
+        let auto_start = sourcebox_sentry_cloudnode::setup::run_setup()?;
         if !auto_start {
             println!("\n  Press Enter to start CloudNode...");
             let mut input = String::new();
@@ -284,14 +284,14 @@ fn run_cloudnode(
             once,
             config_path.clone(),
         ) {
-            Err(opensentry_cloudnode::Error::ResetRequested) => {
+            Err(sourcebox_sentry_cloudnode::Error::ResetRequested) => {
                 // Unhook the previous node's dashboard from the tracing layer
                 // so the setup wizard's events don't flow to an orphaned TUI.
-                opensentry_cloudnode::logging::clear_dashboard();
+                sourcebox_sentry_cloudnode::logging::clear_dashboard();
                 // Relaunch the interactive setup wizard synchronously. On
                 // success it writes fresh credentials to data/node.db, which
                 // the next loop iteration picks up via Config::load.
-                opensentry_cloudnode::setup::run_setup()?;
+                sourcebox_sentry_cloudnode::setup::run_setup()?;
                 continue;
             }
             other => return other,
@@ -310,7 +310,7 @@ fn run_cloudnode_once(
     let config = Config::load(config_path.as_deref())?;
 
     // Apply CLI overrides
-    let config = config.with_overrides(opensentry_cloudnode::config::CliOverrides {
+    let config = config.with_overrides(sourcebox_sentry_cloudnode::config::CliOverrides {
         node_id,
         api_key,
         api_url,
@@ -318,13 +318,13 @@ fn run_cloudnode_once(
 
     // Validate configuration
     if config.cloud.api_key.is_empty() {
-        return Err(opensentry_cloudnode::Error::Config(
+        return Err(sourcebox_sentry_cloudnode::Error::Config(
             "API key required. Set OPENSENTRY_API_KEY env var or use --api-key flag".to_string()
         ));
     }
 
     if config.node.node_id.is_none() {
-        return Err(opensentry_cloudnode::Error::Config(
+        return Err(sourcebox_sentry_cloudnode::Error::Config(
             "Node ID required. Set OPENSENTRY_NODE_ID env var or use --node-id flag".to_string()
         ));
     }

@@ -54,7 +54,27 @@ struct RunningStream {
 impl Node {
     pub async fn new(config: Config) -> Result<Self> {
         let api_client = ApiClient::new(&config.cloud.api_url, &config.cloud.api_key)?;
-        let storage_path = PathBuf::from(&config.storage.path);
+        // CRITICAL: ignore `config.storage.path` for I/O. That field
+        // defaults to the relative `./data` and is never overridden in
+        // practice — using it with `PathBuf::from` resolves relative
+        // to cwd, which on a Start-menu-shortcut launch is the
+        // Program Files install dir (read-only for non-admin users)
+        // and on an admin PowerShell launch from System32 is
+        // C:\Windows\System32 (admin can write but it's the wrong
+        // location). Either way, segments / node.db / recordings
+        // end up somewhere unexpected.
+        //
+        // `paths::data_dir()` is the canonical absolute resolver: env
+        // var → platform default (`%ProgramData%\SourceBoxSentry` on
+        // Windows, `./data` on non-Windows where cwd is predictable).
+        // Using it here makes the Node's filesystem layout
+        // independent of how the binary was launched.
+        //
+        // `config.storage.path` is still surfaced via
+        // `build_settings_info` for the dashboard's settings page so
+        // operators see WHERE their data lives — but that's a
+        // display string now, not an I/O path.
+        let storage_path = crate::paths::data_dir();
         std::fs::create_dir_all(&storage_path)?;
         let db = NodeDatabase::new(&storage_path.join("node.db"))?;
         let hls_output_dir = storage_path.join("hls");
@@ -71,7 +91,10 @@ impl Node {
     fn build_settings_info(&self) -> crate::dashboard::SettingsInfo {
         crate::dashboard::SettingsInfo {
             node_name: self.config.node.name.clone(),
-            storage_path: self.config.storage.path.clone(),
+            // Show the actual absolute storage path (where the I/O really
+            // lands) instead of the legacy `config.storage.path` value
+            // (which is now ignored by Node::new).
+            storage_path: crate::paths::data_dir().display().to_string(),
             max_size_gb: self.config.storage.max_size_gb,
             segment_duration: self.config.streaming.hls.segment_duration,
             fps: self.config.streaming.fps,

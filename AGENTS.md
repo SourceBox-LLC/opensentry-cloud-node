@@ -28,8 +28,8 @@ Loading priority (in `Config::load()`):
 1. **SQLite database** (`data/node.db`) — primary, created by setup wizard
 2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to DB on first load
 3. **Environment variables** — override any DB/YAML values:
-   - `OPENSENTRY_NODE_ID`, `OPENSENTRY_API_KEY`, `OPENSENTRY_API_URL`
-   - `OPENSENTRY_ENCODER` — video encoder override (e.g. `h264_nvenc`)
+   - `SOURCEBOX_SENTRY_NODE_ID`, `SOURCEBOX_SENTRY_API_KEY`, `SOURCEBOX_SENTRY_API_URL`
+   - `SOURCEBOX_SENTRY_ENCODER` — video encoder override (e.g. `h264_nvenc`)
    - `RUST_LOG` — log level
 4. **CLI flags** — highest priority: `--node-id`, `--api-key`, `--api-url`
 
@@ -475,7 +475,7 @@ cargo run -- --once     # Run one detection cycle and exit (if supported by curr
 
 ## Docker
 
-**Build:** `docker build -t opensentry-cloudnode:latest .`
+**Build:** `docker build -t sourcebox-sentry-cloudnode:latest .`
 
 Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Cargo version (`:0.1.18`), plus floating `:latest` and `:0.1`. The image is built + pushed by `.github/workflows/release.yml` on tag push. Pi (ARM64) builds are source-only at the moment — no ARM image is published.
 
@@ -483,12 +483,12 @@ Published image: `ghcr.io/sourcebox-llc/opensentry-cloudnode`. Tags track the Ca
 ```bash
 docker run -d \
   --device /dev/video0:/dev/video0 \
-  -e OPENSENTRY_NODE_ID=xxx \
-  -e OPENSENTRY_API_KEY=xxx \
-  -e OPENSENTRY_API_URL=https://backend.example.com \
+  -e SOURCEBOX_SENTRY_NODE_ID=xxx \
+  -e SOURCEBOX_SENTRY_API_KEY=xxx \
+  -e SOURCEBOX_SENTRY_API_URL=https://backend.example.com \
   -p 8080:8080 \
   -v ./data:/app/data \
-  opensentry-cloudnode:latest
+  sourcebox-sentry-cloudnode:latest
 ```
 
 **Docker Compose:** `docker-compose up -d`

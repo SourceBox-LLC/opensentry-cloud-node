@@ -18,15 +18,15 @@ If you haven't isolated the side yet, check the Command Center dashboard first: 
 
 ```bash
 # Linux / Pi / WSL2
-systemctl status opensentry-cloudnode      # if installed as a service
-ps aux | grep opensentry-cloudnode         # otherwise
+systemctl status sourcebox-sentry-cloudnode      # if installed as a service
+ps aux | grep sourcebox-sentry-cloudnode         # otherwise
 ```
 
 If it isn't, start it and watch the first ~60s of logs:
 
 ```bash
 RUST_LOG=info cargo run                    # dev
-opensentry-cloudnode                       # release binary
+sourcebox-sentry-cloudnode                       # release binary
 ```
 
 A healthy startup ends with `[Node] Dashboard ready` and a row of `Streaming` lines — one per camera.

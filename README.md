@@ -59,16 +59,16 @@ curl -fsSL https://opensentry-command.fly.dev/install.sh | bash
 
 **Windows:**
 
-1. Download `opensentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases/latest).
+1. Download `sourcebox-sentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases/latest).
 2. Run the MSI (UAC prompt — installer needs admin to register the service).
 3. SmartScreen will warn "Windows protected your PC" because the installer is unsigned. Click **More info → Run anyway**. (Code signing is on the roadmap.)
-4. From the Start menu, launch **OpenSentry CloudNode Setup**, or open an admin PowerShell and run `opensentry-cloudnode setup`.
+4. From the Start menu, launch **SourceBox Sentry CloudNode Setup**, or open an admin PowerShell and run `sourcebox-sentry-cloudnode setup`.
 5. After setup completes, start the service:
    ```powershell
-   Start-Service OpenSentryCloudNode
+   Start-Service SourceBoxSentryCloudNode
    ```
 
-The MSI registers a Windows Service (`OpenSentryCloudNode`) that auto-starts on boot once enabled. Config + recordings live under `C:\ProgramData\OpenSentry\`. See [Running as a Windows Service](#running-as-a-windows-service) below for service management. The setup wizard offers to download FFmpeg automatically if it isn't already installed.
+The MSI registers a Windows Service (`SourceBoxSentryCloudNode`) that auto-starts on boot once enabled. Config + recordings live under `C:\ProgramData\SourceBoxSentry\`. See [Running as a Windows Service](#running-as-a-windows-service) below for service management. The setup wizard offers to download FFmpeg automatically if it isn't already installed.
 
 <details>
 <summary><strong>Manual install (build from source)</strong></summary>
@@ -79,14 +79,14 @@ cd opensentry-cloud-node
 cargo build --release
 
 # Run the interactive setup wizard
-./target/release/opensentry-cloudnode setup
+./target/release/sourcebox-sentry-cloudnode setup
 ```
 </details>
 
 The setup wizard handles everything automatically:
 
 1. Detects your platform and verifies connected cameras
-2. Verifies FFmpeg — on Windows, offers to download + install it for you (~150 MB, lands under `%ProgramData%\OpenSentry\ffmpeg\`); on Linux/macOS, points you at the right `apt`/`brew` command and waits for you to install + retry
+2. Verifies FFmpeg — on Windows, offers to download + install it for you (~150 MB, lands under `%ProgramData%\SourceBoxSentry\ffmpeg\`); on Linux/macOS, points you at the right `apt`/`brew` command and waits for you to install + retry
 3. Prompts for your Node ID, API Key, and Command Center URL
 4. Detects the best available hardware encoder (NVENC, QSV, AMF)
 5. Encrypts and stores credentials locally in the SQLite config DB (path varies by platform — see [Configuration](#configuration))
@@ -94,7 +94,7 @@ The setup wizard handles everything automatically:
 After setup, start the node:
 
 ```bash
-./target/release/opensentry-cloudnode
+./target/release/sourcebox-sentry-cloudnode
 ```
 
 ---
@@ -134,9 +134,9 @@ Press **Esc** to return from settings. Destructive commands (`/wipe`, `/reauth`)
 CloudNode resolves configuration in this order (highest priority last):
 
 1. **SQLite database** — created by the setup wizard, primary source of truth. The database lives at:
-   - **`$OPENSENTRY_DATA_DIR/node.db`** if the env var is set (Docker)
+   - **`$SOURCEBOX_SENTRY_DATA_DIR/node.db`** if the env var is set (Docker)
    - **`./data/node.db`** if it already exists (legacy / `cargo build` installs)
-   - **`C:\ProgramData\OpenSentry\node.db`** on Windows-MSI installs
+   - **`C:\ProgramData\SourceBoxSentry\node.db`** on Windows-MSI installs
    - **`./data/node.db`** otherwise (fresh manual install on Linux/macOS)
 2. **YAML file** (`config.yaml`) — legacy fallback, auto-migrated to the DB on first load
 3. **Environment variables** — override any stored values
@@ -148,16 +148,16 @@ Use environment variables to override database values without modifying the DB:
 
 | Variable | Description |
 |----------|-------------|
-| `OPENSENTRY_NODE_ID` | Node ID |
-| `OPENSENTRY_API_KEY` | API Key |
-| `OPENSENTRY_API_URL` | Command Center URL |
-| `OPENSENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
+| `SOURCEBOX_SENTRY_NODE_ID` | Node ID |
+| `SOURCEBOX_SENTRY_API_KEY` | API Key |
+| `SOURCEBOX_SENTRY_API_URL` | Command Center URL |
+| `SOURCEBOX_SENTRY_ENCODER` | Video encoder override (e.g. `h264_nvenc`, `libx264`) |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 
 ### CLI flags
 
 ```bash
-opensentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
+sourcebox-sentry-cloudnode --node-id <ID> --api-key <KEY> --api-url <URL>
 ```
 
 ### Motion detection
@@ -178,59 +178,59 @@ The API key is **encrypted at rest** using AES-256-GCM with a machine-derived ke
 
 DBs written by older CloudNode versions that derived the key from the hostname are transparently re-encrypted with the new machine-ID-derived key on first load.
 
-**Docker:** Alpine-based images don't ship with `/etc/machine-id`, so CloudNode generates a per-container ID on first run and stores it inside the mounted data volume (`$OPENSENTRY_DATA_DIR/.machine-id`). The ID persists across container rebuilds because it lives in the volume. For stronger encryption — a key tied to the host rather than the data volume — run the container with `-v /etc/machine-id:/etc/machine-id:ro`.
+**Docker:** Alpine-based images don't ship with `/etc/machine-id`, so CloudNode generates a per-container ID on first run and stores it inside the mounted data volume (`$SOURCEBOX_SENTRY_DATA_DIR/.machine-id`). The ID persists across container rebuilds because it lives in the volume. For stronger encryption — a key tied to the host rather than the data volume — run the container with `-v /etc/machine-id:/etc/machine-id:ro`.
 
 ---
 
 ## Running as a Windows Service
 
-The Windows MSI installer registers CloudNode as a Windows Service named `OpenSentryCloudNode`. The service runs as `LocalSystem` (so it can access USB cameras and write under `%ProgramData%`) and is configured for **manual start** by default — you run setup first, then start it explicitly. Once it's running stably, switch it to auto-start so the node comes up after a reboot.
+The Windows MSI installer registers CloudNode as a Windows Service named `SourceBoxSentryCloudNode`. The service runs as `LocalSystem` (so it can access USB cameras and write under `%ProgramData%`) and is configured for **manual start** by default — you run setup first, then start it explicitly. Once it's running stably, switch it to auto-start so the node comes up after a reboot.
 
 ### First-run flow
 
 ```powershell
 # 1. After installing the MSI, open an admin PowerShell.
-#    Run setup — this writes node.db under %ProgramData%\OpenSentry\.
-opensentry-cloudnode setup
+#    Run setup — this writes node.db under %ProgramData%\SourceBoxSentry\.
+sourcebox-sentry-cloudnode setup
 
 # 2. Start the service.
-Start-Service OpenSentryCloudNode
+Start-Service SourceBoxSentryCloudNode
 
 # 3. Confirm it's running.
-Get-Service OpenSentryCloudNode
+Get-Service SourceBoxSentryCloudNode
 #  Status   Name                DisplayName
 #  ------   ----                -----------
-#  Running  OpenSentryCloudNode OpenSentry CloudNode
+#  Running  SourceBoxSentryCloudNode SourceBox Sentry CloudNode
 ```
 
-If the service fails to start, the most common cause is that setup wasn't run or didn't complete. Check the log file at `C:\ProgramData\OpenSentry\logs\cloudnode-service.<date>` — the service writes a clear "CloudNode is not configured" error to that file when no config is present.
+If the service fails to start, the most common cause is that setup wasn't run or didn't complete. Check the log file at `C:\ProgramData\SourceBoxSentry\logs\cloudnode-service.<date>` — the service writes a clear "CloudNode is not configured" error to that file when no config is present.
 
 ### Make the service auto-start on boot
 
 ```powershell
-Set-Service -Name OpenSentryCloudNode -StartupType Automatic
+Set-Service -Name SourceBoxSentryCloudNode -StartupType Automatic
 ```
 
 ### Stop / restart / status
 
 ```powershell
-Stop-Service OpenSentryCloudNode
-Restart-Service OpenSentryCloudNode
-Get-Service OpenSentryCloudNode
+Stop-Service SourceBoxSentryCloudNode
+Restart-Service SourceBoxSentryCloudNode
+Get-Service SourceBoxSentryCloudNode
 ```
 
 ### Where things live
 
 | Path | Purpose |
 |------|---------|
-| `C:\Program Files\OpenSentry CloudNode\opensentry-cloudnode.exe` | Service binary (read-only after install) |
-| `C:\ProgramData\OpenSentry\node.db` | Encrypted SQLite — config + (optionally) recordings |
-| `C:\ProgramData\OpenSentry\logs\` | Daily-rotating service log files (text) |
+| `C:\Program Files\SourceBox Sentry CloudNode\sourcebox-sentry-cloudnode.exe` | Service binary (read-only after install) |
+| `C:\ProgramData\SourceBoxSentry\node.db` | Encrypted SQLite — config + (optionally) recordings |
+| `C:\ProgramData\SourceBoxSentry\logs\` | Daily-rotating service log files (text) |
 
 ### Tail the log
 
 ```powershell
-Get-Content -Wait "C:\ProgramData\OpenSentry\logs\cloudnode-service.$(Get-Date -Format yyyy-MM-dd)"
+Get-Content -Wait "C:\ProgramData\SourceBoxSentry\logs\cloudnode-service.$(Get-Date -Format yyyy-MM-dd)"
 ```
 
 ### Reconfigure an enrolled node
@@ -238,23 +238,23 @@ Get-Content -Wait "C:\ProgramData\OpenSentry\logs\cloudnode-service.$(Get-Date -
 Stop the service, re-run setup, restart:
 
 ```powershell
-Stop-Service OpenSentryCloudNode
-opensentry-cloudnode setup
-Start-Service OpenSentryCloudNode
+Stop-Service SourceBoxSentryCloudNode
+sourcebox-sentry-cloudnode setup
+Start-Service SourceBoxSentryCloudNode
 ```
 
 ### Uninstalling
 
-Use **Settings → Apps → OpenSentry CloudNode → Uninstall**, or:
+Use **Settings → Apps → SourceBox Sentry CloudNode → Uninstall**, or:
 
 ```powershell
 # Stop + remove the service first to free %ProgramData% files.
-Stop-Service OpenSentryCloudNode -ErrorAction SilentlyContinue
+Stop-Service SourceBoxSentryCloudNode -ErrorAction SilentlyContinue
 # Then run the MSI uninstall (or use Add/Remove Programs).
 msiexec /x "{ProductCode}" /qn   # if you have the ProductCode
 ```
 
-The MSI uninstaller leaves `C:\ProgramData\OpenSentry\` in place by design — your encrypted recordings are not deleted. If you want a clean slate, delete that folder by hand after uninstall.
+The MSI uninstaller leaves `C:\ProgramData\SourceBoxSentry\` in place by design — your encrypted recordings are not deleted. If you want a clean slate, delete that folder by hand after uninstall.
 
 > **Heads up:** the MSI is **unsigned** today. SmartScreen flags unsigned installers with "Windows protected your PC" — click **More info → Run anyway** to proceed. Code signing is deferred until we have a sustained release cadence worth the EV-cert fee; the binary itself is open source and reproducibly buildable from this repository if you want to verify.
 
@@ -360,11 +360,11 @@ Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHu
 docker pull ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
 
 docker run -d \
-  --name opensentry-cloudnode \
+  --name sourcebox-sentry-cloudnode \
   --device /dev/video0:/dev/video0 \
-  -e OPENSENTRY_NODE_ID=your_node_id \
-  -e OPENSENTRY_API_KEY=your_api_key \
-  -e OPENSENTRY_API_URL=https://your-backend.example.com \
+  -e SOURCEBOX_SENTRY_NODE_ID=your_node_id \
+  -e SOURCEBOX_SENTRY_API_KEY=your_api_key \
+  -e SOURCEBOX_SENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
   -v ./data:/app/data \
   ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
@@ -385,17 +385,17 @@ docker-compose up -d
 ### Build from source (dev / airgapped)
 
 ```bash
-docker build -t opensentry-cloudnode .
+docker build -t sourcebox-sentry-cloudnode .
 
 docker run -d \
-  --name opensentry-cloudnode \
+  --name sourcebox-sentry-cloudnode \
   --device /dev/video0:/dev/video0 \
-  -e OPENSENTRY_NODE_ID=your_node_id \
-  -e OPENSENTRY_API_KEY=your_api_key \
-  -e OPENSENTRY_API_URL=https://your-backend.example.com \
+  -e SOURCEBOX_SENTRY_NODE_ID=your_node_id \
+  -e SOURCEBOX_SENTRY_API_KEY=your_api_key \
+  -e SOURCEBOX_SENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
   -v ./data:/app/data \
-  opensentry-cloudnode
+  sourcebox-sentry-cloudnode
 ```
 
 ### Multiple cameras
@@ -406,9 +406,9 @@ Pass each device to the container:
 docker run -d \
   --device /dev/video0:/dev/video0 \
   --device /dev/video2:/dev/video2 \
-  -e OPENSENTRY_NODE_ID=your_node_id \
-  -e OPENSENTRY_API_KEY=your_api_key \
-  -e OPENSENTRY_API_URL=https://your-backend.example.com \
+  -e SOURCEBOX_SENTRY_NODE_ID=your_node_id \
+  -e SOURCEBOX_SENTRY_API_KEY=your_api_key \
+  -e SOURCEBOX_SENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
   ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
 ```
@@ -570,7 +570,7 @@ source "$HOME/.cargo/env"
 git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
 cd opensentry-cloud-node
 cargo build --release
-./target/release/opensentry-cloudnode setup
+./target/release/sourcebox-sentry-cloudnode setup
 ```
 
 The first `cargo build --release` on a Pi 4 takes 15–20 minutes. Subsequent incremental builds after `git pull` are 1–3 minutes.
@@ -636,7 +636,7 @@ sudo usermod -a -G video $USER
 <details>
 <summary><strong>FFmpeg not found</strong></summary>
 
-**Windows:** Re-run `opensentry-cloudnode setup` — FFmpeg is downloaded automatically.
+**Windows:** Re-run `sourcebox-sentry-cloudnode setup` — FFmpeg is downloaded automatically.
 
 **Linux / macOS:** Install FFmpeg using your package manager (see [Platform Notes](#platform-notes)).
 
@@ -688,7 +688,7 @@ docker run --device /dev/video0:/dev/video0 ...
 The dashboard log shows repeated `FFmpeg exited with exit status: 234` and messages like `Could not open encoder before EOF` or `Error parsing option '...' with value '...'`. This means the selected encoder can't be initialized with the current argument set.
 
 1. Look for the line `Selected encoder: <name>` or `Using software encoder (configured)` in the startup log to see which encoder was picked.
-2. If the encoder is a hardware codec (`h264_nvenc`, `h264_qsv`, `h264_amf`) and the driver on this machine is broken, override with software: set `OPENSENTRY_ENCODER=libx264` or change it via the setup wizard.
+2. If the encoder is a hardware codec (`h264_nvenc`, `h264_qsv`, `h264_amf`) and the driver on this machine is broken, override with software: set `SOURCEBOX_SENTRY_ENCODER=libx264` or change it via the setup wizard.
 3. On CloudNode ≥ v0.1.14 the `h264_v4l2m2m` Pi codec is automatically retired — a stale DB entry naming it is cleared on next launch (look for `Retired encoder '…' in config — clearing for re-detection`). If you're on an older node, run `/wipe` from the dashboard's settings page to clear the cached encoder and let auto-detect re-run.
 4. If libx264 itself crashes with `Error parsing option 'level' with value 'auto'`, upgrade — that was a bug in the libx264 branch of `build_encoding_args` fixed in v0.1.15.
 

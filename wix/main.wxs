@@ -332,19 +332,37 @@
                 </Directory>
             </Directory>
 
-            <!-- Start menu shortcut so the user can launch a console
-                 invocation of the binary without typing the full path.
-                 The shortcut runs `sourcebox-sentry-cloudnode setup` since
-                 that's the most likely first action after install. -->
+            <!-- Start menu shortcut: smart launcher.
+                 No `Arguments=` attribute → the binary runs with no
+                 subcommand, which hits the bare-invocation path in
+                 main.rs. That path checks Config::load for existing
+                 credentials and chooses:
+                   - creds present → run_cloudnode (foreground TUI
+                     dashboard, cameras stream)
+                   - creds missing → run setup wizard, then
+                     run_cloudnode
+                 So the same shortcut handles both first-launch (runs
+                 the wizard then streams) and every-launch-after
+                 (just streams).
+                 The MSI Finish dialog's LaunchSetup CustomAction at
+                 the top of this file handles the very first launch
+                 after install via cmd /c start with `setup` arg
+                 explicitly — that's a separate code path because the
+                 Finish dialog needs to spawn a new console window.
+                 The shortcut here is what the operator clicks on
+                 every subsequent launch; previously it had
+                 `Arguments='setup'` which forced the wizard to re-
+                 prompt for credentials every single time. v0.1.33
+                 dropped the argument so the shortcut becomes a
+                 normal app launcher. -->
             <Directory Id='ProgramMenuFolder'>
                 <Directory Id='ApplicationProgramsFolder' Name='SourceBox Sentry CloudNode'>
                     <Component Id='cmpStartMenu'
                                Guid='9DAB7EBC-6F4F-4C3D-B05E-C2F8FAD47069'>
-                        <Shortcut Id='ShortcutSetup'
-                                  Name='SourceBox Sentry CloudNode Setup'
-                                  Description='Run the interactive setup wizard to enrol this machine.'
+                        <Shortcut Id='ShortcutLauncher'
+                                  Name='SourceBox Sentry CloudNode'
+                                  Description='Launch the CloudNode dashboard. Runs the setup wizard the first time, streams cameras every time after.'
                                   Target='[#filServiceExe]'
-                                  Arguments='setup'
                                   WorkingDirectory='APPLICATIONFOLDER' />
                         <RemoveFolder Id='RemoveProgramsFolder'
                                       Directory='ApplicationProgramsFolder'

@@ -403,7 +403,7 @@ impl Dashboard {
             }
             "export-logs" if on_settings => {
                 let timestamp = Local::now().format("%Y-%m-%d_%H%M%S");
-                let filename = format!("opensentry-logs-{}.txt", timestamp);
+                let filename = format!("sourcebox-sentry-logs-{}.txt", timestamp);
                 let path = std::path::PathBuf::from(&filename);
                 self.export_logs(&path);
                 self.set_output(vec![
@@ -532,7 +532,7 @@ impl Dashboard {
                     }
                     self.set_output(vec![
                         "Credentials cleared. Shutting down…".to_string(),
-                        "Run: opensentry-cloudnode setup".to_string(),
+                        "Run: sourcebox-sentry-cloudnode setup".to_string(),
                     ]);
                     self.log_warn("Credentials cleared — shutting down");
                     stop.store(true, std::sync::atomic::Ordering::Relaxed);

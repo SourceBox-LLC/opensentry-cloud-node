@@ -547,7 +547,7 @@ static CACHED_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 ///
 /// On Linux, if the OS sources are unavailable (e.g. minimal Docker images
 /// without systemd or dbus), falls back to a node-local identifier stored at
-/// `$OPENSENTRY_DATA_DIR/.machine-id`, generating one from
+/// `$SOURCEBOX_SENTRY_DATA_DIR/.machine-id`, generating one from
 /// `/proc/sys/kernel/random/uuid` on first use. This is weaker than a
 /// host-wide ID (an attacker who copies the data directory gets the key
 /// material) but still a major upgrade over the hostname-derived v1 key.
@@ -566,7 +566,7 @@ fn machine_id() -> std::result::Result<String, String> {
         }
         // Docker/minimal-image fallback: generate once, persist to the data
         // volume so the ID survives container rebuilds.
-        if let Ok(data_dir) = std::env::var("OPENSENTRY_DATA_DIR") {
+        if let Ok(data_dir) = std::env::var("SOURCEBOX_SENTRY_DATA_DIR") {
             let fallback_path = std::path::PathBuf::from(&data_dir).join(".machine-id");
             if let Ok(content) = std::fs::read_to_string(&fallback_path) {
                 let id = content.trim();
@@ -593,9 +593,9 @@ fn machine_id() -> std::result::Result<String, String> {
         }
         return Err(
             "machine ID not found (tried /etc/machine-id, /var/lib/dbus/machine-id, \
-             $OPENSENTRY_DATA_DIR/.machine-id). \
+             $SOURCEBOX_SENTRY_DATA_DIR/.machine-id). \
              Run `sudo systemd-machine-id-setup` or `sudo dbus-uuidgen --ensure=/etc/machine-id`, \
-             or set OPENSENTRY_DATA_DIR to a writable directory."
+             or set SOURCEBOX_SENTRY_DATA_DIR to a writable directory."
                 .into(),
         );
     }

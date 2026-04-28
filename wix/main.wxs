@@ -3,7 +3,7 @@
   WiX Toolset 3.x source for the OpenSentry CloudNode MSI.
 
   Built by `cargo wix` (which shells out to `candle.exe` and `light.exe`
-  from the WiX toolset) and emitted to `target/wix/opensentry-cloudnode-
+  from the WiX toolset) and emitted to `target/wix/sourcebox-sentry-cloudnode-
   <version>-x86_64.msi`. The release.yml workflow attaches the MSI to
   the GitHub Release alongside the existing .zip artifact.
 
@@ -26,8 +26,8 @@
   ServiceInstall registers the service with SCM. Start='demand' (NOT
   'auto') means the service is installed but doesn't try to launch
   itself the moment the MSI finishes — the user runs
-  `opensentry-cloudnode setup` from an admin console first to write
-  config to %ProgramData%\OpenSentry\node.db, THEN starts the service
+  `sourcebox-sentry-cloudnode setup` from an admin console first to write
+  config to %ProgramData%\SourceBoxSentry\node.db, THEN starts the service
   manually. Starting before setup would just produce an SCM error +
   log line ("CloudNode is not configured") which is honest but ugly
   for a fresh install.
@@ -91,10 +91,10 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Uninstall it first if you really need to roll back.' />
 
         <!-- ========================================================
-             Wipe %ProgramData%\OpenSentry on real uninstall
+             Wipe %ProgramData%\SourceBoxSentry on real uninstall
              ========================================================
              By default the MSI removes Program Files but leaves
-             %ProgramData%\OpenSentry\ in place so an upgrade-uninstall
+             %ProgramData%\SourceBoxSentry\ in place so an upgrade-uninstall
              (the first half of MajorUpgrade) preserves the user's
              config + recordings + auto-installed ffmpeg. That's
              correct behaviour for upgrades.
@@ -128,14 +128,14 @@
                  refuse to uninstall over a leftover log.
 
              Caveat: this hardcodes the path. If we ever move from
-             %ProgramData%\OpenSentry to a different location, BOTH
+             %ProgramData%\SourceBoxSentry to a different location, BOTH
              this CustomAction AND `paths::data_dir()` in the Rust
              code need to change in lockstep — they're the source of
              truth for the same directory. -->
         <CustomAction
             Id='WipeProgramData'
             Directory='APPLICATIONFOLDER'
-            ExeCommand='cmd.exe /c rmdir /s /q "[CommonAppDataFolder]OpenSentry"'
+            ExeCommand='cmd.exe /c rmdir /s /q "[CommonAppDataFolder]SourceBoxSentry"'
             Execute='deferred'
             Impersonate='no'
             Return='ignore' />
@@ -164,7 +164,7 @@
              (the one who clicked Run on the MSI), inheriting their
              elevated token from the UAC prompt that started the
              install. Setup wizard needs admin to write
-             %ProgramData%\OpenSentry\node.db, which an admin-elevated
+             %ProgramData%\SourceBoxSentry\node.db, which an admin-elevated
              session can do.
 
              Return='asyncNoWait' lets the MSI's "Install successful"
@@ -232,7 +232,7 @@
         <Property Id='ARPURLINFOABOUT'>https://opensentry-command.fly.dev</Property>
         <Property Id='ARPNOREPAIR' Value='yes' Secure='yes' />
 
-        <!-- ProgramData/OpenSentry/  — runtime config + recordings.
+        <!-- ProgramData/SourceBoxSentry/  — runtime config + recordings.
              We don't *create* the folder here (that happens in the
              setup wizard or run_log_cleanup, which already does
              create_dir_all); we only ensure the dir is referenced so
@@ -275,9 +275,9 @@
 
                         <ServiceInstall
                             Id='svcCloudNode'
-                            Name='OpenSentryCloudNode'
-                            DisplayName='OpenSentry CloudNode'
-                            Description='Streams local USB cameras to the OpenSentry Command Center cloud. Configure with: opensentry-cloudnode setup.'
+                            Name='SourceBoxSentryCloudNode'
+                            DisplayName='SourceBox Sentry CloudNode'
+                            Description='Streams local USB cameras to the SourceBox Sentry Command Center. Configure with: sourcebox-sentry-cloudnode setup.'
                             Type='ownProcess'
                             Start='demand'
                             ErrorControl='normal'
@@ -288,7 +288,7 @@
 
                         <ServiceControl
                             Id='svcCloudNodeControl'
-                            Name='OpenSentryCloudNode'
+                            Name='SourceBoxSentryCloudNode'
                             Stop='both'
                             Remove='uninstall'
                             Wait='yes' />
@@ -300,7 +300,7 @@
 
             <!-- Start menu shortcut so the user can launch a console
                  invocation of the binary without typing the full path.
-                 The shortcut runs `opensentry-cloudnode setup` since
+                 The shortcut runs `sourcebox-sentry-cloudnode setup` since
                  that's the most likely first action after install. -->
             <Directory Id='ProgramMenuFolder'>
                 <Directory Id='ApplicationProgramsFolder' Name='OpenSentry CloudNode'>
@@ -316,7 +316,7 @@
                                       Directory='ApplicationProgramsFolder'
                                       On='uninstall' />
                         <RegistryValue Root='HKCU'
-                                       Key='Software\SourceBox\OpenSentryCloudNode'
+                                       Key='Software\SourceBox\SourceBoxSentryCloudNode'
                                        Name='installed'
                                        Type='integer'
                                        Value='1'

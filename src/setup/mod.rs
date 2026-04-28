@@ -110,17 +110,17 @@ pub fn run_setup() -> Result<bool> {
                 eprintln!("    sudo apt install ffmpeg     # Debian/Ubuntu");
                 eprintln!();
                 eprintln!("  Then:");
-                eprintln!("    opensentry-cloudnode setup");
+                eprintln!("    sourcebox-sentry-cloudnode setup");
             } else {
                 // Generic fallback. Avoid the old "without a proper terminal"
                 // claim — that was only true for one of N possible causes
                 // and confused users hitting the others.
                 eprintln!();
                 eprintln!("  To retry, open a terminal and run:");
-                eprintln!("    opensentry-cloudnode setup");
+                eprintln!("    sourcebox-sentry-cloudnode setup");
                 eprintln!();
                 eprintln!("  If the error above is unclear, run with debug logs:");
-                eprintln!("    RUST_LOG=debug opensentry-cloudnode setup");
+                eprintln!("    RUST_LOG=debug sourcebox-sentry-cloudnode setup");
             }
 
             // Pause on Windows so user sees the error before window closes
@@ -141,7 +141,7 @@ pub fn run_setup() -> Result<bool> {
 /// auto-detects GPU encoder, and creates data directories — all without
 /// any user prompts. Designed to be invoked as:
 ///
-///   opensentry-cloudnode setup --url <URL> --node-id <ID> --key <KEY>
+///   sourcebox-sentry-cloudnode setup --url <URL> --node-id <ID> --key <KEY>
 pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()> {
     use colored::Colorize;
 

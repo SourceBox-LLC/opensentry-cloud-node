@@ -33,7 +33,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let _hostname =
-            sysinfo::System::host_name().unwrap_or_else(|| "opensentry-node".to_string());
+            sysinfo::System::host_name().unwrap_or_else(|| "sourcebox-sentry-node".to_string());
 
         Self {
             node: NodeConfig::default(),
@@ -62,7 +62,7 @@ pub struct NodeConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         let _hostname =
-            sysinfo::System::host_name().unwrap_or_else(|| "opensentry-node".to_string());
+            sysinfo::System::host_name().unwrap_or_else(|| "sourcebox-sentry-node".to_string());
 
         Self {
             name: format!("Node-{}", _hostname),

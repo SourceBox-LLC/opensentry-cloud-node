@@ -34,7 +34,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
-#[command(name = "opensentry-cloudnode")]
+#[command(name = "sourcebox-sentry-cloudnode")]
 #[command(version)]
 #[command(about = "SourceBox Sentry camera node - stream cameras to SourceBox Sentry Cloud")]
 struct Args {
@@ -42,19 +42,19 @@ struct Args {
     command: Option<Commands>,
     
     /// Path to config file (YAML)
-    #[arg(short, long, env = "OPENSENTRY_CONFIG")]
+    #[arg(short, long, env = "SOURCEBOX_SENTRY_CONFIG")]
     config: Option<String>,
 
     /// Node ID (required for registration)
-    #[arg(long, env = "OPENSENTRY_NODE_ID")]
+    #[arg(long, env = "SOURCEBOX_SENTRY_NODE_ID")]
     node_id: Option<String>,
 
     /// Organization API key (overrides config)
-    #[arg(long, env = "OPENSENTRY_API_KEY")]
+    #[arg(long, env = "SOURCEBOX_SENTRY_API_KEY")]
     api_key: Option<String>,
 
     /// Command Center URL (overrides config)
-    #[arg(long, env = "OPENSENTRY_API_URL")]
+    #[arg(long, env = "SOURCEBOX_SENTRY_API_URL")]
     api_url: Option<String>,
 
     /// Run once and exit (for testing)
@@ -71,15 +71,15 @@ enum Commands {
     /// Start CloudNode (default)
     Run {
         /// Node ID (required for registration)
-        #[arg(long, env = "OPENSENTRY_NODE_ID")]
+        #[arg(long, env = "SOURCEBOX_SENTRY_NODE_ID")]
         node_id: Option<String>,
         
         /// Organization API key (overrides config)
-        #[arg(long, env = "OPENSENTRY_API_KEY")]
+        #[arg(long, env = "SOURCEBOX_SENTRY_API_KEY")]
         api_key: Option<String>,
         
         /// Command Center URL (overrides config)
-        #[arg(long, env = "OPENSENTRY_API_URL")]
+        #[arg(long, env = "SOURCEBOX_SENTRY_API_URL")]
         api_url: Option<String>,
 
         /// Run once and exit (for testing)
@@ -90,15 +90,15 @@ enum Commands {
     /// Setup CloudNode (interactive wizard, or one-command with --url/--node-id/--key)
     Setup {
         /// Command Center URL
-        #[arg(long, env = "OPENSENTRY_API_URL")]
+        #[arg(long, env = "SOURCEBOX_SENTRY_API_URL")]
         url: Option<String>,
 
         /// Node ID from Command Center
-        #[arg(long, env = "OPENSENTRY_NODE_ID")]
+        #[arg(long, env = "SOURCEBOX_SENTRY_NODE_ID")]
         node_id: Option<String>,
 
         /// API key from Command Center
-        #[arg(long, env = "OPENSENTRY_API_KEY")]
+        #[arg(long, env = "SOURCEBOX_SENTRY_API_KEY")]
         key: Option<String>,
     },
     
@@ -111,7 +111,7 @@ enum Commands {
 
     /// Run as a Windows Service. Invoked by the Service Control Manager —
     /// not intended for direct use. The MSI registers
-    /// `opensentry-cloudnode service` as the service binary path.
+    /// `sourcebox-sentry-cloudnode service` as the service binary path.
     /// See src/service.rs for the SCM handshake details.
     #[command(hide = true)]
     Service,
@@ -143,7 +143,7 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     // ── Windows Service short-circuit ────────────────────────────────
-    // SCM invokes us as `opensentry-cloudnode.exe service`. From here we
+    // SCM invokes us as `sourcebox-sentry-cloudnode.exe service`. From here we
     // hand off to the windows-service dispatcher which blocks until the
     // service exits. Don't reach the terminal-check or interactive flow.
     #[cfg(target_os = "windows")]
@@ -207,7 +207,7 @@ fn run() -> Result<()> {
                     // Partial args — tell the user what's missing
                     _ if url.is_some() || node_id.is_some() || key.is_some() => {
                         eprintln!("Error: Quick setup requires all three flags: --url, --node-id, and --key");
-                        eprintln!("  Example: opensentry-cloudnode setup --url https://... --node-id abc12345 --key xxxxxxxx-...");
+                        eprintln!("  Example: sourcebox-sentry-cloudnode setup --url https://... --node-id abc12345 --key xxxxxxxx-...");
                         std::process::exit(1);
                     }
                     _ => None,
@@ -319,13 +319,13 @@ fn run_cloudnode_once(
     // Validate configuration
     if config.cloud.api_key.is_empty() {
         return Err(sourcebox_sentry_cloudnode::Error::Config(
-            "API key required. Set OPENSENTRY_API_KEY env var or use --api-key flag".to_string()
+            "API key required. Set SOURCEBOX_SENTRY_API_KEY env var or use --api-key flag".to_string()
         ));
     }
 
     if config.node.node_id.is_none() {
         return Err(sourcebox_sentry_cloudnode::Error::Config(
-            "Node ID required. Set OPENSENTRY_NODE_ID env var or use --node-id flag".to_string()
+            "Node ID required. Set SOURCEBOX_SENTRY_NODE_ID env var or use --node-id flag".to_string()
         ));
     }
 
@@ -372,12 +372,11 @@ fn init_logging(log_level: &str) {
 
 /// Detect whether the running binary was installed by the Windows MSI.
 ///
-/// Heuristic: the MSI installs `opensentry-cloudnode.exe` under
-/// `C:\Program Files\OpenSentry CloudNode\` (or the `(x86)` mirror on
-/// 32-bit emulation, though we only build x86_64 today). The legacy
-/// PowerShell installer dropped the binary under `%LOCALAPPDATA%\
-/// OpenSentry\` which doesn't match either path, so this test
-/// reliably distinguishes the two.
+/// Heuristic: the MSI installs `sourcebox-sentry-cloudnode.exe` under
+/// `C:\Program Files\SourceBox Sentry CloudNode\` (or the `(x86)` mirror
+/// on 32-bit emulation, though we only build x86_64 today). Legacy
+/// v0.1.x installs landed under `C:\Program Files\OpenSentry CloudNode\`
+/// — both paths are matched below for diagnostic continuity.
 ///
 /// Used by `uninstall_cloudnode` to redirect MSI-installed users to
 /// Settings → Apps instead of running the dev-cleanup logic, which
@@ -392,8 +391,16 @@ fn is_msi_install() -> bool {
     };
     // Windows path comparison is case-insensitive; normalise to lowercase
     // before substring matching.
+    //
+    // Match BOTH new (SourceBox Sentry CloudNode) and legacy (OpenSentry
+    // CloudNode) install paths. Pre-launch we don't really have to care
+    // about the legacy path, but the cost of probing both is one extra
+    // string compare per setup invocation, and it preserves the
+    // diagnostic for anyone who hung onto a v0.1.x test install.
     let path = exe.to_string_lossy().to_lowercase();
-    path.contains(r"\program files\opensentry cloudnode\")
+    path.contains(r"\program files\sourcebox sentry cloudnode\")
+        || path.contains(r"\program files (x86)\sourcebox sentry cloudnode\")
+        || path.contains(r"\program files\opensentry cloudnode\")
         || path.contains(r"\program files (x86)\opensentry cloudnode\")
 }
 
@@ -494,7 +501,7 @@ fn uninstall_cloudnode(force: bool) -> Result<()> {
     println!();
     println!("  {}", "Uninstall complete.".green());
     println!("  To reinstall:");
-    println!("    {} opensentry-cloudnode setup", "→".cyan());
+    println!("    {} sourcebox-sentry-cloudnode setup", "→".cyan());
     
     Ok(())
 }

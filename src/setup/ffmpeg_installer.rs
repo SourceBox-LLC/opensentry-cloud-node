@@ -46,7 +46,7 @@
 //! lookup candidate in `streaming::find_tool` checks. On a Windows
 //! MSI install that resolves to `C:\ProgramData\OpenSentry\ffmpeg\
 //! bin\`, which the LocalSystem service can read. On a manual /
-//! Docker install, it follows wherever `OPENSENTRY_DATA_DIR` points.
+//! Docker install, it follows wherever `SOURCEBOX_SENTRY_DATA_DIR` points.
 //!
 //! The install survives MSI uninstall (we deliberately don't clean
 //! ProgramData on uninstall — same as `node.db`); a re-install picks
@@ -162,7 +162,7 @@ fn download(progress: &indicatif::ProgressBar) -> Result<Vec<u8>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
         .user_agent(format!(
-            "opensentry-cloudnode/{}",
+            "sourcebox-sentry-cloudnode/{}",
             env!("CARGO_PKG_VERSION")
         ))
         .build()

@@ -151,7 +151,7 @@ mod tests {
         // A regular file at a path shouldn't be accepted as a v4l2
         // device — FFmpeg would happily try to open it as a media
         // file and fail in confusing ways.
-        let tmp = std::env::temp_dir().join("opensentry_test_not_a_video_device");
+        let tmp = std::env::temp_dir().join("sourcebox_sentry_test_not_a_video_device");
         std::fs::write(&tmp, b"this is not a video device").unwrap();
         let result = validate_device_available(tmp.to_str().unwrap());
         std::fs::remove_file(&tmp).ok();

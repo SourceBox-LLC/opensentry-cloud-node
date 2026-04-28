@@ -247,7 +247,7 @@ impl HlsGenerator {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let test_file = std::env::temp_dir()
-            .join(format!("opensentry_enc_test_{}_{}.ts", encoder, nanos));
+            .join(format!("sourcebox_sentry_enc_test_{}_{}.ts", encoder, nanos));
         let test_path = match test_file.to_str() {
             Some(s) => s.to_string(),
             None => return false,

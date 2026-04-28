@@ -33,7 +33,7 @@
 //!    `node.db` to the path returned by [`crate::paths::config_db_path`].
 //!    On a fresh MSI install with no console-side setup, the service
 //!    fails on `Config::load` and exits — the user runs setup, then
-//!    `Start-Service OpenSentryCloudNode`.
+//!    `Start-Service SourceBoxSentryCloudNode`.
 //!
 //! 3. **Graceful shutdown is best-effort.** SCM Stop flips the shared
 //!    `stop_flag` that node supervisors poll. In-flight HLS segment
@@ -69,7 +69,11 @@ use windows_service::{
 /// `<ServiceInstall>` element in `wix/main.wxs`. Renaming requires a
 /// coordinated change in both places — and a clean uninstall on the
 /// installer side, since SCM uses this string as the primary key.
-pub const SERVICE_NAME: &str = "OpenSentryCloudNode";
+///
+/// Spaces aren't allowed in the SCM key; use the spaceless form here
+/// and put the user-visible "SourceBox Sentry CloudNode" in the
+/// `DisplayName` attribute on `ServiceInstall` instead.
+pub const SERVICE_NAME: &str = "SourceBoxSentryCloudNode";
 
 /// One process owns the service. We don't run multiple SCM-managed
 /// services from a single binary, so `OWN_PROCESS` is correct.
@@ -78,7 +82,7 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 define_windows_service!(ffi_service_main, service_main);
 
 /// Entry point invoked from `main.rs::run` when the user (or SCM) runs
-/// `opensentry-cloudnode service`.
+/// `sourcebox-sentry-cloudnode service`.
 ///
 /// `service_dispatcher::start` blocks for the lifetime of the service:
 /// it spins up SCM communication, calls into [`service_main`] via the
@@ -121,7 +125,7 @@ fn service_main(_arguments: Vec<OsString>) {
 ///      "right" place; any operator already looking at our data dir
 ///      will find it. Fails if the dir creation itself was the cause
 ///      of the original error (ACL denial on ProgramData write).
-///   2. `%TEMP%\opensentry-cloudnode-fatal-startup-error.txt` — the
+///   2. `%TEMP%\sourcebox-sentry-cloudnode-fatal-startup-error.txt` — the
 ///      "always works" fallback; %TEMP% is writable for every account
 ///      including LocalSystem.
 ///
@@ -138,13 +142,13 @@ fn write_fatal_startup_error(message: &str) {
         .unwrap_or(0);
 
     let line = format!(
-        "[{}] OpenSentry CloudNode service failed to start: {}\n",
+        "[{}] SourceBox Sentry CloudNode service failed to start: {}\n",
         timestamp, message
     );
 
     let candidates = [
         crate::paths::data_dir().join("fatal-startup-error.txt"),
-        std::env::temp_dir().join("opensentry-cloudnode-fatal-startup-error.txt"),
+        std::env::temp_dir().join("sourcebox-sentry-cloudnode-fatal-startup-error.txt"),
     ];
 
     for path in &candidates {
@@ -178,7 +182,7 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     let _log_guard = init_file_logging()?;
 
     tracing::info!(
-        "Starting OpenSentry CloudNode service (version {})",
+        "Starting SourceBox Sentry CloudNode service (version {})",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -310,7 +314,7 @@ fn load_and_validate_config() -> Result<crate::Config, Box<dyn std::error::Error
     let config = Config::load(None).map_err(|e| {
         format!(
             "Failed to load config from {}: {}. \
-             Run `opensentry-cloudnode setup` from an admin console first.",
+             Run `sourcebox-sentry-cloudnode setup` from an admin console first.",
             crate::paths::config_db_path().display(),
             e
         )
@@ -319,8 +323,8 @@ fn load_and_validate_config() -> Result<crate::Config, Box<dyn std::error::Error
     if config.cloud.api_key.is_empty() || config.node.node_id.is_none() {
         return Err(
             "CloudNode is not configured. Open an admin console and run \
-             `opensentry-cloudnode setup` to enrol this node, then \
-             `Start-Service OpenSentryCloudNode`."
+             `sourcebox-sentry-cloudnode setup` to enrol this node, then \
+             `Start-Service SourceBoxSentryCloudNode`."
                 .into(),
         );
     }

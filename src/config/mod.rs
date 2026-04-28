@@ -185,8 +185,8 @@ impl Config {
         let default_paths = vec![
             "./config.yaml",
             "./config.yml",
-            "/etc/opensentry/config.yaml",
-            "/etc/opensentry/config.yml",
+            "/etc/sourcebox-sentry/config.yaml",
+            "/etc/sourcebox-sentry/config.yml",
         ];
 
         for path in default_paths {
@@ -303,22 +303,22 @@ impl Config {
 
     fn with_env_overrides(mut self) -> Self {
         // Node ID from env
-        if let Ok(node_id) = std::env::var("OPENSENTRY_NODE_ID") {
+        if let Ok(node_id) = std::env::var("SOURCEBOX_SENTRY_NODE_ID") {
             self.node.node_id = Some(node_id);
         }
 
         // API key from env
-        if let Ok(key) = std::env::var("OPENSENTRY_API_KEY") {
+        if let Ok(key) = std::env::var("SOURCEBOX_SENTRY_API_KEY") {
             self.cloud.api_key = key;
         }
 
         // API URL from env
-        if let Ok(url) = std::env::var("OPENSENTRY_API_URL") {
+        if let Ok(url) = std::env::var("SOURCEBOX_SENTRY_API_URL") {
             self.cloud.api_url = url;
         }
 
         // Encoder from env (legacy: was only in .env, not in Config)
-        if let Ok(enc) = std::env::var("OPENSENTRY_ENCODER") {
+        if let Ok(enc) = std::env::var("SOURCEBOX_SENTRY_ENCODER") {
             self.streaming.encoder = enc;
         }
 

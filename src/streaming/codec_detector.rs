@@ -380,7 +380,7 @@ pub fn detect_codec_from_camera(camera_device: &str) -> Result<CodecInfo> {
     tracing::info!("[Codec] Detecting codec from camera: {}", camera_device);
 
     let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("opensentry_codec_test.ts");
+    let temp_file = temp_dir.join("sourcebox_sentry_codec_test.ts");
 
     let ffmpeg_path = find_ffmpeg();
 

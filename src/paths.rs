@@ -30,12 +30,12 @@
 //!
 //! Resolution order (first match wins):
 //!
-//! 1. `$OPENSENTRY_DATA_DIR` if set — explicit override, used by Docker
+//! 1. `$SOURCEBOX_SENTRY_DATA_DIR` if set — explicit override, used by Docker
 //!    and by the MSI-installed service registration.
 //! 2. The legacy `./data/` directory if it already exists, so anyone who
 //!    upgraded a manual `cargo build` install in-place keeps working.
 //! 3. Platform default:
-//!    - Windows: `%ProgramData%\OpenSentry` (standard system-wide app
+//!    - Windows: `%ProgramData%\SourceBoxSentry` (standard system-wide app
 //!      data location; writable by services running as LocalSystem and
 //!      by interactive admins).
 //!    - Other: `./data` (matches legacy behaviour for Linux/macOS where
@@ -51,7 +51,7 @@ use std::path::PathBuf;
 /// persistent state. See module docs for the resolution order.
 pub fn data_dir() -> PathBuf {
     // 1. Explicit override.
-    if let Ok(dir) = std::env::var("OPENSENTRY_DATA_DIR") {
+    if let Ok(dir) = std::env::var("SOURCEBOX_SENTRY_DATA_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir);
         }
@@ -72,7 +72,7 @@ pub fn data_dir() -> PathBuf {
         // future enterprise install relocate ProgramData (rare).
         if let Ok(programdata) = std::env::var("ProgramData") {
             if !programdata.is_empty() {
-                return PathBuf::from(programdata).join("OpenSentry");
+                return PathBuf::from(programdata).join("SourceBoxSentry");
             }
         }
         // Hardcoded fallback. We don't reach this for interactive
@@ -87,7 +87,7 @@ pub fn data_dir() -> PathBuf {
         // (stable since Vista, documented at
         // KNOWNFOLDERID FOLDERID_ProgramData = "{0x62AB5D82,...}")
         // so the service finds the same files the setup wizard wrote.
-        return PathBuf::from(r"C:\ProgramData").join("OpenSentry");
+        return PathBuf::from(r"C:\ProgramData").join("SourceBoxSentry");
     }
 
     // Final fallback: keep the legacy relative path so a fresh non-MSI

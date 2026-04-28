@@ -472,7 +472,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
             println!();
             println!(
                 "  {}",
-                "Run 'opensentry-cloudnode setup' to try again.".yellow()
+                "Run 'sourcebox-sentry-cloudnode setup' to try again.".yellow()
             );
             std::process::exit(1);
         }
@@ -879,7 +879,7 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
             panel_row(&format!(
                 "  {}  {}",
                 "Start with:".white().bold(),
-                "./target/release/opensentry-cloudnode".cyan()
+                "./target/release/sourcebox-sentry-cloudnode".cyan()
             ));
         }
     }

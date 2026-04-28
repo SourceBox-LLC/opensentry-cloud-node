@@ -32,7 +32,7 @@ RUN apk add --no-cache \
     v4l-utils
 
 # Create non-root user
-RUN adduser -D -s /bin/sh opensentry
+RUN adduser -D -s /bin/sh sentry
 
 WORKDIR /app
 
@@ -43,9 +43,9 @@ COPY --from=builder /app/target/release/sourcebox-sentry-cloudnode /usr/local/bi
 RUN mkdir -p /app/data/hls && \
     mkdir -p /app/data/recordings && \
     mkdir -p /app/data/snapshots && \
-    chown -R opensentry:opensentry /app/data
+    chown -R sentry:sentry /app/data
 
-USER opensentry
+USER sentry
 
 # Expose HTTP server port
 EXPOSE 8080
@@ -61,6 +61,6 @@ VOLUME ["/app/data"]
 # isn't bind-mounted from the host. The ID lives in the volume so it survives
 # container rebuilds. For stronger encryption (key tied to host, not data
 # volume), run with `-v /etc/machine-id:/etc/machine-id:ro`.
-ENV OPENSENTRY_DATA_DIR=/app/data
+ENV SOURCEBOX_SENTRY_DATA_DIR=/app/data
 
 ENTRYPOINT ["sourcebox-sentry-cloudnode"]

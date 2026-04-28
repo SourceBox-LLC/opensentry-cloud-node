@@ -485,7 +485,7 @@ async fn cmd_take_snapshot(
 
     // Use FFmpeg to extract a single frame as JPEG
     let temp_path = std::env::temp_dir()
-        .join(format!("opensentry_snap_{}.jpg", camera_id));
+        .join(format!("sourcebox_sentry_snap_{}.jpg", camera_id));
 
     let ffmpeg = crate::streaming::find_ffmpeg();
 
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn segment_selection_prefers_playlist_over_fs() {
-        let dir = std::env::temp_dir().join("opensentry_test_playlist");
+        let dir = std::env::temp_dir().join("sourcebox_sentry_test_playlist");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn segment_selection_fs_fallback_skips_latest() {
-        let dir = std::env::temp_dir().join("opensentry_test_fs_fallback");
+        let dir = std::env::temp_dir().join("sourcebox_sentry_test_fs_fallback");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -795,7 +795,7 @@ mod tests {
 
     #[test]
     fn segment_selection_single_segment_still_returned() {
-        let dir = std::env::temp_dir().join("opensentry_test_single_seg");
+        let dir = std::env::temp_dir().join("sourcebox_sentry_test_single_seg");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn playlist_parser_handles_path_prefix() {
-        let dir = std::env::temp_dir().join("opensentry_test_path_prefix");
+        let dir = std::env::temp_dir().join("sourcebox_sentry_test_path_prefix");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

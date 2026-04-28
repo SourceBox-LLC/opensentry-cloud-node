@@ -442,7 +442,7 @@ impl Node {
         // the stop flag directly, so we poll it alongside the OS signal.
         // In headless mode, the caller (service main) flips stop_flag from
         // the SCM event handler — Ctrl+C is still installed as a fallback
-        // for cases where the binary is run as `opensentry-cloudnode service`
+        // for cases where the binary is run as `sourcebox-sentry-cloudnode service`
         // from a console for debugging.
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {

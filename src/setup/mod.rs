@@ -191,7 +191,7 @@ pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()
     // `output_dir` is the install root (where the binary + bundled
     // ffmpeg live). The DB path comes from `paths::config_db_path()`
     // so a Windows-Service install lands the DB under %ProgramData%
-    // \OpenSentry\node.db rather than next to the exe in Program Files
+    // \SourceBoxSentry\node.db rather than next to the exe in Program Files
     // (which a service running as LocalSystem would still be able to
     // write to, but conventionally Program Files is read-only).
     let output_dir = std::env::current_dir()?;

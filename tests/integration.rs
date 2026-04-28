@@ -1,6 +1,6 @@
 //! Integration tests for SourceBox Sentry CloudNode
 
-use opensentry_cloudnode::{Config, Result};
+use sourcebox_sentry_cloudnode::{Config, Result};
 
 #[test]
 fn test_config_load_default() -> Result<()> {
@@ -12,7 +12,7 @@ fn test_config_load_default() -> Result<()> {
 
 #[test]
 fn test_camera_detect() -> Result<()> {
-    let cameras = opensentry_cloudnode::camera::detect_cameras()?;
+    let cameras = sourcebox_sentry_cloudnode::camera::detect_cameras()?;
     // Should not panic, but may be empty on non-Linux systems
     println!("Detected {} cameras", cameras.len());
     Ok(())

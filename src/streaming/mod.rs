@@ -62,9 +62,7 @@ pub fn find_ffprobe() -> String {
 ///
 /// 1. **Cwd-bundled copy** (`<cwd>/ffmpeg/bin/<name>`) — preserves the
 ///    legacy `cargo run` developer flow where ffmpeg lives next to the
-///    repo root, and the foreground PowerShell installer's
-///    `%LOCALAPPDATA%\OpenSentry\ffmpeg\bin\` layout when invoked from
-///    that dir.
+///    repo root.
 /// 2. **Data-dir bundled copy** (`<data_dir>/ffmpeg/bin/<name>`) — where
 ///    the setup wizard's auto-install lands ffmpeg, and where the MSI
 ///    service (cwd = `C:\Windows\System32`) finds it. Without this
@@ -92,7 +90,7 @@ fn find_tool(name: &str) -> String {
         // 2. Data-dir bundled copy. Critical for the MSI Service path —
         //    that process runs with cwd = System32, so step 1 misses
         //    even when the auto-install dropped ffmpeg into
-        //    %ProgramData%\OpenSentry\ffmpeg\bin\.
+        //    %ProgramData%\SourceBoxSentry\ffmpeg\bin\.
         let data_local = crate::paths::data_dir().join("ffmpeg").join("bin").join(&exe_name);
         if data_local.exists() {
             return data_local.to_string_lossy().to_string();

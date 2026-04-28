@@ -44,7 +44,7 @@
 //!
 //! `<paths::data_dir()>/ffmpeg/bin/` — the same path the second
 //! lookup candidate in `streaming::find_tool` checks. On a Windows
-//! MSI install that resolves to `C:\ProgramData\OpenSentry\ffmpeg\
+//! MSI install that resolves to `C:\ProgramData\SourceBoxSentry\ffmpeg\
 //! bin\`, which the LocalSystem service can read. On a manual /
 //! Docker install, it follows wherever `SOURCEBOX_SENTRY_DATA_DIR` points.
 //!
@@ -216,6 +216,7 @@ fn download(progress: &indicatif::ProgressBar) -> Result<Vec<u8>> {
 ///
 /// The archive layout is:
 ///
+/// ```text
 ///     ffmpeg-N.N-essentials_build/
 ///         bin/
 ///             ffmpeg.exe
@@ -225,6 +226,7 @@ fn download(progress: &indicatif::ProgressBar) -> Result<Vec<u8>> {
 ///         presets/
 ///         LICENSE
 ///         README.txt
+/// ```
 ///
 /// We pull only the two binaries we need + the LICENSE (gyan asks for
 /// the LICENSE to be redistributed alongside the binaries, and it's

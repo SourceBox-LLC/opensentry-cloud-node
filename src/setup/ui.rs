@@ -50,7 +50,7 @@ const SMR: &str = "┤";
 
 /// Draw a full-width double-border panel with an optional title (cyan border).
 ///
-/// ```
+/// ```text
 /// ╔══ ▸ STEP 1 / 5 — PREREQUISITES ═══════════════════════════════════════╗
 /// ║                                                                        ║
 /// ...content...
@@ -201,7 +201,7 @@ pub enum StepState {
 
 /// Render the pill-style progress bar.
 ///
-/// ```
+/// ```text
 /// [ ✓ PREREQS ]──[ ● CONFIGURE ]──[   INSTALL   ]──[  VERIFY  ]──[ LAUNCH ]
 /// ```
 pub fn progress_bar(steps: &[(&'static str, StepState)]) {

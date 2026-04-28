@@ -37,7 +37,7 @@ impl Config {
         //
         // Path resolution lives in `crate::paths::config_db_path()` so a
         // Windows-Service install (cwd = System32) finds its DB under
-        // %ProgramData%\OpenSentry\ instead of trying to write inside
+        // %ProgramData%\SourceBoxSentry\ instead of trying to write inside
         // System32. See paths::data_dir() for the full resolution order.
         let db_path = crate::paths::config_db_path();
         if db_path.exists() {
@@ -61,7 +61,7 @@ impl Config {
         // 3. If we loaded from legacy sources and have credentials,
         //    migrate them to the database for next time. Make sure the
         //    parent dir exists — on a fresh MSI install %ProgramData%\
-        //    OpenSentry\ may not exist yet because the WiX template
+        //    SourceBoxSentry\ may not exist yet because the WiX template
         //    only creates the install dir, not the data dir.
         if !config.cloud.api_key.is_empty() && config.node.node_id.is_some() {
             if let Some(parent) = db_path.parent() {

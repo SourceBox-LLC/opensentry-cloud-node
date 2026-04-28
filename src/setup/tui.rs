@@ -72,13 +72,17 @@ pub fn run_tui_setup() -> Result<bool> {
 // ─── Step 0: Header ──────────────────────────────────────────────────────────
 
 fn show_animated_header() -> Result<()> {
+    // Wordmark for the SourceBox Sentry brand. "SOURCEBOX" in big block
+    // letters with a "Sentry CloudNode" subtitle keeps the banner narrow
+    // enough to fit a standard 80-col terminal (~78 cols incl. indent)
+    // while making clear which product line this binary belongs to.
     let header_lines = vec![
-        "   ██████╗ ██████╗ ███████╗███╗   ██╗███████╗███████╗███╗   ██╗████████╗██████╗  ██╗   ██╗",
-        "  ██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗ ╚██╗ ██╔╝",
-        "  ██║   ██║██████╔╝█████╗  ██╔██╗ ██║███████╗█████╗  ██╔██╗ ██║   ██║   ██████╔╝  ╚████╔╝ ",
-        "  ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║╚════██║██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗   ╚██╔╝  ",
-        "  ╚██████╔╝██║     ███████╗██║ ╚████║███████║███████╗██║ ╚████║   ██║   ██║  ██║    ██║   ",
-        "   ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝    ╚═╝   ",
+        "   ███████╗ ██████╗ ██╗   ██╗██████╗  ██████╗███████╗██████╗  ██████╗ ██╗  ██╗",
+        "   ██╔════╝██╔═══██╗██║   ██║██╔══██╗██╔════╝██╔════╝██╔══██╗██╔═══██╗╚██╗██╔╝",
+        "   ███████╗██║   ██║██║   ██║██████╔╝██║     █████╗  ██████╔╝██║   ██║ ╚███╔╝ ",
+        "   ╚════██║██║   ██║██║   ██║██╔══██╗██║     ██╔══╝  ██╔══██╗██║   ██║ ██╔██╗ ",
+        "   ███████║╚██████╔╝╚██████╔╝██║  ██║╚██████╗███████╗██████╔╝╚██████╔╝██╔╝ ██╗",
+        "   ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝",
     ];
 
     for (i, line) in header_lines.iter().enumerate() {
@@ -91,7 +95,7 @@ fn show_animated_header() -> Result<()> {
     draw_expanding_border(Duration::from_millis(350))?;
     println!();
     fade_in(
-        "    📹  CloudNode Setup  —  Your camera, connected to the cloud.",
+        "    📹  Sentry CloudNode Setup  —  Your camera, connected to the cloud.",
         Duration::from_millis(400),
     )?;
     thread::sleep(Duration::from_millis(250));
@@ -220,7 +224,7 @@ fn prompt_and_install_ffmpeg(platform: &PlatformInfo) -> Result<()> {
     if platform.is_windows {
         let install = Confirm::new("  Download and install FFmpeg now? (~150 MB)")
             .with_default(true)
-            .with_help_message("Installs into %ProgramData%\\OpenSentry\\ffmpeg\\ (one-time, ~150 MB).")
+            .with_help_message("Installs into %ProgramData%\\SourceBoxSentry\\ffmpeg\\ (one-time, ~150 MB).")
             .prompt()?;
 
         if !install {
@@ -864,7 +868,7 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     match config.deployment_method {
         DeploymentMethod::WindowsNative => {
             // No hint needed: FFmpeg lives at
-            // %ProgramData%\OpenSentry\ffmpeg\bin\ and the node's
+            // %ProgramData%\SourceBoxSentry\ffmpeg\bin\ and the node's
             // streaming::find_tool lookup finds it there without any
             // shell-PATH gymnastics from the user.
         }
@@ -968,7 +972,7 @@ fn save_config_to_database(config: &SetupConfig) -> Result<()> {
 
 fn create_directories(_config: &SetupConfig) -> Result<()> {
     // Data dir resolution moved to crate::paths to support Windows
-    // Service installs (cwd = System32) under %ProgramData%\OpenSentry\.
+    // Service installs (cwd = System32) under %ProgramData%\SourceBoxSentry\.
     let data = crate::paths::data_dir();
     std::fs::create_dir_all(data.join("hls"))?;
     Ok(())

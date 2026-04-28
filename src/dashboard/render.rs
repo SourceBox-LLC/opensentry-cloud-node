@@ -43,7 +43,7 @@ impl Dashboard {
         out.push_str("\x1B[?25l\x1B[H");
 
         // ── Header ───────────────────────────────────────────────────────────
-        let title = " ▸ OPENSENTRY CLOUDNODE ";
+        let title = " ▸ SOURCEBOX SENTRY CLOUDNODE ";
         let title_len = title.chars().count();
         let fill = w.saturating_sub(2 + title_len);
         out.push_str(&format!(

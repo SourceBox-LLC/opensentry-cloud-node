@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  WiX Toolset 3.x source for the OpenSentry CloudNode MSI.
+  WiX Toolset 3.x source for the SourceBox Sentry CloudNode MSI.
 
   Built by `cargo wix` (which shells out to `candle.exe` and `light.exe`
   from the WiX toolset) and emitted to `target/wix/sourcebox-sentry-cloudnode-
@@ -65,7 +65,7 @@
 
     <Product
         Id='*'
-        Name='OpenSentry CloudNode'
+        Name='SourceBox Sentry CloudNode'
         UpgradeCode='7B8E5C9A-4D2F-4A1B-9E3C-A0F6D8B25E47'
         Manufacturer='SourceBox LLC'
         Language='1033'
@@ -74,7 +74,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='OpenSentry CloudNode Installer'
+            Description='SourceBox Sentry CloudNode Installer'
             Manufacturer='SourceBox LLC'
             InstallerVersion='450'
             Languages='1033'
@@ -174,7 +174,7 @@
         <CustomAction
             Id='LaunchSetup'
             Directory='APPLICATIONFOLDER'
-            ExeCommand='cmd.exe /c start "OpenSentry CloudNode Setup" "[#filServiceExe]" setup'
+            ExeCommand='cmd.exe /c start "SourceBox Sentry CloudNode Setup" "[#filServiceExe]" setup'
             Execute='immediate'
             Impersonate='yes'
             Return='asyncNoWait' />
@@ -241,7 +241,7 @@
         <Directory Id='TARGETDIR' Name='SourceDir'>
 
             <Directory Id='ProgramFiles64Folder'>
-                <Directory Id='APPLICATIONFOLDER' Name='OpenSentry CloudNode'>
+                <Directory Id='APPLICATIONFOLDER' Name='SourceBox Sentry CloudNode'>
 
                     <!-- Component: the binary + the service registration.
                          Tying these together means the service can't
@@ -303,11 +303,11 @@
                  The shortcut runs `sourcebox-sentry-cloudnode setup` since
                  that's the most likely first action after install. -->
             <Directory Id='ProgramMenuFolder'>
-                <Directory Id='ApplicationProgramsFolder' Name='OpenSentry CloudNode'>
+                <Directory Id='ApplicationProgramsFolder' Name='SourceBox Sentry CloudNode'>
                     <Component Id='cmpStartMenu'
                                Guid='9DAB7EBC-6F4F-4C3D-B05E-C2F8FAD47069'>
                         <Shortcut Id='ShortcutSetup'
-                                  Name='OpenSentry CloudNode Setup'
+                                  Name='SourceBox Sentry CloudNode Setup'
                                   Description='Run the interactive setup wizard to enrol this machine.'
                                   Target='[#filServiceExe]'
                                   Arguments='setup'
@@ -329,7 +329,7 @@
 
         <Feature Id='Default'
                  Title='Main'
-                 Description='OpenSentry CloudNode service binary and Start menu shortcut.'
+                 Description='SourceBox Sentry CloudNode service binary and Start menu shortcut.'
                  Display='expand'
                  ConfigurableDirectory='APPLICATIONFOLDER'
                  Level='1'>

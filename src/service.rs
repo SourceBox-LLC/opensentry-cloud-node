@@ -26,7 +26,7 @@
 //! 1. **No TUI.** Services run with `cwd = C:\Windows\System32` and no
 //!    attached terminal. We bypass the dashboard render thread (via
 //!    `Node::run_headless`) and route tracing into a daily-rolling
-//!    file under `%ProgramData%\OpenSentry\logs\` instead.
+//!    file under `%ProgramData%\SourceBoxSentry\logs\` instead.
 //!
 //! 2. **Config lives outside the install dir.** The setup wizard (run
 //!    by an admin from a console *before* starting the service) writes
@@ -121,7 +121,7 @@ fn service_main(_arguments: Vec<OsString>) {
 /// Append a one-line crash report to a guaranteed-writable location.
 ///
 /// Order tried:
-///   1. `%ProgramData%\OpenSentry\fatal-startup-error.txt` — the
+///   1. `%ProgramData%\SourceBoxSentry\fatal-startup-error.txt` — the
 ///      "right" place; any operator already looking at our data dir
 ///      will find it. Fails if the dir creation itself was the cause
 ///      of the original error (ACL denial on ProgramData write).
@@ -354,7 +354,7 @@ fn run_node_blocking(
 }
 
 /// Configure tracing to write to a daily-rotating file under
-/// `%ProgramData%\OpenSentry\logs\`. Returns the appender's worker
+/// `%ProgramData%\SourceBoxSentry\logs\`. Returns the appender's worker
 /// guard, which keeps the background writer thread alive until the
 /// service exits — drop the guard and pending log lines may be lost.
 fn init_file_logging() -> Result<tracing_appender::non_blocking::WorkerGuard, Box<dyn std::error::Error>> {

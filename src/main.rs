@@ -424,11 +424,11 @@ fn uninstall_cloudnode(force: bool) -> Result<()> {
         println!();
         println!("  This is an MSI install — uninstall via Windows Settings:");
         println!();
-        println!("    Settings → Apps → Installed apps → OpenSentry CloudNode → Uninstall");
+        println!("    Settings → Apps → Installed apps → SourceBox Sentry CloudNode → Uninstall");
         println!();
         println!("  Settings → Apps cleanly stops the service, removes the binary,");
         println!("  removes the Windows Service registration, and (on a real");
-        println!("  uninstall) wipes data under C:\\ProgramData\\OpenSentry\\.");
+        println!("  uninstall) wipes data under C:\\ProgramData\\SourceBoxSentry\\.");
         println!();
 
         // Best-effort: try to open Settings → Apps directly via the

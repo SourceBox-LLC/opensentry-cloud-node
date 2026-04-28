@@ -22,7 +22,7 @@
 //! # Layout
 //!
 //! ```text
-//! ╔══ ▸ OPENSENTRY CLOUDNODE ═══════════════════════════════════════════════╗
+//! ╔══ ▸ SOURCEBOX SENTRY CLOUDNODE ═════════════════════════════════════════╗
 //! ║  Node: abc12345  │  API: opensentry-command.fly.dev  │  ↑ 142 segments ║
 //! ╠══ CAMERAS ══════════════════════════════════════════════════════════════╣
 //! ║  ● MEE USB Camera    1920×1080   avc1.42e01e / mp4a.40.2   streaming   ║

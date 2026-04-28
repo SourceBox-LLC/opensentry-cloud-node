@@ -118,7 +118,7 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let exit_code = match run() {
         Ok(()) => ExitCode::SUCCESS,
         // Already-reported errors came through a formatted TUI path
         // (e.g. show_registration_error); do not print a second debug line.
@@ -128,9 +128,28 @@ fn main() -> ExitCode {
             eprintln!();
             eprintln!("  {} {}", "Error:".red().bold(), e);
             eprintln!();
+            // CRITICAL: on Windows, the binary may be running in a
+            // console window owned by us (Start menu shortcut, MSI
+            // Finish-dialog cmd /c start, Explorer double-click).
+            // When main returns, that console closes immediately —
+            // the user never sees the error message printed above.
+            //
+            // Pause for input on Windows so the operator can actually
+            // read what went wrong before the window vanishes. PowerShell
+            // / cmd users (who own their own shell) hit Enter once
+            // and move on; that minor friction is the price for not
+            // throwing diagnostic info into a window-close vacuum.
+            //
+            // Skip the pause for AlreadyReported / ResetRequested
+            // because those are intentional flows (the TUI already
+            // showed the user what happened; we're just exiting with
+            // code 1 to signal the outer launcher).
+            #[cfg(target_os = "windows")]
+            pause_on_exit();
             ExitCode::from(1)
         }
-    }
+    };
+    exit_code
 }
 
 fn run() -> Result<()> {
@@ -373,6 +392,19 @@ fn run() -> Result<()> {
             // run the node in the foreground. Same path as cargo-build
             // / Linux / Docker installs already use. The TUI dashboard
             // takes over the console.
+            //
+            // Print a clear "starting" banner before run_cloudnode so
+            // the user has visual feedback that the binary is doing
+            // something, even if Node::new takes a couple seconds to
+            // build the tokio runtime + open the SQLite DB + register
+            // with Command Center. Without this, the console is
+            // blank for ~1-3 seconds before the dashboard takes over,
+            // which feels like the binary hung.
+            use colored::Colorize;
+            println!();
+            println!("  {}  Loading SourceBox Sentry CloudNode...", "📡".cyan());
+            println!("  {}", "Configuration found. Starting camera node...".dimmed());
+            println!();
             run_cloudnode(args.node_id, args.api_key, args.api_url, args.once, args.config)?;
         }
     }

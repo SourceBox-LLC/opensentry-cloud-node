@@ -18,7 +18,9 @@
 //! Beautiful animated terminal-based setup experience
 
 pub mod animations;
-pub mod ffmpeg_installer;
+// `ffmpeg_installer` removed in v0.1.35. CloudNode now uses the system
+// FFmpeg (winget / brew / apt), not a bundled copy. The setup wizard's
+// pre-flight FFmpeg handling lives in `tui::prompt_and_install_ffmpeg`.
 pub mod platform;
 pub mod recovery;
 pub mod tui;

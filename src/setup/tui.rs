@@ -200,100 +200,116 @@ fn check_prerequisites() -> Result<PlatformInfo> {
 
 /// Pre-flight FFmpeg handling when `check_ffmpeg()` returns false.
 ///
-/// On **Windows** this prompts the user and, on confirmation, runs
-/// `super::ffmpeg_installer::install` with an indicatif progress bar.
-/// On **Linux/macOS** the package manager is the right answer; we
-/// surface a clear `apt`/`brew` hint and fail fast, since we can't
-/// cleanly auto-install on those platforms (different distros, no
-/// vendor consensus, sudo prompt UX problems).
+/// CloudNode no longer ships its own FFmpeg copy (v0.1.35 onward). The
+/// canonical answer on every supported platform is "install FFmpeg via
+/// the OS package manager". This function detects the user's package
+/// manager, offers to run the install command for them, and tells them
+/// to re-launch CloudNode after the install finishes (PATH changes
+/// don't apply to the running process — a fresh process is required).
 ///
-/// Errors here propagate up through `run_tui_setup` to the catch-all
-/// in `setup/mod.rs::run_setup`. That catch-all has FFmpeg-aware
-/// messaging too, so the user sees a sensible message either way —
-/// but the message we render here is the primary one and is more
-/// specific (e.g. "Download and install FFmpeg now? [Y/n]").
+/// Why we don't just keep the install running and re-check PATH after:
+/// Win32 and POSIX both capture the parent's environment block at
+/// CreateProcess/exec time. winget / brew / apt all update the
+/// SYSTEM-wide PATH (or user PATH on Windows), but our running process
+/// is stuck with the snapshot it inherited at launch. Spawning a new
+/// shell to detect ffmpeg works but is fragile. The cleanest UX is:
+/// install runs to completion, user re-launches CloudNode, fresh
+/// process sees the updated PATH, prereq check passes.
 fn prompt_and_install_ffmpeg(platform: &PlatformInfo) -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
-
     println!();
     println!("  ⚠  FFmpeg not found");
     println!();
-    println!("  CloudNode shells out to FFmpeg for camera capture and HLS encoding.");
+    println!("  CloudNode uses the system FFmpeg installation for camera capture");
+    println!("  and HLS encoding. Install it once via your OS package manager and");
+    println!("  CloudNode will pick it up automatically.");
     println!();
 
-    if platform.is_windows {
-        let install = Confirm::new("  Download and install FFmpeg now? (~150 MB)")
-            .with_default(true)
-            .with_help_message("Installs into %ProgramData%\\SourceBoxSentry\\ffmpeg\\ (one-time, ~150 MB).")
-            .prompt()?;
-
-        if !install {
-            return Err(anyhow::anyhow!(
-                "FFmpeg is required. Install manually with: winget install Gyan.FFmpeg\n  \
-                 Then re-run setup in a fresh terminal."
-            ));
-        }
-
-        println!();
-        println!("  Installing FFmpeg...");
-        println!();
-
-        let pb = ProgressBar::new(0);
-        // Narrower bar than the obvious 40-char default: a 24-char bar
-        // keeps the rendered line under ~75 chars even with the
-        // "Downloading FFmpeg..." message, so a user resizing the
-        // terminal mid-download (e.g. snapping the window to half-screen)
-        // doesn't push indicatif's redraw past the new viewport width
-        // and leave residue on the previous (now wider) line.
-        //
-        // Throttling redraws to 10 fps via stderr_with_hz adds the
-        // second half of the fix: indicatif's default "redraw on every
-        // set_position" can fire ~1500 times per 100 MB download, which
-        // outpaces a Windows console's ability to clean the previous
-        // line if a SIGWINCH-equivalent fires mid-burst. 10 fps is
-        // visually smooth and gives every redraw a clean slate.
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("  {spinner:.cyan} [{bar:24.cyan/blue}] {bytes}/{total_bytes} {msg}")
-                .expect("valid template")
-                .progress_chars("█▉▊▋▌▍▎▏ "),
-        );
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr_with_hz(10));
-
-        match super::ffmpeg_installer::install(&pb) {
-            Ok(path) => {
-                pb.finish_and_clear();
-                println!();
-                println!("  ✓ FFmpeg installed at {}", path.display());
-                println!();
-                Ok(())
-            }
-            Err(e) => {
-                pb.abandon();
-                println!();
-                // Best-effort cleanup so a retry starts from scratch.
-                super::ffmpeg_installer::cleanup_partial_install();
-                Err(anyhow::anyhow!(
-                    "FFmpeg install failed: {}\n  \
-                     Try installing manually: winget install Gyan.FFmpeg",
-                    e
-                ))
-            }
-        }
-    } else if platform.is_linux {
-        Err(anyhow::anyhow!(
-            "FFmpeg is required. Install with: sudo apt install ffmpeg  (Debian/Ubuntu)\n  \
-             For other distros, use your package manager. Then re-run setup."
-        ))
+    let (label, command, args, install_url) = if platform.is_windows {
+        (
+            "winget",
+            "winget",
+            vec!["install", "--id", "Gyan.FFmpeg", "-e", "--accept-source-agreements", "--accept-package-agreements"],
+            "https://www.gyan.dev/ffmpeg/builds/",
+        )
     } else if platform.is_macos {
-        Err(anyhow::anyhow!(
-            "FFmpeg is required. Install with: brew install ffmpeg\n  \
-             Then re-run setup."
-        ))
+        (
+            "Homebrew",
+            "brew",
+            vec!["install", "ffmpeg"],
+            "https://brew.sh/",
+        )
     } else {
-        Err(anyhow::anyhow!(
-            "FFmpeg is required. Install via your system package manager, then re-run setup."
-        ))
+        // Linux: lots of distros, no vendor consensus. Don't try to
+        // auto-run; just print the most common command and let the
+        // operator choose the right one for their distro.
+        return Err(anyhow::anyhow!(
+            "FFmpeg is required. Install via your distro's package manager:\n  \
+               Debian/Ubuntu:  sudo apt install ffmpeg\n  \
+               Fedora/RHEL:    sudo dnf install ffmpeg\n  \
+               Arch:           sudo pacman -S ffmpeg\n  \
+               Then re-run setup."
+        ));
+    };
+
+    let install = Confirm::new(&format!(
+        "  Install FFmpeg now via {} ?",
+        label
+    ))
+    .with_default(true)
+    .with_help_message(&format!(
+        "Runs: {} {}",
+        command,
+        args.join(" ")
+    ))
+    .prompt()?;
+
+    if !install {
+        return Err(anyhow::anyhow!(
+            "FFmpeg is required. Install it yourself, then re-run setup.\n  \
+             Manual download: {}",
+            install_url
+        ));
+    }
+
+    println!();
+    println!("  Running: {} {}", command, args.join(" "));
+    println!();
+
+    // Run the package manager. Inherit stdio so the user sees the
+    // install progress live (winget/brew both have nice progress bars
+    // of their own; we don't need to wrap them in indicatif).
+    let status = std::process::Command::new(command)
+        .args(&args)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!();
+            println!("  ✓ FFmpeg install command completed.");
+            println!();
+            // Critical UX: the running process can't see the new PATH.
+            // Tell the user to re-launch and exit cleanly. Returning Err
+            // here propagates up to run_setup which prints the error and
+            // exits — the message is the user's next action.
+            Err(anyhow::anyhow!(
+                "FFmpeg installed. Close this window and re-launch SourceBox Sentry CloudNode \
+                 from the Start menu. PATH changes don't apply to the current process — a fresh \
+                 launch is required for the prereq check to see the new install."
+            ))
+        }
+        Ok(s) => Err(anyhow::anyhow!(
+            "{} exited with status {}. Install FFmpeg manually:\n  \
+               {} {}\n  \
+               Or download from {} and add to PATH.",
+            label, s, command, args.join(" "), install_url
+        )),
+        Err(e) => Err(anyhow::anyhow!(
+            "Could not invoke {}: {}\n  \
+             Install FFmpeg manually:\n  \
+               {} {}\n  \
+             Or download from {} and add to PATH.",
+            command, e, command, args.join(" "), install_url
+        )),
     }
 }
 

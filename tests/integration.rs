@@ -11,9 +11,14 @@ fn test_config_load_default() -> Result<()> {
 }
 
 #[test]
-fn test_camera_detect() -> Result<()> {
-    let cameras = sourcebox_sentry_cloudnode::camera::detect_cameras()?;
-    // Should not panic, but may be empty on non-Linux systems
-    println!("Detected {} cameras", cameras.len());
-    Ok(())
+fn test_camera_detect() {
+    // detect_cameras() shells out to FFmpeg on Windows + macOS for
+    // device enumeration. v0.1.35 onward CloudNode uses the system
+    // FFmpeg (no bundled fallback), so on a test environment without
+    // FFmpeg on PATH the call returns Err — that's fine, we're just
+    // verifying it doesn't panic.
+    match sourcebox_sentry_cloudnode::camera::detect_cameras() {
+        Ok(cameras) => println!("Detected {} cameras", cameras.len()),
+        Err(e) => println!("Camera detect skipped (no FFmpeg on PATH?): {}", e),
+    }
 }

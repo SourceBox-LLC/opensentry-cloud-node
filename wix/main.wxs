@@ -91,14 +91,13 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Uninstall it first if you really need to roll back.' />
 
         <!-- ========================================================
-             Selectively wipe %ProgramData%\SourceBoxSentry on real
-             uninstall (preserves the auto-installed ffmpeg)
+             Wipe %ProgramData%\SourceBoxSentry on real uninstall
              ========================================================
              By default the MSI removes Program Files but leaves
              %ProgramData%\SourceBoxSentry\ in place so an upgrade-
              uninstall (the first half of MajorUpgrade) preserves
-             the user's config + recordings + auto-installed ffmpeg.
-             That's correct behaviour for upgrades.
+             the user's config + recordings. That's correct behaviour
+             for upgrades.
 
              For a *real* uninstall (Settings → Apps → Uninstall, or
              `msiexec /x ...` directly) the user expects "uninstall"
@@ -106,31 +105,25 @@
              API credentials on disk after they explicitly asked the
              OS to remove the program is a privacy footgun.
 
-             But up through v0.1.24 this was implemented as a single
-             `rmdir /s /q SourceBoxSentry` that nuked *everything*
-             under ProgramData, including the ~150 MB ffmpeg/ tree.
-             ffmpeg/ is a third-party binary — not user data, no
-             privacy implications — so re-downloading it on every
-             install/uninstall cycle is pure friction. Operators who
-             reinstall (or test the installer) hit a 150 MB redownload
-             every time. Surgical removal here keeps the privacy
-             guarantee for actual user data while letting ffmpeg/
-             survive across reinstalls.
+             v0.1.25 introduced a surgical wipe (delete node.db, hls/,
+             logs/, fatal-startup-error.txt; preserve ffmpeg/) so a
+             reinstall didn't have to re-download ~150 MB of FFmpeg.
+             v0.1.35 deprecated the bundled-FFmpeg story entirely —
+             CloudNode now uses the system FFmpeg (winget / brew /
+             apt) instead of a private copy under ProgramData. The
+             surgical-wipe machinery is no longer needed because
+             there's nothing under SourceBoxSentry\ that we want to
+             preserve across uninstall:
 
-             What gets removed (privacy / clutter):
-               - node.db                      → encrypted credentials,
-                                                 recordings, snapshots
-               - hls\                          → rolling video buffer
-                                                 (last ~30s per camera)
-               - logs\                         → service log files
-               - fatal-startup-error.txt       → crash reports
+               - node.db                  → user credentials, wipe
+               - hls\                     → rolling video buffer, wipe
+               - logs\                    → service logs, wipe
+               - fatal-startup-error.txt  → crash report, wipe
+               - ffmpeg\                  → no longer created here
 
-             What survives:
-               - ffmpeg\                       → 150 MB third-party
-                                                 binary; no user data
-               - the SourceBoxSentry\ dir      → only removed if it
-                                                 ends up empty (the
-                                                 final no-/s rmdir)
+             Back to the simple `rmdir /s /q SourceBoxSentry` we
+             started with. Cleaner code, no path-resolution edge
+             cases, no preserved-state surprises across versions.
 
              The condition `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`
              is Microsoft's documented idiom for "this is a real
@@ -139,37 +132,22 @@
              product's uninstall pass, so this CustomAction is skipped
              and the data survives. On Settings → Apps → Uninstall
              (or msiexec /x) UPGRADINGPRODUCTCODE is unset, so this
-             fires.
+             fires and ProgramData is purged.
 
              Implementation:
                - Execute='deferred' Impersonate='no'  → runs in the
                  elevated installer context (LocalSystem), which has
                  write access to %ProgramData%.
-               - cmd.exe /c with `&` chaining          → each command
-                 runs unconditionally; missing files / dirs don't abort
-                 later steps. `2>nul` suppresses noise from absent
-                 paths (e.g. fresh install with no logs/ yet).
-               - Final bare `rmdir` (no /s)            → only removes
-                 SourceBoxSentry\ itself if the surgical wipe left it
-                 empty. ffmpeg/ being present means this no-ops, which
-                 is exactly what we want.
-               - Return='ignore'                       → a stuck file
+               - rmdir /s /q                          → recursive +
+                 quiet. /s recurses, /q suppresses prompts.
+               - Return='ignore'                      → a stuck file
                  (AV scanning, in-use handle) shouldn't fail the whole
                  uninstall. Better to have the binary gone than to
-                 refuse to uninstall over a leftover log.
-
-             Caveat: this hardcodes the path AND the per-subdir layout.
-             If we ever move from %ProgramData%\SourceBoxSentry, or
-             rename one of the wiped subdirs (logs/ → log/, etc.),
-             BOTH this CustomAction AND the corresponding Rust code
-             (`paths::data_dir()`, the appender setup in service.rs,
-             the HLS pipeline in streaming/) need to change in
-             lockstep — they're the source of truth for the same
-             paths. -->
+                 refuse to uninstall over a leftover log. -->
         <CustomAction
             Id='WipeProgramData'
             Directory='APPLICATIONFOLDER'
-            ExeCommand='cmd.exe /c del /f /q "[CommonAppDataFolder]SourceBoxSentry\node.db" 2&gt;nul &amp; del /f /q "[CommonAppDataFolder]SourceBoxSentry\fatal-startup-error.txt" 2&gt;nul &amp; rmdir /s /q "[CommonAppDataFolder]SourceBoxSentry\logs" 2&gt;nul &amp; rmdir /s /q "[CommonAppDataFolder]SourceBoxSentry\hls" 2&gt;nul &amp; rmdir "[CommonAppDataFolder]SourceBoxSentry" 2&gt;nul'
+            ExeCommand='cmd.exe /c rmdir /s /q "[CommonAppDataFolder]SourceBoxSentry"'
             Execute='deferred'
             Impersonate='no'
             Return='ignore' />

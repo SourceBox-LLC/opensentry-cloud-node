@@ -93,10 +93,16 @@ mod tests {
 
     #[test]
     fn test_detect_cameras_runs() {
-        // This will work on Linux/Windows/macOS
-        // Just ensure it doesn't panic
-        let result = detect_cameras();
-        assert!(result.is_ok());
+        // This calls into the platform's camera enumeration which
+        // shells out to FFmpeg on Windows + macOS (`-list_devices`)
+        // and reads /dev/video* on Linux. We assert only that it
+        // doesn't panic — Err is a perfectly valid outcome (e.g.
+        // FFmpeg not installed on this machine, no cameras attached,
+        // CI environment without v4l2). v0.1.35 onward CloudNode no
+        // longer bundles its own FFmpeg, so the previous `is_ok()`
+        // assertion was over-strict — it would now fail in any test
+        // environment without FFmpeg on PATH.
+        let _ = detect_cameras();
     }
 
     #[test]

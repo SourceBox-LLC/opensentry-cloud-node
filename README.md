@@ -86,7 +86,7 @@ cargo build --release
 The setup wizard handles everything automatically:
 
 1. Detects your platform and verifies connected cameras
-2. Verifies FFmpeg — on Windows, offers to download + install it for you (~150 MB, lands under `%ProgramData%\SourceBoxSentry\ffmpeg\`); on Linux/macOS, points you at the right `apt`/`brew` command and waits for you to install + retry
+2. Verifies FFmpeg via your OS package manager — on Windows offers to run `winget install Gyan.FFmpeg`, on macOS `brew install ffmpeg`, on Linux prints the right `apt`/`dnf`/`pacman` command. CloudNode uses the system FFmpeg (no bundled copy)
 3. Prompts for your Node ID, API Key, and Command Center URL
 4. Detects the best available hardware encoder (NVENC, QSV, AMF)
 5. Encrypts and stores credentials locally in the SQLite config DB (path varies by platform — see [Configuration](#configuration))

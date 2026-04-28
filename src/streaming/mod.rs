@@ -58,71 +58,43 @@ pub fn find_ffprobe() -> String {
 /// `name` is the bare name ("ffmpeg" or "ffprobe"); the Windows branch
 /// appends `.exe` automatically.
 ///
-/// # Lookup precedence
+/// # Lookup precedence (v0.1.35+)
 ///
-/// 1. **Cwd-bundled copy** (`<cwd>/ffmpeg/bin/<name>`) — preserves the
-///    legacy `cargo run` developer flow where ffmpeg lives next to the
-///    repo root.
-/// 2. **Data-dir bundled copy** (`<data_dir>/ffmpeg/bin/<name>`) — where
-///    the setup wizard's auto-install lands ffmpeg, and where the MSI
-///    service (cwd = `C:\Windows\System32`) finds it. Without this
-///    step the service couldn't see the auto-installed binary at all,
-///    because cwd is wrong and there's no symlink machinery on Windows
-///    we want to lean on.
-/// 3. **Well-known absolute paths** (Linux/macOS) — handles the
-///    "works in my shell but not as a service" trap where systemd runs
-///    with PATH=/usr/bin:/bin and a brew-installed `ffmpeg` at
+/// CloudNode no longer bundles its own copy of FFmpeg. The canonical
+/// install pattern is "use the system FFmpeg" — installed via winget,
+/// Homebrew, apt, dnf, pacman, etc. The setup wizard guides the user
+/// to install it via their OS package manager and refuses to proceed
+/// without it. This eliminated an entire class of path-resolution
+/// bugs (the v0.1.20-v0.1.33 saga where cwd-relative `./data` would
+/// shadow the actual install directory) and dropped ~150 MB of
+/// download-then-extract complexity from setup.
+///
+/// 1. **Well-known absolute paths** (Linux/macOS only) — handles the
+///    "works in my shell but not as a service" trap where systemd
+///    runs with PATH=/usr/bin:/bin and a brew-installed `ffmpeg` at
 ///    `/opt/homebrew/bin/ffmpeg` becomes invisible.
-/// 4. **System PATH** (last resort) — bare `name`, lets the OS resolve.
+/// 2. **System PATH** (the canonical answer everywhere) — bare
+///    `name`, Windows resolves via PATHEXT and the standard search
+///    order; Linux/macOS uses standard PATH.
 fn find_tool(name: &str) -> String {
     #[cfg(target_os = "windows")]
     {
-        let exe_name = format!("{}.exe", name);
-
-        // 1. Cwd-bundled copy.
-        if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join(&exe_name);
-            if local.exists() {
-                return local.to_string_lossy().to_string();
-            }
-        }
-
-        // 2. Data-dir bundled copy. Critical for the MSI Service path —
-        //    that process runs with cwd = System32, so step 1 misses
-        //    even when the auto-install dropped ffmpeg into
-        //    %ProgramData%\SourceBoxSentry\ffmpeg\bin\.
-        let data_local = crate::paths::data_dir().join("ffmpeg").join("bin").join(&exe_name);
-        if data_local.exists() {
-            return data_local.to_string_lossy().to_string();
-        }
-
-        // 3. PATH fallback.
+        // PATH search. winget-installed ffmpeg adds itself to PATH.
+        // Operators who installed a portable build add it to PATH
+        // themselves. If neither is true, Command::new will fail with
+        // NotFound — the setup wizard's prereq check catches this and
+        // tells the user to install FFmpeg via winget before retrying.
         return name.to_string();
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        // 1. Cwd-bundled copy.
-        if let Ok(cwd) = std::env::current_dir() {
-            let local = cwd.join("ffmpeg").join("bin").join(name);
-            if local.exists() {
-                return local.to_string_lossy().to_string();
-            }
-        }
-
-        // 2. Data-dir bundled copy. Mirrors the Windows behaviour so
-        //    the auto-install path works identically across platforms.
-        let data_local = crate::paths::data_dir().join("ffmpeg").join("bin").join(name);
-        if data_local.exists() {
-            return data_local.to_string_lossy().to_string();
-        }
-
-        // 3. Well-known absolute paths.  Apt/dnf/pacman land in /usr/bin;
-        //    source or manual installs in /usr/local/bin; Homebrew on Apple
-        //    Silicon uses /opt/homebrew/bin; Intel macOS uses /usr/local/bin.
-        //    Checking these explicitly is the difference between "works when
-        //    I run it from my shell" and "works when systemd runs it with
-        //    PATH=/usr/bin:/bin".
+        // Well-known absolute paths.  Apt/dnf/pacman land in /usr/bin;
+        // source or manual installs in /usr/local/bin; Homebrew on Apple
+        // Silicon uses /opt/homebrew/bin; Intel macOS uses /usr/local/bin.
+        // Checking these explicitly is the difference between "works when
+        // I run it from my shell" and "works when systemd runs it with
+        // PATH=/usr/bin:/bin".
         for candidate in [
             "/usr/local/bin",
             "/usr/bin",

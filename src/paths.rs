@@ -68,16 +68,34 @@ pub fn data_dir() -> PathBuf {
     // 3. Platform default.
     #[cfg(target_os = "windows")]
     {
+        // Try the env var first — it's the "right" way and lets a
+        // future enterprise install relocate ProgramData (rare).
         if let Ok(programdata) = std::env::var("ProgramData") {
             if !programdata.is_empty() {
                 return PathBuf::from(programdata).join("OpenSentry");
             }
         }
+        // Hardcoded fallback. We don't reach this for interactive
+        // user contexts (Windows always sets ProgramData for them),
+        // but **Windows Services running as LocalSystem don't always
+        // inherit the ProgramData env var** — observed empirically on
+        // Windows 11 26200 where the SCM-managed environment block
+        // omits it. Falling through to "./data" was disastrous: cwd
+        // for a service is C:\Windows\System32, so data_dir resolved
+        // to C:\Windows\System32\data which is unwritable + unfindable
+        // by Config::load. Hardcode the canonical Windows location
+        // (stable since Vista, documented at
+        // KNOWNFOLDERID FOLDERID_ProgramData = "{0x62AB5D82,...}")
+        // so the service finds the same files the setup wizard wrote.
+        return PathBuf::from(r"C:\ProgramData").join("OpenSentry");
     }
 
     // Final fallback: keep the legacy relative path so a fresh non-MSI
     // install on Linux/macOS behaves the same as before this refactor.
-    PathBuf::from("./data")
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("./data")
+    }
 }
 
 /// Where the encrypted config SQLite lives.

@@ -57,39 +57,40 @@ pub fn data_dir() -> PathBuf {
         }
     }
 
-    // 2. Legacy in-place ./data/ takes priority over the platform
-    //    default so existing cargo-build installs don't migrate
-    //    themselves on the next launch (which would silently abandon
-    //    their config DB).
+    // 2. Legacy in-place ./data/ check (Linux/macOS only; v0.1.36+).
     //
-    //    CRITICAL: this check requires `./data/node.db` to exist, NOT
-    //    just `./data/`. Original logic checked only `./data` existence
-    //    which produced a footgun for MSI users:
+    //    Originally a single existence check (`legacy.exists()`).
+    //    Tightened in v0.1.34 to `legacy.join("node.db").exists()`.
+    //    Removed entirely on Windows in v0.1.36 because the
+    //    cwd-relative semantics interact badly with every Windows
+    //    launch context — Start-menu-shortcut WorkingDirectory,
+    //    Explorer double-click, MSI Finish-dialog cmd, PowerShell —
+    //    all set cwd differently, and stale `<cwd>/data/node.db`
+    //    files from previous buggy versions (or from running the
+    //    binary out of a project repo, or from a `.bat` on Desktop)
+    //    would override the platform default and route writes into
+    //    locations the user can't write to (e.g. UAC-filtered
+    //    Program Files\... while running as a "non-elevated admin").
     //
-    //      - User puts the test .bat or any random binary on their
-    //        Desktop where they happen to have a folder named "data"
-    //        (from some other project, or auto-created by an earlier
-    //        confused invocation, or whatever).
-    //      - cwd at launch = Desktop. `./data` resolves to
-    //        `C:\Users\<x>\Desktop\data` and exists.
-    //      - data_dir returns `./data`. Config::load reads
-    //        `./data/node.db` — doesn't exist — needs_setup=true,
-    //        wizard re-runs.
-    //      - find_tool looks for ffmpeg at `./data/ffmpeg/bin/ffmpeg.exe`
-    //        — doesn't exist — falls through to bare "ffmpeg" — PATH
-    //        search fails — `Io error: program not found`.
-    //      - Meanwhile the REAL data is at C:\ProgramData\SourceBoxSentry
-    //        with node.db + ffmpeg/ all present and the binary just
-    //        ignores it.
+    //    The footgun history:
+    //      v0.1.20-v0.1.33: any `./data/` folder hijacked.
+    //      v0.1.34: required `./data/node.db` — better, but still
+    //        broken when stale node.db files squat in old install
+    //        directories (the MSI uninstaller doesn't remove
+    //        runtime-created files).
+    //      v0.1.36: Windows always uses the platform default (step 3).
+    //        cargo-build dev users on Windows can override with
+    //        SOURCEBOX_SENTRY_DATA_DIR.
     //
-    //    Requiring `node.db` inside `./data` anchors the legacy check to
-    //    actual CloudNode state, not a coincidentally-named directory.
-    //    Cargo-build dev workflows are unaffected: their `./data` always
-    //    has node.db once setup has run there. Empty or unrelated
-    //    `./data` folders fall through to the platform default.
-    let legacy = PathBuf::from("./data");
-    if legacy.join("node.db").exists() {
-        return legacy;
+    //    Linux/macOS keep the legacy check because cwd is much more
+    //    predictable in those environments (one shell, no Start menu
+    //    shortcuts) and cargo-build dev workflows depend on it.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let legacy = PathBuf::from("./data");
+        if legacy.join("node.db").exists() {
+            return legacy;
+        }
     }
 
     // 3. Platform default.

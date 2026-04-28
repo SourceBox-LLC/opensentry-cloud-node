@@ -605,8 +605,21 @@ fn machine_id() -> std::result::Result<String, String> {
         // HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid — present on every
         // Windows install since Vista. Read via `reg query` so we don't pull
         // in a Windows-only registry crate.
+        //
+        // Use the absolute path under %SystemRoot%\System32 instead of
+        // relying on PATH resolution.  PATH-based resolution can be hijacked
+        // if a malicious `reg.exe` is dropped earlier in the search order
+        // (cwd, %USERPROFILE%, etc.); since this call returns the master
+        // value used to derive the AES key for the on-disk config, a
+        // compromised `reg.exe` would let an attacker control the encryption
+        // key.  Resolving %SystemRoot% via env var (not hardcoded
+        // C:\Windows\) keeps it robust against unusual Windows installs
+        // that put the OS on a non-default drive.
         use std::process::Command;
-        let output = Command::new("reg")
+        let system_root = std::env::var("SystemRoot")
+            .unwrap_or_else(|_| r"C:\Windows".to_string());
+        let reg_exe = format!(r"{}\System32\reg.exe", system_root);
+        let output = Command::new(&reg_exe)
             .args([
                 "query",
                 r"HKLM\SOFTWARE\Microsoft\Cryptography",
@@ -614,7 +627,7 @@ fn machine_id() -> std::result::Result<String, String> {
                 "MachineGuid",
             ])
             .output()
-            .map_err(|e| format!("reg query failed: {}", e))?;
+            .map_err(|e| format!("{} failed: {}", reg_exe, e))?;
         if !output.status.success() {
             return Err(format!(
                 "reg query exited with status {}",
@@ -637,11 +650,18 @@ fn machine_id() -> std::result::Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         // IOPlatformUUID from the IOKit registry.
+        //
+        // Same threat model as the Windows reg.exe lookup above:
+        // PATH-based binary resolution can be hijacked, and this call
+        // produces the master value used to derive the AES key for
+        // the on-disk config.  Use the canonical absolute path
+        // /usr/sbin/ioreg (stable since Mac OS X 10.0) rather than
+        // letting `$PATH` decide which `ioreg` to invoke.
         use std::process::Command;
-        let output = Command::new("ioreg")
+        let output = Command::new("/usr/sbin/ioreg")
             .args(["-rd1", "-c", "IOPlatformExpertDevice"])
             .output()
-            .map_err(|e| format!("ioreg failed: {}", e))?;
+            .map_err(|e| format!("/usr/sbin/ioreg failed: {}", e))?;
         if !output.status.success() {
             return Err(format!("ioreg exited with status {}", output.status));
         }

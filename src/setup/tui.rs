@@ -443,11 +443,31 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
         .with_placeholder(default_url)
         .with_default(default_url)
         .with_validator(|input: &str| {
-            if input.starts_with("http://") || input.starts_with("https://") {
+            // HTTPS is required for production Command Centers — the API
+            // key travels in headers and must not go over the wire in
+            // plaintext.  We carve out an exception for `http://localhost`
+            // and `http://127.0.0.1` so dev workflows running a local
+            // Command Center on plain HTTP keep working (the loopback
+            // interface never leaves the host).
+            //
+            // Rejecting plain http:// for any other host closes a real
+            // footgun: an operator who fat-fingers `http://` in front of
+            // a public Command Center URL would silently ship their API
+            // key over an unencrypted connection.  Better to fail loudly
+            // at setup than to leak credentials in transit.
+            if input.starts_with("https://") {
                 Ok(Validation::Valid)
+            } else if input.starts_with("http://localhost")
+                || input.starts_with("http://127.0.0.1")
+            {
+                Ok(Validation::Valid)
+            } else if input.starts_with("http://") {
+                Ok(Validation::Invalid(
+                    "Plain http:// is only allowed for localhost. Use https:// for production Command Centers — the API key travels in request headers and must not go over the wire unencrypted.".into(),
+                ))
             } else {
                 Ok(Validation::Invalid(
-                    "Must start with http:// or https://".into(),
+                    "Must start with https:// (or http://localhost for local dev)".into(),
                 ))
             }
         })

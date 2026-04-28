@@ -235,12 +235,26 @@ fn prompt_and_install_ffmpeg(platform: &PlatformInfo) -> Result<()> {
         println!();
 
         let pb = ProgressBar::new(0);
+        // Narrower bar than the obvious 40-char default: a 24-char bar
+        // keeps the rendered line under ~75 chars even with the
+        // "Downloading FFmpeg..." message, so a user resizing the
+        // terminal mid-download (e.g. snapping the window to half-screen)
+        // doesn't push indicatif's redraw past the new viewport width
+        // and leave residue on the previous (now wider) line.
+        //
+        // Throttling redraws to 10 fps via stderr_with_hz adds the
+        // second half of the fix: indicatif's default "redraw on every
+        // set_position" can fire ~1500 times per 100 MB download, which
+        // outpaces a Windows console's ability to clean the previous
+        // line if a SIGWINCH-equivalent fires mid-burst. 10 fps is
+        // visually smooth and gives every redraw a clean slate.
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("  {spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}")
+                .template("  {spinner:.cyan} [{bar:24.cyan/blue}] {bytes}/{total_bytes} {msg}")
                 .expect("valid template")
                 .progress_chars("█▉▊▋▌▍▎▏ "),
         );
+        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr_with_hz(10));
 
         match super::ffmpeg_installer::install(&pb) {
             Ok(path) => {

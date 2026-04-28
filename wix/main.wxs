@@ -140,11 +140,85 @@
             Impersonate='no'
             Return='ignore' />
 
+        <!-- ========================================================
+             Launch setup wizard from the Finish dialog
+             ========================================================
+             Standard "run app on first install" pattern. The exit
+             dialog gets an optional checkbox; if the user leaves it
+             checked (default Yes) and clicks Finish, this CustomAction
+             fires and spawns the setup wizard in a new console window.
+
+             Why cmd.exe /c start vs invoking the exe directly:
+               - `start` detaches the spawned process from the
+                 installer's process tree. cmd.exe returns
+                 immediately, the MSI install transaction completes
+                 cleanly, and the spawned wizard owns its own console
+                 window with a meaningful title.
+               - Invoking the exe directly via FileKey/ExeCommand
+                 would have the wizard inherit the MSI installer's
+                 stdin/stdout, which doesn't have a Window Station
+                 attached during deferred custom action execution —
+                 the TUI's crossterm raw-mode init would fail.
+
+             Impersonate='yes' runs the wizard as the original user
+             (the one who clicked Run on the MSI), inheriting their
+             elevated token from the UAC prompt that started the
+             install. Setup wizard needs admin to write
+             %ProgramData%\OpenSentry\node.db, which an admin-elevated
+             session can do.
+
+             Return='asyncNoWait' lets the MSI's "Install successful"
+             dialog finish promptly without waiting for the wizard to
+             exit (which would be many minutes if the user pauses on
+             a prompt). -->
+        <CustomAction
+            Id='LaunchSetup'
+            Directory='APPLICATIONFOLDER'
+            ExeCommand='cmd.exe /c start "OpenSentry CloudNode Setup" "[#filServiceExe]" setup'
+            Execute='immediate'
+            Impersonate='yes'
+            Return='asyncNoWait' />
+
         <InstallExecuteSequence>
             <Custom Action='WipeProgramData' After='InstallInitialize'>
                 REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
             </Custom>
         </InstallExecuteSequence>
+
+        <!-- ========================================================
+             Polished install UI (WixUI_Minimal)
+             ========================================================
+             Welcome+License combined dialog → Install → Finish.
+             "Minimal" is the right scope for our use case: no feature
+             selection (we only have one feature), no install-location
+             customisation (per-machine install always lands in
+             %ProgramFiles%, no good reason to relocate), no advanced
+             options. Just enough UI to look like a real product
+             instead of a faceless silent install.
+
+             The exit dialog includes the optional checkbox controlled
+             by the WIXUI_EXITDIALOGOPTIONALCHECKBOX* properties below.
+             A <Publish> element ties the checkbox state to the
+             LaunchSetup CustomAction. -->
+        <UIRef Id='WixUI_Minimal' />
+
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
+
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT'
+                  Value='Run setup wizard now (configures Node ID + API key)' />
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX' Value='1' />
+
+        <UI>
+            <!-- Wire the exit-dialog checkbox to LaunchSetup. The
+                 condition gates on the checkbox being set AND this
+                 not being a re-install (Installed = empty means
+                 first install; Installed = "1" means a repair / MSI
+                 re-run, where launching the wizard is unwelcome). -->
+            <Publish Dialog='ExitDialog'
+                     Control='Finish'
+                     Event='DoAction'
+                     Value='LaunchSetup'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+        </UI>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' />
 

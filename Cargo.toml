@@ -5,7 +5,7 @@
 # should reflect that. Going from `opensentry-cloudnode` to
 # `sourcebox-sentry-cloudnode` keeps the binary name explicit + branded.
 name = "sourcebox-sentry-cloudnode"
-version = "0.1.28"
+version = "0.1.29"
 edition = "2021"
 authors = ["SourceBox LLC"]
 description = "SourceBox Sentry CloudNode — turns a USB webcam into a cloud-connected security camera."
@@ -112,7 +112,32 @@ tempfile = "3"
 [profile.release]
 opt-level = 3
 lto = true
-strip = true
+# strip = "debuginfo" instead of "symbols" / true
+#
+# `strip = true` is equivalent to `strip = "symbols"`, which removes
+# the entire COFF symbol table along with debuginfo. On Windows MSVC
+# that breaks two things we want for a service binary:
+#
+#   1. Windows Error Reporting (WER) writes Application Error events
+#      with the faulting module + offset; without symbols, the offset
+#      is into a blob of unnamed code and can't be matched back to a
+#      function. A service that crashes silently with no symbol info
+#      is essentially undebuggable post-mortem.
+#
+#   2. Stack traces produced by `panic = "unwind"` need symbols to
+#      resolve frame names. With `strip = "symbols"` they're empty.
+#
+# `strip = "debuginfo"` keeps the symbol table (small — symbols are
+# names, ~10s of KB for our binary) and only drops the debuginfo
+# sections (which are the bulk of debug bloat, MBs). That's the right
+# trade-off for a release service binary: small enough to ship,
+# debuggable when something goes wrong on a customer machine.
+strip = "debuginfo"
+# Generate line tables (function name + file/line) but not full
+# debuginfo. WER and `windbg` use this to produce readable crash
+# traces. ~1 MB of binary growth, worth every byte for a binary
+# that runs as a Windows Service with no console for live debugging.
+debug = 1
 
 # ── cargo-wix MSI build configuration ───────────────────────────────
 #

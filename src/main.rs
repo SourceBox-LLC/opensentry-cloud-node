@@ -572,22 +572,75 @@ fn start_msi_service_after_setup() -> Result<()> {
 
     match output {
         Ok(out) if out.status.success() => {
-            println!("  {}  Service started.", "✓".green().bold());
-            println!();
-            println!("  Your camera should appear in the Command Center dashboard");
-            println!("  within ~30 seconds. To make the service survive reboots,");
-            println!("  flip it to auto-start (one time, from an admin PowerShell):");
-            println!();
-            println!(
-                "    {}",
-                format!(
-                    "Set-Service -Name {} -StartupType Automatic",
-                    SERVICE_NAME
-                )
-                .cyan()
-            );
-            println!();
-            Ok(())
+            // sc.exe start returns success the moment SCM accepts the
+            // start request — i.e., the service transitioned to
+            // START_PENDING. NOT when it transitioned to RUNNING. If
+            // the service crashes during init, sc.exe still returns 0
+            // and we'd report "✓ Service started" while the service is
+            // actually dead. Fixed in v0.1.29 by polling sc query for
+            // the RUNNING state before declaring success.
+            //
+            // Poll budget: 10 seconds total, 500ms intervals. The
+            // service's `init_file_logging` + `load_and_validate_config`
+            // + initial Node::new steps complete in <2s on a healthy
+            // install; 10s is generous. If we don't see RUNNING by
+            // then, something's wrong and we should say so.
+            let running = poll_service_until_running(SERVICE_NAME, 20, 500);
+            if running {
+                println!("  {}  Service started and running.", "✓".green().bold());
+                println!();
+                println!("  Your camera should appear in the Command Center dashboard");
+                println!("  within ~30 seconds. To make the service survive reboots,");
+                println!("  flip it to auto-start (one time, from an admin PowerShell):");
+                println!();
+                println!(
+                    "    {}",
+                    format!(
+                        "Set-Service -Name {} -StartupType Automatic",
+                        SERVICE_NAME
+                    )
+                    .cyan()
+                );
+                println!();
+                Ok(())
+            } else {
+                // sc.exe accepted the start but the service didn't
+                // transition to RUNNING within the poll window. It
+                // might still be starting (slow disk, AV scan), or it
+                // might have crashed silently. Either way, don't lie
+                // about success — point the operator at the diagnostic
+                // file we now write defensively in service.rs.
+                println!(
+                    "  {}  sc.exe accepted the start request but the service has not",
+                    "⚠".yellow().bold()
+                );
+                println!("    transitioned to Running within 10s.");
+                println!();
+                println!("  Diagnostic checklist:");
+                println!();
+                println!(
+                    "    1. Check the service status:  {}",
+                    format!("Get-Service {}", SERVICE_NAME).cyan()
+                );
+                println!(
+                    "    2. Read the early trace file:  {}",
+                    "Get-Content C:\\sourcebox-service-trace.txt".cyan()
+                );
+                println!(
+                    "    3. Read the structured diag:  {}",
+                    "Get-Content C:\\ProgramData\\SourceBoxSentry\\fatal-startup-error.txt".cyan()
+                );
+                println!(
+                    "    4. Check the SCM event log:   {}",
+                    format!(
+                        "Get-WinEvent -FilterHashtable @{{LogName='System'; ProviderName='Service Control Manager'}} -MaxEvents 5 | Where-Object {{$_.Message -like '*{}*'}}",
+                        SERVICE_NAME
+                    )
+                    .cyan()
+                );
+                println!();
+                Ok(())
+            }
         }
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -655,6 +708,59 @@ fn start_msi_service_after_setup() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Poll `sc query <name>` up to `max_attempts` times with `interval_ms`
+/// between checks, returning true once the service shows STATE 4
+/// (RUNNING). Returns false if it stays in any other state through the
+/// whole budget.
+///
+/// Why poll vs. blocking on a service-status notification: SCM offers
+/// `NotifyServiceStatusChangeW` for asynchronous status delivery, but
+/// it requires an APC pump on the calling thread which complicates the
+/// otherwise-synchronous setup-completion code path. Polling sc query
+/// is ~10ms per call and the post-setup window is brief enough that
+/// the cost is invisible.
+///
+/// Why parse stdout instead of using `service_manager` from
+/// windows-service: that crate's `query_status` requires SC_MANAGER
+/// handles + ServiceAccess plumbing for what's a one-shot read of a
+/// status enum. sc.exe is already in the binary's call path
+/// (start_msi_service_after_setup uses it) and its output format is
+/// stable across all supported Windows versions.
+#[cfg(target_os = "windows")]
+fn poll_service_until_running(
+    service_name: &str,
+    max_attempts: u32,
+    interval_ms: u64,
+) -> bool {
+    for _ in 0..max_attempts {
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+        let output = std::process::Command::new("sc.exe")
+            .args(["query", service_name])
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // sc query stdout includes a line like:
+            //   "        STATE              : 4  RUNNING"
+            // — the leading number (1=STOPPED, 2=START_PENDING,
+            // 3=STOP_PENDING, 4=RUNNING, 5=CONTINUE_PENDING,
+            // 6=PAUSE_PENDING, 7=PAUSED) is what we're matching. The
+            // textual name is also parseable but the numeric form is
+            // less locale-sensitive.
+            if stdout.contains("STATE") && stdout.contains("4  RUNNING") {
+                return true;
+            }
+            // Detect terminal failure states early so we don't waste
+            // the rest of the budget polling a service that's already
+            // gone Stopped.
+            if stdout.contains("1  STOPPED") {
+                // Service crashed during start; no point continuing.
+                return false;
+            }
+        }
+    }
+    false
 }
 
 fn uninstall_cloudnode(force: bool) -> Result<()> {

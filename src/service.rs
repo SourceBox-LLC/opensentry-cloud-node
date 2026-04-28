@@ -96,40 +96,142 @@ pub fn run() -> windows_service::Result<()> {
 /// — the dispatcher just notes the exit — so we log to file before
 /// returning.
 fn service_main(arguments: Vec<OsString>) {
-    // diag(v0.1.28): prove service_main was actually invoked by the
-    // dispatcher. Previous diag at the main.rs layer showed
-    // service::run() returning Ok with no service_main entry
-    // logged, suggesting StartServiceCtrlDispatcherW returned
-    // success WITHOUT dispatching. Putting a write here as the
-    // very first action confirms or refutes that.
+    // ── Layer 1: hardcoded-path file write, ABSOLUTE first action ──
+    //
+    // The previous v0.1.27/v0.1.28 diag showed
+    // service_dispatcher::start returning Ok with no entry from
+    // inside service_main. Per Win32 contract, that's only possible
+    // if service_main DID run but exited without observable side
+    // effects. The leading hypothesis: an SEH exception (NOT a Rust
+    // panic) inside the macro-generated FFI shim's pointer
+    // arithmetic, OR a Rust panic on the SCM-spawned worker thread
+    // that doesn't trigger the global panic hook because the thread
+    // wasn't created by std::thread.
+    //
+    // Guard against both by using a hardcoded absolute path that
+    // doesn't depend on env vars, paths::data_dir(), or any of the
+    // infrastructure that might not work on alien threads. If
+    // service_main is reached at all, this line lands.
+    let _ = std::fs::write(
+        r"C:\sourcebox-service-trace.txt",
+        format!(
+            "[{}] service_main entered with {} arg(s): {:?}\n",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            arguments.len(),
+            arguments
+        ),
+    );
+
+    // ── Layer 2: Win32 OutputDebugStringW ──
+    //
+    // Visible in DebugView even when filesystem writes fail (e.g.
+    // disk full, ACL deny). Pure syscall, no Rust runtime
+    // dependencies. Last-resort observability channel.
+    emit_debug_string("[sourcebox-sentry-cloudnode] service_main entered");
+
+    // ── Layer 3: standard diag (matches v0.1.27/v0.1.28 trace format) ──
     write_diag_step(&format!(
         "service_main entered with {} arg(s): {:?}",
         arguments.len(),
         arguments
     ));
 
-    if let Err(e) = run_service() {
-        // Two-layer error reporting because the failure mode of the
-        // first layer (`init_file_logging` itself failing) silently
-        // dropped errors before this fallback existed:
-        //
-        //   1. tracing::error!  — works only if init_file_logging
-        //      succeeded. If it failed, this macro has no installed
-        //      subscriber and the line goes nowhere.
-        //   2. eprintln!         — services have no console, so this
-        //      also goes nowhere unless a debugger is attached.
-        //   3. write_fatal_startup_error  — synchronous file write,
-        //      no tracing dependency, guaranteed audit trail.
-        //
-        // Prior to layer 3, an init_file_logging failure made the
-        // service silently exit with services.msc reporting "started
-        // and immediately stopped" and nothing in any log to explain.
-        tracing::error!("Service exited with error: {}", e);
-        eprintln!("Service error: {}", e);
-        write_diag_step(&format!("run_service returned Err: {}", e));
-        write_fatal_startup_error(&format!("{}", e));
-    } else {
-        write_diag_step("run_service returned Ok (clean SCM shutdown)");
+    // ── Layer 4: catch_unwind around the body ──
+    //
+    // Rust panics in service_main propagate UP through the
+    // macro-generated `extern "system" fn ffi_service_main`. Crossing
+    // the FFI boundary with an unwinding panic is documented UB. With
+    // the default panic="unwind" setting that UB tends to manifest as
+    // "process aborts cleanly with no error reporting" — exactly what
+    // we've been seeing.
+    //
+    // catch_unwind catches the panic BEFORE it crosses the FFI
+    // boundary, lets us format the payload + log it, then we return
+    // normally so the dispatcher gets a clean exit. Wrapping in
+    // AssertUnwindSafe because run_service captures &mut state
+    // through closures for the SCM control handler — the wrap is
+    // load-bearing for the closure to typecheck even though our
+    // actual usage is unwind-safe.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_service()));
+
+    match result {
+        Ok(Ok(())) => {
+            write_diag_step("run_service returned Ok (clean SCM shutdown)");
+            emit_debug_string("[sourcebox-sentry-cloudnode] run_service returned Ok");
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Service exited with error: {}", e);
+            eprintln!("Service error: {}", e);
+            write_diag_step(&format!("run_service returned Err: {}", e));
+            write_fatal_startup_error(&format!("{}", e));
+            emit_debug_string(&format!(
+                "[sourcebox-sentry-cloudnode] run_service Err: {}",
+                e
+            ));
+        }
+        Err(panic_payload) => {
+            // catch_unwind got a panic. Format the payload defensively
+            // — the payload type is &str, String, or Box<Any> depending
+            // on what panicked.
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "panic payload not a string (Box<Any>)".to_string()
+            };
+            write_diag_step(&format!("run_service PANICKED: {}", msg));
+            write_fatal_startup_error(&format!("PANIC in run_service: {}", msg));
+            emit_debug_string(&format!(
+                "[sourcebox-sentry-cloudnode] run_service PANIC: {}",
+                msg
+            ));
+            // Don't re-raise — let service_main return normally so the
+            // dispatcher exits cleanly. SCM will report the service as
+            // stopped (no SetServiceStatus(Running) was sent so it
+            // never showed Running anyway).
+        }
+    }
+
+    // ── Final layer: write that we're returning from service_main ──
+    let _ = std::fs::write(
+        r"C:\sourcebox-service-trace-end.txt",
+        format!(
+            "[{}] service_main returning\n",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ),
+    );
+}
+
+/// Win32 OutputDebugStringW wrapper. Visible to attached debuggers
+/// AND tools like Sysinternals DebugView, even when filesystem and
+/// tracing are unavailable. Used as a last-resort diagnostic channel
+/// in the service entry path.
+///
+/// The wide-string conversion uses null-terminated UTF-16 because
+/// that's what OutputDebugStringW requires. Allocating in this
+/// function is acceptable — if we're at the point where we need
+/// emit_debug_string to work, the cost of a Vec<u16> alloc is the
+/// least of our concerns.
+fn emit_debug_string(message: &str) {
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn OutputDebugStringW(lpOutputString: *const u16);
+    }
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(message)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        OutputDebugStringW(wide.as_ptr());
     }
 }
 

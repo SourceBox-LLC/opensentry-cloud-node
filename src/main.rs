@@ -146,15 +146,85 @@ fn run() -> Result<()> {
     // SCM invokes us as `sourcebox-sentry-cloudnode.exe service`. From here we
     // hand off to the windows-service dispatcher which blocks until the
     // service exits. Don't reach the terminal-check or interactive flow.
+    //
+    // Install a panic hook + dispatcher-error capture BEFORE doing anything
+    // else: if the dispatcher itself fails, or anything in the service
+    // body panics across the FFI boundary, the only error-reporting paths
+    // are stderr (no console) and SCM's "Win32 exit code 1" (useless).
+    // Writing to fatal-startup-error.txt before that happens means an
+    // operator can actually diagnose what went wrong.
     #[cfg(target_os = "windows")]
     if matches!(args.command, Some(Commands::Service)) {
-        sourcebox_sentry_cloudnode::service::run().map_err(|e| {
-            sourcebox_sentry_cloudnode::Error::Unknown(format!(
-                "Service dispatcher failed: {}",
-                e
-            ))
-        })?;
-        return Ok(());
+        // Best-effort write to ProgramData fatal-startup-error.txt with
+        // the same dual-fallback strategy service.rs uses, but reachable
+        // even when the service-body never ran.
+        fn write_service_diag(message: &str) {
+            use std::io::Write;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let line = format!(
+                "[{}] sourcebox-sentry-cloudnode service path: {}\n",
+                timestamp, message
+            );
+            let candidates = [
+                std::path::PathBuf::from(r"C:\ProgramData\SourceBoxSentry")
+                    .join("fatal-startup-error.txt"),
+                std::env::temp_dir()
+                    .join("sourcebox-sentry-cloudnode-fatal-startup-error.txt"),
+            ];
+            for path in &candidates {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    if f.write_all(line.as_bytes()).is_ok() {
+                        return;
+                    }
+                }
+            }
+        }
+
+        write_service_diag(&format!(
+            "service subcommand reached main.rs (v{})",
+            env!("CARGO_PKG_VERSION")
+        ));
+
+        // Panic hook: rust panics across the FFI boundary inside
+        // service_dispatcher are UB and can abort the process before
+        // service_main's own error handler ever runs. Catch panics
+        // here and dump them to disk so the operator has SOMETHING.
+        std::panic::set_hook(Box::new(|info| {
+            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            let location = info
+                .location()
+                .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_default();
+            write_service_diag(&format!("PANIC: {}{}", msg, location));
+        }));
+
+        match sourcebox_sentry_cloudnode::service::run() {
+            Ok(()) => {
+                write_service_diag("service::run returned Ok — clean shutdown");
+                return Ok(());
+            }
+            Err(e) => {
+                let msg = format!("service::run returned Err: {}", e);
+                write_service_diag(&msg);
+                return Err(sourcebox_sentry_cloudnode::Error::Unknown(msg));
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     if matches!(args.command, Some(Commands::Service)) {

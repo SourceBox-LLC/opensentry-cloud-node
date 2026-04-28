@@ -287,41 +287,35 @@ fn run() -> Result<()> {
         };
 
         if let Some((url, node_id, key)) = quick_args {
-            // Non-interactive quick setup
+            // Non-interactive quick setup. Save config, then run the
+            // node in the foreground in the same console.
             init_logging(&args.log_level);
             sourcebox_sentry_cloudnode::setup::run_quick_setup(&url, &node_id, &key)?;
-            // Same MSI-vs-foreground decision as the interactive path below.
-            #[cfg(target_os = "windows")]
-            {
-                if is_msi_install() {
-                    return start_msi_service_after_setup();
-                }
-            }
             return run_cloudnode(None, None, None, args.once, args.config);
         }
 
         // Interactive TUI setup with logging completely suppressed.
+        //
+        // After the wizard completes, hand control to `run_cloudnode`
+        // which takes over the same console with the live TUI dashboard
+        // (cameras, logs, streaming counters). This is the same
+        // foreground path the cargo-build / Linux installs already
+        // use — there's no reason for the MSI install to behave
+        // differently.
+        //
+        // History: v0.1.26 routed MSI installs through
+        // start_msi_service_after_setup, which called sc.exe start to
+        // launch the SourceBoxSentryCloudNode Windows Service. That
+        // service has been broken since at least v0.1.22 in a way we
+        // can't diagnose — four defensive instrumentation builds
+        // (v0.1.27-v0.1.30) all produced zero trace output, suggesting
+        // the binary never reaches user-space code when SCM launches
+        // it. The service registration stays in place (WiX still
+        // registers it) for a future fix; in the meantime, the
+        // foreground path is the proper Windows desktop-app pattern
+        // — same as Discord, OBS, Spotify — and gets cameras
+        // streaming immediately.
         let auto_start = sourcebox_sentry_cloudnode::setup::run_setup()?;
-
-        // On Windows MSI installs, the binary the user just ran is also
-        // registered as the SourceBoxSentryCloudNode Windows Service.
-        // Setup wrote the config; the *service* is what actually streams
-        // video to Command Center. Running this same binary in the
-        // foreground from the post-setup console would:
-        //   - Conflict with the service if it ever starts
-        //   - Die when the user closes the console window
-        //   - Not survive a reboot
-        // None of those match what the operator expects after clicking
-        // through an MSI installer. So for MSI installs we kick off the
-        // service via sc.exe and exit cleanly — the service takes over
-        // from there. For source / cargo / Linux / Docker installs the
-        // foreground path below is still correct.
-        #[cfg(target_os = "windows")]
-        {
-            if is_msi_install() {
-                return start_msi_service_after_setup();
-            }
-        }
 
         if !auto_start {
             println!("\n  Press Enter to start CloudNode...");
@@ -354,16 +348,10 @@ fn run() -> Result<()> {
             unreachable!("Service subcommand handled before reaching this match");
         }
         None => {
-            // Bare invocation with credentials already on disk. Same
-            // logic as the post-setup branch above: on an MSI install
-            // the *service* is what should stream, so kick that off
-            // instead of running the node in this transient console.
-            #[cfg(target_os = "windows")]
-            {
-                if is_msi_install() {
-                    return start_msi_service_after_setup();
-                }
-            }
+            // Bare invocation with credentials already on disk: just
+            // run the node in the foreground. Same path as cargo-build
+            // / Linux / Docker installs already use. The TUI dashboard
+            // takes over the console.
             run_cloudnode(args.node_id, args.api_key, args.api_url, args.once, args.config)?;
         }
     }
@@ -519,329 +507,6 @@ fn is_msi_install() -> bool {
     false
 }
 
-/// Kick off the Windows Service after a successful MSI-context setup.
-///
-/// The MSI registers `SourceBoxSentryCloudNode` as a Windows Service
-/// pointing at the same exe the operator just ran setup with. After
-/// setup writes credentials to `%ProgramData%\SourceBoxSentry\node.db`,
-/// the service is the right place for the actual node logic to live —
-/// it runs as LocalSystem (USB camera + ProgramData write access),
-/// it can be set to auto-start on boot, and it doesn't die when the
-/// post-install console window closes.
-///
-/// The previous behaviour was to fall through to `run_cloudnode` after
-/// setup, which spun up a foreground node in the install console. That
-/// console gets closed approximately one second after the user reads
-/// the success screen, killing the node — and the actual service was
-/// still in Stopped state, so the dashboard never saw a heartbeat. The
-/// effect was "setup completes, dashboard says PENDING forever." This
-/// function fixes that.
-///
-/// On non-MSI installs (cargo build, Linux, Docker) the foreground
-/// `run_cloudnode` is correct — the binary IS the node, there's no
-/// service to delegate to. The caller gates on `is_msi_install()`
-/// before invoking this.
-#[cfg(target_os = "windows")]
-fn start_msi_service_after_setup() -> Result<()> {
-    use colored::Colorize;
-    use sourcebox_sentry_cloudnode::service::SERVICE_NAME;
-
-    println!();
-    println!(
-        "  {}  Starting {} service...",
-        "⚙".cyan(),
-        SERVICE_NAME.cyan().bold()
-    );
-    println!();
-
-    // sc.exe start <name>: tells the SCM to transition the service to
-    // START_PENDING / RUNNING. Returns 0 on success, non-zero with a
-    // Win32 error code in stdout/stderr on failure.
-    //
-    // Using sc.exe (built-in, always present) rather than the
-    // windows-service crate's ServiceManager because:
-    //   - sc.exe is the canonical operator-facing tool; the error
-    //     messages it prints match what users will see if they later
-    //     run `sc query` themselves.
-    //   - The windows-service crate would add a dependency on
-    //     ServiceManagerAccess + ServiceAccess flag plumbing for what
-    //     amounts to one shell-out.
-    let output = std::process::Command::new("sc.exe")
-        .args(["start", SERVICE_NAME])
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            // sc.exe start returns success the moment SCM accepts the
-            // start request — i.e., the service transitioned to
-            // START_PENDING. NOT when it transitioned to RUNNING. If
-            // the service crashes during init, sc.exe still returns 0
-            // and we'd report "✓ Service started" while the service is
-            // actually dead. Fixed in v0.1.29 by polling sc query for
-            // the RUNNING state before declaring success.
-            //
-            // Poll budget: 10 seconds total, 500ms intervals. The
-            // service's `init_file_logging` + `load_and_validate_config`
-            // + initial Node::new steps complete in <2s on a healthy
-            // install; 10s is generous. If we don't see RUNNING by
-            // then, something's wrong and we should say so.
-            let running = poll_service_until_running(SERVICE_NAME, 20, 500);
-            if running {
-                println!("  {}  Service started and running.", "✓".green().bold());
-                println!();
-                println!("  Your camera should appear in the Command Center dashboard");
-                println!("  within ~30 seconds. To make the service survive reboots,");
-                println!("  flip it to auto-start (one time, from an admin PowerShell):");
-                println!();
-                println!(
-                    "    {}",
-                    format!(
-                        "Set-Service -Name {} -StartupType Automatic",
-                        SERVICE_NAME
-                    )
-                    .cyan()
-                );
-                println!();
-                Ok(())
-            } else {
-                // sc.exe accepted the start but the service didn't
-                // transition to RUNNING within the poll window. It
-                // might still be starting (slow disk, AV scan), or it
-                // might have crashed silently. Either way, don't lie
-                // about success — point the operator at the diagnostic
-                // file we now write defensively in service.rs.
-                println!(
-                    "  {}  sc.exe accepted the start request but the service has not",
-                    "⚠".yellow().bold()
-                );
-                println!("    transitioned to Running within 10s.");
-                println!();
-                println!("  Diagnostic checklist:");
-                println!();
-                println!(
-                    "    1. Check the service status:  {}",
-                    format!("Get-Service {}", SERVICE_NAME).cyan()
-                );
-                println!(
-                    "    2. Read the early trace file:  {}",
-                    "Get-Content C:\\sourcebox-service-trace.txt".cyan()
-                );
-                println!(
-                    "    3. Read the structured diag:  {}",
-                    "Get-Content C:\\ProgramData\\SourceBoxSentry\\fatal-startup-error.txt".cyan()
-                );
-                println!(
-                    "    4. Check the SCM event log:   {}",
-                    format!(
-                        "Get-WinEvent -FilterHashtable @{{LogName='System'; ProviderName='Service Control Manager'}} -MaxEvents 5 | Where-Object {{$_.Message -like '*{}*'}}",
-                        SERVICE_NAME
-                    )
-                    .cyan()
-                );
-                println!();
-                Ok(())
-            }
-        }
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-
-            // 1056 = ERROR_SERVICE_ALREADY_RUNNING. Common when the
-            // operator re-runs setup on a node that's already up — not
-            // really an error, just guidance on how to pick up the new
-            // config.
-            let already_running =
-                stdout.contains("1056") || stderr.contains("1056");
-
-            if already_running {
-                println!(
-                    "  {}  Service is already running.",
-                    "ℹ".cyan().bold()
-                );
-                println!();
-                println!("  Restart it to pick up the new configuration:");
-                println!();
-                println!(
-                    "    {}",
-                    format!("Restart-Service {}", SERVICE_NAME).cyan()
-                );
-                println!();
-            } else {
-                println!(
-                    "  {}  Could not start the service automatically.",
-                    "⚠".yellow().bold()
-                );
-                println!();
-                let msg = format!("{}{}", stdout.trim(), stderr.trim());
-                if !msg.is_empty() {
-                    println!("  sc.exe said: {}", msg.dimmed());
-                    println!();
-                }
-                println!("  Start it manually from an admin PowerShell:");
-                println!();
-                println!(
-                    "    {}",
-                    format!("Start-Service {}", SERVICE_NAME).cyan()
-                );
-                println!();
-            }
-            Ok(())
-        }
-        Err(e) => {
-            // sc.exe is a built-in Windows tool — failing to invoke
-            // it almost always means PATH was clobbered or the user is
-            // on a stripped-down Windows variant. Surface the error and
-            // fall back to manual instructions.
-            println!(
-                "  {}  Could not invoke sc.exe: {}",
-                "⚠".yellow().bold(),
-                e
-            );
-            println!();
-            println!("  Start the service manually from an admin PowerShell:");
-            println!();
-            println!(
-                "    {}",
-                format!("Start-Service {}", SERVICE_NAME).cyan()
-            );
-            println!();
-            Ok(())
-        }
-    }
-}
-
-/// Service-state codes returned by `QueryServiceStatus` and printed by
-/// `sc query`. Used by [`poll_service_until_running`] and
-/// [`query_service_state`] to compare states without locale-dependent
-/// string matching.
-#[cfg(target_os = "windows")]
-mod sc_state {
-    pub const STOPPED: u32 = 1;
-    #[allow(dead_code)]
-    pub const START_PENDING: u32 = 2;
-    #[allow(dead_code)]
-    pub const STOP_PENDING: u32 = 3;
-    pub const RUNNING: u32 = 4;
-}
-
-/// Parse the numeric state from `sc query` output without depending on
-/// the English keyword. The output format on every Windows locale is:
-///
-/// ```text
-///         STATE              : 4  RUNNING
-/// ```
-///
-/// — but the right-hand keyword (`RUNNING`, `STOPPED`, etc.) is
-/// translated on non-English Windows installs. The leading digit is
-/// universal. We match on the structural pattern: a line containing
-/// `STATE` followed by `:` followed by a digit.
-///
-/// Returns `None` if no STATE line is found (e.g. service not
-/// registered, sc.exe failed) — callers treat that as "transitional,
-/// keep polling."
-#[cfg(target_os = "windows")]
-fn query_service_state(service_name: &str) -> Option<u32> {
-    let output = std::process::Command::new("sc.exe")
-        .args(["query", service_name])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    for line in stdout.lines() {
-        // Look for a line that contains "STATE" and a colon. After the
-        // colon, skip whitespace, then read the first digit run as
-        // the state code. Whatever comes after the digit (the
-        // translated keyword + flags like "NOT_STOPPABLE") we ignore.
-        if !line.contains("STATE") {
-            continue;
-        }
-        let after_colon = match line.split_once(':') {
-            Some((_, rest)) => rest.trim_start(),
-            None => continue,
-        };
-        let digits: String = after_colon
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(state) = digits.parse::<u32>() {
-            return Some(state);
-        }
-    }
-    None
-}
-
-/// Poll `sc query <name>` until the service reaches STATE 4 (RUNNING).
-///
-/// Two-phase verification:
-///
-///   Phase 1: poll up to `max_attempts` times with `interval_ms`
-///   between checks, looking for transition to RUNNING. Bails fast if
-///   we observe STOPPED (means the service crashed during init).
-///
-///   Phase 2: after observing RUNNING, sleep `stability_ms` and
-///   re-query. Returns true only if the service is STILL RUNNING.
-///   Catches the "service flickers Running → Stopped during async
-///   init" failure mode: tokio runtime can transition the service to
-///   Running and then panic during `Node::new`, which would otherwise
-///   present as a false positive to the caller.
-///
-/// First poll runs IMMEDIATELY (no leading sleep) — on a fast machine
-/// the service can be RUNNING by the time `sc.exe start` returns. The
-/// sleep is in the loop tail, so we only pay it on transitional
-/// states.
-///
-/// Why poll instead of `NotifyServiceStatusChangeW`: that API requires
-/// an APC pump on the caller, which complicates the otherwise-
-/// synchronous setup-completion path. Polling is ~10ms per call and
-/// the post-setup verification window is brief enough that the cost
-/// is invisible.
-#[cfg(target_os = "windows")]
-fn poll_service_until_running(
-    service_name: &str,
-    max_attempts: u32,
-    interval_ms: u64,
-) -> bool {
-    let interval = std::time::Duration::from_millis(interval_ms);
-
-    // Phase 1: wait for transition to RUNNING.
-    let mut reached_running = false;
-    for attempt in 0..max_attempts {
-        if attempt > 0 {
-            std::thread::sleep(interval);
-        }
-        match query_service_state(service_name) {
-            Some(sc_state::RUNNING) => {
-                reached_running = true;
-                break;
-            }
-            Some(sc_state::STOPPED) => {
-                // Service has crashed back to STOPPED. No point
-                // burning the rest of the budget.
-                return false;
-            }
-            // START_PENDING / STOP_PENDING / unknown / no STATE line
-            // → keep polling.
-            _ => {}
-        }
-    }
-
-    if !reached_running {
-        return false;
-    }
-
-    // Phase 2: stability check. The service might have transitioned
-    // through RUNNING briefly during a `set_service_status(Running)`
-    // call inside service.rs::run_service that's followed by a
-    // synchronous panic during tokio runtime construction. Wait a few
-    // seconds and re-verify the service is STILL RUNNING.
-    //
-    // 3 seconds is enough to catch the common pattern (panic during
-    // Runtime::new() or Node::new() inside block_on, both of which
-    // happen within milliseconds of the Running transition) without
-    // making the post-setup wait obnoxiously long.
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    matches!(query_service_state(service_name), Some(sc_state::RUNNING))
-}
 
 fn uninstall_cloudnode(force: bool) -> Result<()> {
     use colored::Colorize;

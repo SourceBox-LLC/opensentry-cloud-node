@@ -95,7 +95,19 @@ pub fn run() -> windows_service::Result<()> {
 /// the SCM control channel. Errors here can't be `?`-ed up to a caller
 /// — the dispatcher just notes the exit — so we log to file before
 /// returning.
-fn service_main(_arguments: Vec<OsString>) {
+fn service_main(arguments: Vec<OsString>) {
+    // diag(v0.1.28): prove service_main was actually invoked by the
+    // dispatcher. Previous diag at the main.rs layer showed
+    // service::run() returning Ok with no service_main entry
+    // logged, suggesting StartServiceCtrlDispatcherW returned
+    // success WITHOUT dispatching. Putting a write here as the
+    // very first action confirms or refutes that.
+    write_diag_step(&format!(
+        "service_main entered with {} arg(s): {:?}",
+        arguments.len(),
+        arguments
+    ));
+
     if let Err(e) = run_service() {
         // Two-layer error reporting because the failure mode of the
         // first layer (`init_file_logging` itself failing) silently
@@ -114,7 +126,62 @@ fn service_main(_arguments: Vec<OsString>) {
         // and immediately stopped" and nothing in any log to explain.
         tracing::error!("Service exited with error: {}", e);
         eprintln!("Service error: {}", e);
+        write_diag_step(&format!("run_service returned Err: {}", e));
         write_fatal_startup_error(&format!("{}", e));
+    } else {
+        write_diag_step("run_service returned Ok (clean SCM shutdown)");
+    }
+}
+
+/// Step-level diagnostic write. Same dual-fallback behaviour as
+/// `write_fatal_startup_error` but without the "service failed to
+/// start" framing — used to trace progress through the service path
+/// even on a successful start.
+///
+/// v0.1.27 added `write_service_diag` in main.rs to capture
+/// dispatcher-level errors that the existing
+/// `write_fatal_startup_error` couldn't see. v0.1.28 mirrors that
+/// here in service.rs to capture step-level progress inside the
+/// service body itself, so we can pinpoint exactly where execution
+/// halts without needing tracing to be initialised first.
+fn write_diag_step(message: &str) {
+    use std::io::Write;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Millisecond-precision suffix so we can distinguish steps that
+    // happen within the same second.
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis())
+        .unwrap_or(0);
+
+    let line = format!(
+        "[{}.{:03}] service.rs step: {}\n",
+        timestamp, millis, message
+    );
+
+    let candidates = [
+        crate::paths::data_dir().join("fatal-startup-error.txt"),
+        std::env::temp_dir().join("sourcebox-sentry-cloudnode-fatal-startup-error.txt"),
+    ];
+
+    for path in &candidates {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            if f.write_all(line.as_bytes()).is_ok() {
+                return;
+            }
+        }
     }
 }
 
@@ -173,13 +240,20 @@ fn write_fatal_startup_error(message: &str) {
 /// The actual service body. Returns `Ok(())` on graceful shutdown
 /// (SCM Stop), or an error if anything fails before/during running.
 fn run_service() -> Result<(), Box<dyn std::error::Error>> {
+    write_diag_step("run_service: entered");
+
     // ── 1. File logging ──────────────────────────────────────────
     // Init this FIRST so any failure in the rest of startup is
     // captured. The dashboard's tracing layer is also installed later
     // (by Node::run_headless via the dashboard wiring), but it only
     // persists to SQLite — we want a plain text file an operator can
     // tail with `Get-Content -Wait`.
+    write_diag_step(&format!(
+        "run_service: about to init_file_logging (data_dir={})",
+        crate::paths::data_dir().display()
+    ));
     let _log_guard = init_file_logging()?;
+    write_diag_step("run_service: init_file_logging OK");
 
     tracing::info!(
         "Starting SourceBox Sentry CloudNode service (version {})",
@@ -207,12 +281,15 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    write_diag_step("run_service: about to register service control handler");
     let status_handle =
         service_control_handler::register(SERVICE_NAME, event_handler)?;
+    write_diag_step("run_service: service_control_handler::register OK");
 
     // ── 3. Tell SCM we're starting ──────────────────────────────
     // Required before any time-consuming work; SCM uses this to
     // distinguish "still starting" from "stuck" via wait_hint.
+    write_diag_step("run_service: about to set_service_status(StartPending)");
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::StartPending,
@@ -222,6 +299,7 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         wait_hint: Duration::from_secs(30),
         process_id: None,
     })?;
+    write_diag_step("run_service: set_service_status(StartPending) OK");
 
     // ── 4. Build runtime + spawn the node ───────────────────────
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -250,9 +328,17 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     // Now: load + validate while still in StartPending. On failure,
     // skip Running entirely and go directly StartPending → Stopped(1).
     // SCM never reports Running for a service that can't actually run.
+    write_diag_step("run_service: about to load_and_validate_config");
     let config = match load_and_validate_config() {
-        Ok(c) => c,
+        Ok(c) => {
+            write_diag_step("run_service: load_and_validate_config OK");
+            c
+        }
         Err(e) => {
+            write_diag_step(&format!(
+                "run_service: load_and_validate_config FAILED: {}",
+                e
+            ));
             tracing::error!("Service config validation failed: {}", e);
             status_handle.set_service_status(ServiceStatus {
                 service_type: SERVICE_TYPE,

@@ -204,16 +204,22 @@ impl Config {
     }
 
     fn parse_yaml(content: &str) -> Result<Self> {
-        let docs = yaml_rust::YamlLoader::load_from_str(content)?;
-        let doc = docs
-            .first()
-            .ok_or_else(|| Error::Config("Empty config file".into()))?;
+        // serde_yaml::Value indexing returns Value::Null for missing
+        // keys, and the typed accessors (.as_str/.as_i64/.as_bool/
+        // .as_sequence) return None on type mismatch.  That gives us
+        // the same "best-effort, ignore-missing" parsing the
+        // yaml-rust version had — see the migration note in
+        // Cargo.toml for why we moved off yaml-rust.
+        let doc: serde_yaml::Value = serde_yaml::from_str(content)?;
+        if doc.is_null() {
+            return Err(Error::Config("Empty config file".into()));
+        }
 
         let mut config = Config::default();
 
         // Parse node config
         let node = &doc["node"];
-        if !node.is_badvalue() {
+        if !node.is_null() {
             if let Some(name) = node["name"].as_str() {
                 config.node.name = name.to_string();
             }
@@ -221,7 +227,7 @@ impl Config {
 
         // Parse cloud config
         let cloud = &doc["cloud"];
-        if !cloud.is_badvalue() {
+        if !cloud.is_null() {
             if let Some(api_url) = cloud["api_url"].as_str() {
                 config.cloud.api_url = api_url.to_string();
             }
@@ -232,11 +238,11 @@ impl Config {
 
         // Parse cameras config
         let cameras = &doc["cameras"];
-        if !cameras.is_badvalue() {
+        if !cameras.is_null() {
             if let Some(auto_detect) = cameras["auto_detect"].as_bool() {
                 config.cameras.auto_detect = auto_detect;
             }
-            if let Some(devices) = cameras["devices"].as_vec() {
+            if let Some(devices) = cameras["devices"].as_sequence() {
                 config.cameras.devices = devices
                     .iter()
                     .filter_map(|d| d.as_str().map(|s| s.to_string()))
@@ -246,7 +252,7 @@ impl Config {
 
         // Parse streaming config
         let streaming = &doc["streaming"];
-        if !streaming.is_badvalue() {
+        if !streaming.is_null() {
             if let Some(fps) = streaming["fps"].as_i64() {
                 config.streaming.fps = fps as u32;
             }
@@ -255,7 +261,7 @@ impl Config {
             }
             // Parse HLS config
             let hls = &streaming["hls"];
-            if !hls.is_badvalue() {
+            if !hls.is_null() {
                 if let Some(enabled) = hls["enabled"].as_bool() {
                     config.streaming.hls.enabled = enabled;
                 }
@@ -275,7 +281,7 @@ impl Config {
         // silently ignored — see StorageConfig docs in settings.rs for
         // why the field was retired.
         let storage = &doc["storage"];
-        if !storage.is_badvalue() {
+        if !storage.is_null() {
             if let Some(max_size_gb) = storage["max_size_gb"].as_i64() {
                 config.storage.max_size_gb = max_size_gb as u64;
             }
@@ -283,7 +289,7 @@ impl Config {
 
         // Parse server config
         let server = &doc["server"];
-        if !server.is_badvalue() {
+        if !server.is_null() {
             if let Some(port) = server["port"].as_i64() {
                 config.server.port = port as u16;
             }
@@ -294,7 +300,7 @@ impl Config {
 
         // Parse logging config
         let logging = &doc["logging"];
-        if !logging.is_badvalue() {
+        if !logging.is_null() {
             if let Some(level) = logging["level"].as_str() {
                 config.logging.level = level.to_string();
             }
@@ -344,5 +350,90 @@ impl Config {
             self.cloud.api_url = api_url;
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod yaml_parse_tests {
+    //! Pin down the YAML parser's behaviour after the v0.1.40+
+    //! yaml-rust → serde_yaml migration.  The legacy code path is
+    //! rarely hit (every node migrates to SQLite on first load) but
+    //! a regression here would silently drop config on any node
+    //! still relying on `config.yaml`.
+
+    use super::*;
+
+    #[test]
+    fn parse_yaml_picks_up_node_and_cloud_fields() {
+        let yaml = r#"
+node:
+  name: test-node
+cloud:
+  api_url: https://example.com
+  heartbeat_interval: 45
+"#;
+        let config = Config::parse_yaml(yaml).expect("yaml parses");
+        assert_eq!(config.node.name, "test-node");
+        assert_eq!(config.cloud.api_url, "https://example.com");
+        assert_eq!(config.cloud.heartbeat_interval, 45);
+    }
+
+    #[test]
+    fn parse_yaml_uses_defaults_for_missing_sections() {
+        // Only 'node' present — every other section should fall back
+        // to Config::default().  This is the "best-effort" semantics
+        // the yaml-rust path had; serde_yaml needs to match.
+        let yaml = "node:\n  name: minimal\n";
+        let config = Config::parse_yaml(yaml).expect("yaml parses");
+        let defaults = Config::default();
+        assert_eq!(config.node.name, "minimal");
+        // Cloud + storage should be untouched defaults.
+        assert_eq!(config.cloud.heartbeat_interval, defaults.cloud.heartbeat_interval);
+        assert_eq!(config.storage.max_size_gb, defaults.storage.max_size_gb);
+    }
+
+    #[test]
+    fn parse_yaml_handles_camera_devices_list() {
+        let yaml = r#"
+cameras:
+  auto_detect: false
+  devices:
+    - /dev/video0
+    - /dev/video2
+"#;
+        let config = Config::parse_yaml(yaml).expect("yaml parses");
+        assert!(!config.cameras.auto_detect);
+        assert_eq!(
+            config.cameras.devices,
+            vec!["/dev/video0".to_string(), "/dev/video2".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_yaml_silently_ignores_legacy_storage_path() {
+        // `storage.path` was removed in v0.1.40 (see StorageConfig
+        // docs).  YAML files in the wild may still set it; the
+        // parser must not error on it.
+        let yaml = r#"
+storage:
+  path: ./data
+  max_size_gb: 32
+"#;
+        let config = Config::parse_yaml(yaml).expect("yaml parses");
+        assert_eq!(config.storage.max_size_gb, 32);
+    }
+
+    #[test]
+    fn parse_yaml_rejects_empty_input() {
+        let err = Config::parse_yaml("").unwrap_err();
+        assert!(format!("{}", err).contains("Empty"));
+    }
+
+    #[test]
+    fn parse_yaml_rejects_garbage() {
+        // Malformed YAML should surface as a Config error, not a
+        // panic or a silent default.
+        let err = Config::parse_yaml("\t\t: not valid: yaml :::").unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 }

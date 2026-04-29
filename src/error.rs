@@ -80,8 +80,8 @@ pub enum Error {
     ResetRequested,
 }
 
-impl From<yaml_rust::ScanError> for Error {
-    fn from(e: yaml_rust::ScanError) -> Self {
+impl From<serde_yaml::Error> for Error {
+    fn from(e: serde_yaml::Error) -> Self {
         Error::Config(e.to_string())
     }
 }

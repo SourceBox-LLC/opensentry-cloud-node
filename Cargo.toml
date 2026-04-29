@@ -14,8 +14,32 @@ repository = "https://github.com/SourceBox-LLC/opensentry-cloud-node"
 homepage = "https://opensentry-command.fly.dev"
 
 [dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Async runtime.  Explicit feature list instead of `full` so we don't
+# pull in `io-std` (async stdin — we use std::io::stdin directly),
+# `net` (TCP/UDP — reqwest and tungstenite pull whatever transport
+# bits they need transitively), or `parking_lot` (alternate mutex
+# impl, not used).  Inventory of in-tree usage:
+#   - tokio::fs::*                 → fs
+#   - tokio::io                    → io-util
+#   - tokio::process               → process
+#   - tokio::spawn / task / runtime / spawn_blocking
+#                                  → rt-multi-thread
+#   - tokio::select! / #[tokio::main] / #[tokio::test]
+#                                  → macros
+#   - tokio::signal::ctrl_c        → signal
+#   - tokio::sync::* (mpsc, RwLock, Notify, …)
+#                                  → sync
+#   - tokio::time::*               → time
+tokio = { version = "1", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 
 # HTTP client
 # default-features = false drops the `default-tls` (OpenSSL) feature so the
@@ -34,8 +58,20 @@ warp = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Configuration
-yaml-rust = "0.4"
+# Configuration.  Used only for parsing legacy `config.yaml` files
+# on first boot — values get migrated into the SQLite config DB and
+# the YAML file is never read again.  No migration impact for
+# existing nodes because they're already on the DB code path.
+#
+# Note on dep choice: `yaml-rust` (last release 2018, archived) was
+# the original.  `serde_yaml` 0.9 is the current pin: it's marked
+# deprecated by the upstream maintainer but is functionally stable,
+# widely used, gets occasional security backports, and has a
+# familiar serde-flavoured API.  The maintained alternatives
+# (`serde_yml`, `yaml-rust2`) are either pre-1.0 (serde_yml=0.0.x)
+# or have a different shape (yaml-rust2 is lower-level).  Revisit if
+# a real CVE shows up and serde_yaml has no fix.
+serde_yaml = "0.9"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

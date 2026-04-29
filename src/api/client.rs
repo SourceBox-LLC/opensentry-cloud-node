@@ -103,10 +103,16 @@ impl ApiClient {
     /// Takes pre-built `CameraStatus` structs so callers can include the
     /// pipeline's `last_error` when FFmpeg is restarting/failed — used to
     /// be `Vec<(String, String)>` which forced a hardcoded "streaming".
+    ///
+    /// `storage_stats` rides along when the caller has fresh numbers;
+    /// `None` is fine on early heartbeats before the first stats
+    /// collection has run (the backend just doesn't update its
+    /// last-known values, no harm).
     pub async fn heartbeat(
         &self,
         local_ip: Option<&str>,
         camera_statuses: Vec<CameraStatus>,
+        storage_stats: Option<crate::storage::StorageStats>,
     ) -> Result<HeartbeatResponse> {
         let node_id = self.node_id.as_ref()
             .ok_or_else(|| Error::Api("Node not registered".into()))?;
@@ -128,6 +134,7 @@ impl ApiClient {
             // re-register.  Read from the build at compile time so a
             // tampered runtime config can't claim a fake version.
             version: env!("CARGO_PKG_VERSION").to_string(),
+            storage_stats,
         };
 
         let response = self.client
@@ -166,13 +173,14 @@ impl ApiClient {
         &self,
         local_ip: Option<&str>,
         camera_statuses: Vec<CameraStatus>,
+        storage_stats: Option<crate::storage::StorageStats>,
         max_retries: u32,
     ) -> Result<HeartbeatResponse> {
         let mut attempts = 0;
         let mut delay = std::time::Duration::from_secs(1);
 
         loop {
-            match self.heartbeat(local_ip, camera_statuses.clone()).await {
+            match self.heartbeat(local_ip, camera_statuses.clone(), storage_stats.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     attempts += 1;

@@ -386,11 +386,22 @@ impl HlsUploader {
                                     .map(|s| s.contains(&camera_id))
                                     .unwrap_or(false);
 
+                                // Safety floor: if the host disk is critically
+                                // low (set by storage::stats::collect from the
+                                // heartbeat task), skip recording writes
+                                // entirely.  We still delete the source file —
+                                // the live HLS rolling buffer must keep
+                                // rotating or FFmpeg fills the disk anyway.
+                                // What we drop is just the durable archive
+                                // copy.  The retention loop will free up DB
+                                // space on its 5-min cadence.
+                                let paused = crate::storage::should_pause_recording();
+
                                 let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
                                 for s in scan_start..oldest_to_keep {
                                     let filename = format!("segment_{:05}.ts", s);
                                     let src = hls_output_dir.join(&filename);
-                                    if is_recording {
+                                    if is_recording && !paused {
                                         if let Ok(data) = tokio::fs::read(&src).await {
                                             let _ = db.save_recording_segment(
                                                 &camera_id, s, &today, &data,

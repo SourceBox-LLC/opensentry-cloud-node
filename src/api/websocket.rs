@@ -526,8 +526,19 @@ async fn cmd_take_snapshot(
     // Base64-encode the JPEG for transfer over WebSocket
     let image_b64 = BASE64_STANDARD.encode(&data);
 
-    db.save_snapshot(camera_id, &filename, timestamp, &data)
-        .map_err(|e| format!("DB save error: {}", e))?;
+    // Safety floor: if the host disk is critically low, skip the durable
+    // DB write but still hand the operator the live image — they wanted
+    // a snapshot, and not getting one is a worse failure than not
+    // archiving it. The base64 image still rides back on the WebSocket.
+    if crate::storage::should_pause_recording() {
+        tracing::warn!(
+            "snapshot skipped DB write: host disk under safety floor (camera {})",
+            camera_id,
+        );
+    } else {
+        db.save_snapshot(camera_id, &filename, timestamp, &data)
+            .map_err(|e| format!("DB save error: {}", e))?;
+    }
 
     tracing::info!("Snapshot captured: {} ({} bytes)", filename, size);
 

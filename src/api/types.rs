@@ -185,6 +185,13 @@ pub struct HeartbeatRequest {
     /// looks legacy to the gate.
     #[serde(rename = "node_version")]
     pub version: String,
+
+    /// Filesystem-aware storage snapshot.  Backend persists these so
+    /// the dashboard can render a per-node usage bar and warn the
+    /// operator when the host disk is filling up.  Optional so older
+    /// backends that don't know the field tolerate the heartbeat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_stats: Option<crate::storage::StorageStats>,
 }
 
 /// Camera status for heartbeat
@@ -268,11 +275,15 @@ mod tests {
             local_ip: None,
             cameras: None,
             version: "0.1.0".into(),
+            storage_stats: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json.get("node_version").and_then(|v| v.as_str()), Some("0.1.0"));
         assert!(json.get("version").is_none(), "must serialize as node_version, not version");
         assert_eq!(json.get("node_id").and_then(|v| v.as_str()), Some("nd_42"));
+        // Optional storage_stats omitted from wire when None — older
+        // backends without the field tolerate the heartbeat.
+        assert!(json.get("storage_stats").is_none());
     }
 
     #[test]

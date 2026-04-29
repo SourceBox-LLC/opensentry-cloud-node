@@ -16,5 +16,7 @@
 //! Storage management for recordings and snapshots
 
 pub mod database;
+pub mod stats;
 
 pub use database::NodeDatabase;
+pub use stats::{StorageStats, should_pause_recording, SAFETY_FLOOR_BYTES};

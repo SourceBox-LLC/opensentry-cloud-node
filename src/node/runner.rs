@@ -533,6 +533,13 @@ impl Node {
         let api_key = self.config.cloud.api_key.clone();
         let node_id = self.config.node.node_id.clone();
         let interval = self.config.cloud.heartbeat_interval;
+        // Storage stats inputs.  The DB handle is cheap to clone (it's
+        // an Arc internally), the cap doesn't change at runtime, and
+        // the data_dir is the canonical resolver — same path the
+        // retention loop uses.
+        let stats_db = self.db.clone();
+        let max_bytes = self.config.storage.max_size_gb * 1024 * 1024 * 1024;
+        let data_dir = crate::paths::data_dir();
 
         tokio::spawn(async move {
             let mut client = match ApiClient::new(&api_url, &api_key) {
@@ -578,7 +585,30 @@ impl Node {
                     })
                     .collect();
 
-                match client.heartbeat_with_retry(local_ip.as_deref(), camera_statuses, 3).await {
+                // Collect storage stats fresh for this heartbeat.  total_size()
+                // is a cheap SUM query on indexed columns, and the disk_info
+                // lookup is O(disks) — both fast enough to do per-tick rather
+                // than maintain a separate cache.  Side effect: updates the
+                // global recording-pause flag based on the safety floor.
+                let storage_stats = match stats_db.total_size() {
+                    Ok(used) => Some(crate::storage::StorageStats::collect(
+                        used, max_bytes, &data_dir,
+                    )),
+                    Err(e) => {
+                        // Storage stats are nice-to-have; a DB read failure
+                        // shouldn't block heartbeats from sending.  Log + carry
+                        // on with no stats this tick.
+                        tracing::debug!("storage stats collection skipped: {}", e);
+                        None
+                    }
+                };
+
+                match client.heartbeat_with_retry(
+                    local_ip.as_deref(),
+                    camera_statuses,
+                    storage_stats,
+                    3,
+                ).await {
                     Ok(r) => {
                         if r.key_rotated {
                             if let Some(new_key) = r.new_api_key {
@@ -630,7 +660,10 @@ impl Node {
         if let Some(id) = &self.config.node.node_id {
             client.set_node_id(id.clone());
         }
-        client.heartbeat_with_retry(get_local_ip().as_deref(), vec![], 3).await
+        // test_heartbeat is the boot-time smoke test before the main loop
+        // takes over. No storage stats yet — they get reported on the first
+        // real heartbeat tick.
+        client.heartbeat_with_retry(get_local_ip().as_deref(), vec![], None, 3).await
     }
 
     async fn detect_cameras(&self, dash: &Dashboard) -> Result<Vec<DetectedCamera>> {

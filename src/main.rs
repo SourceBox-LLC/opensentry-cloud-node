@@ -589,52 +589,56 @@ fn uninstall_cloudnode(force: bool) -> Result<()> {
     println!("{}", "╚════════════════════════════════════════════════════╝".red());
     println!();
 
-    // Check for files to remove
+    // Find what to remove.  Use `paths::data_dir()` for the data
+    // location — same resolver as runtime, so the uninstall finds
+    // node.db wherever it actually lives (env var → ProgramData on
+    // Windows → ./data on Linux/macOS).  Reading current_dir() here
+    // would silently miss the data on every Windows install and
+    // every Docker container, which is the same bug class as the
+    // v0.1.39 saga in node/runner.rs.
+    //
+    // .env stays cwd-relative — it was always a legacy alongside-
+    // the-binary file in the YAML era; cleanup target hasn't moved.
+    //
+    // No more `ffmpeg/` cleanup — bundled FFmpeg was retired in
+    // v0.1.35.  System FFmpeg (winget / brew / apt) is owned by the
+    // OS package manager and isn't ours to remove on uninstall.
     let env_path = std::env::current_dir()?.join(".env");
-    let data_dir = std::env::current_dir()?.join("data");
-    let ffmpeg_dir = std::env::current_dir()?.join("ffmpeg");
+    let data_dir = sourcebox_sentry_cloudnode::paths::data_dir();
 
-    println!("  The following files will be removed:");
+    println!("  The following will be removed:");
     if env_path.exists() {
         println!("    - {} (legacy)", env_path.display());
     }
     if data_dir.exists() {
         println!("    - {}", data_dir.display());
     }
-    if ffmpeg_dir.exists() {
-        println!("    - {}", ffmpeg_dir.display());
-    }
     println!();
-    
+
     if !force {
         use inquire::Confirm;
-        
+
         let confirm = Confirm::new("Continue with uninstall?")
             .with_default(false)
             .prompt()
             .map_err(|e| anyhow::anyhow!("Prompt error: {}", e))?;
-        
+
         if !confirm {
             println!("  Uninstall cancelled.");
             return Ok(());
         }
     }
-    
+
     println!("  Removing files...");
-    
+
     if env_path.exists() {
         std::fs::remove_file(&env_path)?;
         println!("  {} Removed legacy .env file", "✓".green());
     }
-    
+
     if data_dir.exists() {
         std::fs::remove_dir_all(&data_dir)?;
         println!("  {} Removed data directory", "✓".green());
-    }
-    
-    if ffmpeg_dir.exists() {
-        std::fs::remove_dir_all(&ffmpeg_dir)?;
-        println!("  {} Removed FFmpeg directory", "✓".green());
     }
     
     println!();

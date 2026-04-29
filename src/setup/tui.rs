@@ -528,6 +528,68 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
 
     // Deployment + auto-start
     let deployment_method = select_deployment_method(platform)?;
+
+    // Storage cap.  Default = the disk-aware suggestion (80% of free,
+    // clamped to [5, 64] GB) so a Pi-on-32GB-SD-card user gets a
+    // sensible default instead of the historical 64 GB which would
+    // blow up the host.  Operator can override; we validate the
+    // input as a positive integer and warn (not block) if they pick
+    // > 90% of free, since the retention loop runs on a 5 min tick
+    // and a near-full cap means the writer can sneak past into ENOSPC.
+    println!();
+    let data_dir = crate::paths::data_dir();
+    let (free_bytes, _) = crate::storage::disk_info(&data_dir);
+    let suggested = crate::storage::suggested_max_gb(&data_dir).unwrap_or(64);
+    let free_gb = if free_bytes > 0 {
+        free_bytes / (1024 * 1024 * 1024)
+    } else {
+        0
+    };
+    if free_gb > 0 {
+        panel_sub(&format!(
+            "Available disk: {} GB free at {}",
+            free_gb,
+            data_dir.display(),
+        ));
+    } else {
+        panel_sub(&format!(
+            "Couldn't read disk info for {} — using {} GB default",
+            data_dir.display(),
+            suggested,
+        ));
+    }
+    let max_size_gb_str = inquire::Text::new(&format!(
+        "  Recording cap (GB) [default {}]:",
+        suggested,
+    ))
+    .with_default(&suggested.to_string())
+    .with_validator(|input: &str| {
+        match input.trim().parse::<u64>() {
+            Ok(v) if v >= 1 => Ok(inquire::validator::Validation::Valid),
+            Ok(_) => Ok(inquire::validator::Validation::Invalid(
+                "Cap must be at least 1 GB".into(),
+            )),
+            Err(_) => Ok(inquire::validator::Validation::Invalid(
+                "Enter a whole number of GB (e.g. 32)".into(),
+            )),
+        }
+    })
+    .prompt()?;
+    let max_size_gb: u64 = max_size_gb_str.trim().parse().unwrap_or(suggested);
+    if free_gb > 0 && max_size_gb > (free_gb * 9) / 10 {
+        // Warning, not a blocker — operator might know something we
+        // don't (e.g. they're about to free up disk).  Print and move
+        // on; the safety floor in storage::stats will pause recording
+        // before the disk is fully filled regardless.
+        panel_warn(&format!(
+            "Cap of {} GB is more than 90% of free disk ({} GB).",
+            max_size_gb, free_gb,
+        ));
+        panel_sub(
+            "Recording will pause automatically when host disk drops below 1 GB free.",
+        );
+    }
+
     println!();
     let auto_start = Confirm::new("  Auto-start CloudNode after setup?")
         .with_default(true)
@@ -541,6 +603,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
     panel_kv("  API Key     :", &format!("{}…", &api_key[..10]));
     panel_kv("  API URL     :", &api_url);
     panel_kv("  Deploy      :", &format!("{:?}", deployment_method));
+    panel_kv("  Storage cap :", &format!("{} GB", max_size_gb));
     panel_kv("  Auto-start  :", if auto_start { "Yes" } else { "No" });
     panel_blank();
     panel_bottom();
@@ -562,6 +625,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
         deployment_method,
         output_dir: std::env::current_dir()?,
         auto_start,
+        max_size_gb,
     })
 }
 
@@ -995,6 +1059,14 @@ fn save_config_to_database(config: &SetupConfig) -> Result<()> {
             api_url: config.api_url.clone(),
             api_key: config.api_key.clone(),
             heartbeat_interval: 30,
+        },
+        // Operator-chosen storage cap from the wizard prompt.  Defaults
+        // to 64 GB if the wizard couldn't read disk info; otherwise
+        // ~80% of free disk, clamped to [5, 64] GB.  Persisted via
+        // save_to_db's `max_size_gb` row so the running node + the
+        // dashboard's storage bar both see the chosen value on next boot.
+        storage: crate::config::StorageConfig {
+            max_size_gb: config.max_size_gb,
         },
         ..Default::default()
     };

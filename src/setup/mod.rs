@@ -53,6 +53,11 @@ pub struct SetupConfig {
     pub deployment_method: DeploymentMethod,
     pub output_dir: PathBuf,
     pub auto_start: bool,
+    /// Operator-chosen cap for recordings + snapshots, in GB.  Asked
+    /// during configure_node with a disk-aware default (see
+    /// `storage::suggested_max_gb`).  64 GB if the wizard couldn't
+    /// read disk info — same as the historical hardcoded default.
+    pub max_size_gb: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

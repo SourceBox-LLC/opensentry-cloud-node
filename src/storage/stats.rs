@@ -165,6 +165,45 @@ pub fn should_pause_recording() -> bool {
     RECORDING_PAUSED_FOR_DISK.load(Ordering::Relaxed)
 }
 
+/// Read the host filesystem's free + total bytes for the disk that
+/// holds `data_dir`.  Returns `(free_bytes, total_bytes)`, or
+/// `(0, 0)` when sysinfo can't identify the disk (Docker rootfs,
+/// FUSE).  Public so the setup wizard can compute a sane
+/// `max_size_gb` default at install time without spinning up the
+/// full StorageStats machinery.
+pub fn disk_info(data_dir: &Path) -> (u64, u64) {
+    read_disk_info(data_dir)
+}
+
+/// Suggest a storage cap in GB based on the disk's currently free
+/// space.  Used by the setup wizard as the default value for the
+/// operator-confirmable cap prompt.
+///
+/// Logic: prefer the historical 64 GB default when there's plenty
+/// of room.  When the disk has less than 64 GB free, scale down to
+/// 80% of free so retention has headroom (the retention loop runs
+/// every 5 min — between ticks the writer can sneak past the cap,
+/// and a cap = 100% of free would mean ENOSPC every time).  Never
+/// suggest below 5 GB; on a tiny disk the operator gets a soft
+/// floor to prevent recording from being effectively useless.
+///
+/// Returns `None` when disk info is unavailable (Docker rootfs).
+/// Caller should fall back to the hardcoded 64 GB default in that
+/// case.
+pub fn suggested_max_gb(data_dir: &Path) -> Option<u64> {
+    let (free, _) = read_disk_info(data_dir);
+    if free == 0 {
+        return None;
+    }
+    let free_gb = free / GIB_AS_U64;
+    // 80% headroom factor.  Caller can always override via the
+    // wizard prompt — this is only the default the prompt suggests.
+    let suggested = (free_gb * 8) / 10;
+    Some(suggested.clamp(5, 64))
+}
+
+const GIB_AS_U64: u64 = 1024 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +245,29 @@ mod tests {
             disk_total_bytes: 500 * 1024 * 1024 * 1024,
         };
         assert!(s.percent_full() > 100.0);
+    }
+
+    #[test]
+    fn suggested_max_gb_unknown_disk_returns_none() {
+        // Path that doesn't match any mounted disk — sysinfo returns
+        // (0, 0), suggested_max_gb returns None and the caller falls
+        // back to the hardcoded 64 GB default.
+        let suggestion = suggested_max_gb(
+            std::path::Path::new("/this/path/does/not/exist/anywhere"),
+        );
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn suggested_max_gb_real_disk_returns_capped_value() {
+        // The path the test runner is on has SOME real disk underneath.
+        // We don't know which one, but we know the suggestion should
+        // land in the [5, 64] range if it returns Some.
+        let suggestion = suggested_max_gb(std::path::Path::new("."));
+        if let Some(gb) = suggestion {
+            assert!(gb >= 5, "below safety floor: {} GB", gb);
+            assert!(gb <= 64, "above historical cap: {} GB", gb);
+        }
     }
 
     #[test]

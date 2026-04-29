@@ -99,9 +99,11 @@ impl Config {
         if let Some(v) = db.get_config("heartbeat_interval")? {
             config.cloud.heartbeat_interval = v.parse().unwrap_or(30);
         }
-        if let Some(v) = db.get_config("storage_path")? {
-            config.storage.path = v;
-        }
+        // `storage_path` row is read-skipped: it was retired with the
+        // v0.1.40 cleanup that removed StorageConfig.path. Existing DBs
+        // may still have a stale row; harmless because nothing reads
+        // it. Not bothering with a delete migration — the kv table
+        // is cheap and a leftover row is invisible.
         if let Some(v) = db.get_config("max_size_gb")? {
             config.storage.max_size_gb = v.parse().unwrap_or(64);
         }
@@ -151,7 +153,8 @@ impl Config {
         db.set_config("node_name", &self.node.name)?;
         db.set_config("api_url", &self.cloud.api_url)?;
         db.set_config("heartbeat_interval", &self.cloud.heartbeat_interval.to_string())?;
-        db.set_config("storage_path", &self.storage.path)?;
+        // No `storage_path` write — field retired in v0.1.40, see note
+        // in load_from_db. paths::data_dir() owns location now.
         db.set_config("max_size_gb", &self.storage.max_size_gb.to_string())?;
         db.set_config("fps", &self.streaming.fps.to_string())?;
         if !self.streaming.encoder.is_empty() {
@@ -268,12 +271,11 @@ impl Config {
             }
         }
 
-        // Parse storage config
+        // Parse storage config.  Note: a `path` key in legacy YAML is
+        // silently ignored — see StorageConfig docs in settings.rs for
+        // why the field was retired.
         let storage = &doc["storage"];
         if !storage.is_badvalue() {
-            if let Some(path) = storage["path"].as_str() {
-                config.storage.path = path.to_string();
-            }
             if let Some(max_size_gb) = storage["max_size_gb"].as_i64() {
                 config.storage.max_size_gb = max_size_gb as u64;
             }

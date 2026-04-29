@@ -98,20 +98,18 @@ pub fn run() -> windows_service::Result<()> {
 fn service_main(arguments: Vec<OsString>) {
     // ── Layer 1: hardcoded-path file write, ABSOLUTE first action ──
     //
-    // The previous v0.1.27/v0.1.28 diag showed
-    // service_dispatcher::start returning Ok with no entry from
-    // inside service_main. Per Win32 contract, that's only possible
-    // if service_main DID run but exited without observable side
-    // effects. The leading hypothesis: an SEH exception (NOT a Rust
-    // panic) inside the macro-generated FFI shim's pointer
-    // arithmetic, OR a Rust panic on the SCM-spawned worker thread
-    // that doesn't trigger the global panic hook because the thread
-    // wasn't created by std::thread.
+    // The Windows Service path is fragile: service_main runs on a
+    // worker thread spawned by SCM (not by std::thread), so panics
+    // here can bypass the global panic hook entirely.  And SEH
+    // exceptions inside the macro-generated FFI shim's pointer
+    // arithmetic can make service_main appear to "exit cleanly"
+    // when in reality it crashed before any user code observed it.
     //
-    // Guard against both by using a hardcoded absolute path that
-    // doesn't depend on env vars, paths::data_dir(), or any of the
-    // infrastructure that might not work on alien threads. If
-    // service_main is reached at all, this line lands.
+    // The hardcoded absolute path here doesn't depend on env vars,
+    // paths::data_dir(), or any infrastructure that might not work
+    // on the SCM-spawned thread.  If service_main is reached at
+    // all, this line lands — that alone tells us the dispatcher
+    // got far enough to enter user code.
     let _ = std::fs::write(
         r"C:\sourcebox-service-trace.txt",
         format!(
@@ -132,7 +130,7 @@ fn service_main(arguments: Vec<OsString>) {
     // dependencies. Last-resort observability channel.
     emit_debug_string("[sourcebox-sentry-cloudnode] service_main entered");
 
-    // ── Layer 3: standard diag (matches v0.1.27/v0.1.28 trace format) ──
+    // ── Layer 3: standard diag (paths::data_dir-based, structured) ──
     write_diag_step(&format!(
         "service_main entered with {} arg(s): {:?}",
         arguments.len(),
@@ -240,12 +238,10 @@ fn emit_debug_string(message: &str) {
 /// start" framing — used to trace progress through the service path
 /// even on a successful start.
 ///
-/// v0.1.27 added `write_service_diag` in main.rs to capture
-/// dispatcher-level errors that the existing
-/// `write_fatal_startup_error` couldn't see. v0.1.28 mirrors that
-/// here in service.rs to capture step-level progress inside the
-/// service body itself, so we can pinpoint exactly where execution
-/// halts without needing tracing to be initialised first.
+/// Mirrors `write_service_diag` in main.rs (which captures
+/// dispatcher-level errors).  This one is for step-level progress
+/// inside the service body itself, so we can pinpoint exactly where
+/// execution halts without needing tracing to be initialised first.
 fn write_diag_step(message: &str) {
     use std::io::Write;
 

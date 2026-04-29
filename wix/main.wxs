@@ -194,31 +194,23 @@
         <!-- ========================================================
              One-time cleanup of stale runtime-created residue
              ========================================================
-             v0.1.20-v0.1.33 had a bug in `paths::data_dir()` where
-             the cwd-relative `./data` legacy lookup could resolve to
-             `Program Files\SourceBox Sentry CloudNode\data\` when
-             the binary was launched from a Start menu shortcut whose
-             WorkingDirectory was the install dir. The binary then
-             called `create_dir_all` and SQLite created `node.db`
-             inside Program Files — files MSI never knew about.
+             v0.1.20-v0.1.33 had a bug where SQLite could create
+             `Program Files\SourceBox Sentry CloudNode\data\node.db`
+             — runtime-created files MSI doesn't know about and
+             therefore won't remove on uninstall.  This CustomAction
+             nukes that directory on every fresh install so the
+             residue can't re-poison `./data` lookups on older
+             clients.
 
-             MSI's normal uninstall only removes files declared in
-             `<File>` elements. Runtime-created files survive every
-             uninstall as orphans. Even after v0.1.36 (which
-             eliminates the bug) re-installs, the residue persists
-             and re-poisons the `./data` lookup on older versions.
+             Safe to run unconditionally on v0.1.36+ because the bug
+             is fixed (Windows always uses ProgramData now), so the
+             directory only exists at all if it's residue.
 
-             This CustomAction runs on every fresh install and wipes
-             any stray `data\` directory inside the install root. It
-             runs from the elevated installer context (Execute=
-             'deferred' Impersonate='no' → LocalSystem), which has
-             write access to Program Files even when the operator is
-             a UAC-filtered admin.
-
-             Safe to run unconditionally because v0.1.36+ never
-             creates `<install_root>\data\` (data_dir on Windows
-             always returns ProgramData). The directory only exists
-             at all if it's residue from an older buggy version.
+             TODO(v0.2.0): remove this CustomAction.  By the time we
+             cut a 0.2 release the v0.1.20-v0.1.33 install base
+             should be gone (those versions can't authenticate
+             against current Command Center anyway, since
+             MIN_SUPPORTED_NODE_VERSION will have been bumped).
 
              Return='ignore' so a stuck file (AV, in-use handle)
              doesn't fail the whole install over a leftover artifact. -->

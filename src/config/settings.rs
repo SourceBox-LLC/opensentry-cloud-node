@@ -183,11 +183,18 @@ impl Default for RecordingConfig {
     }
 }
 
+/// Storage limits.  The actual storage *location* is not configurable
+/// — `paths::data_dir()` is the single source of truth for where the
+/// SQLite DB, HLS segments, and recordings live (env var override
+/// `SOURCEBOX_SENTRY_DATA_DIR` exists for Docker, otherwise platform
+/// default).  A `path` field used to live here, defaulting to
+/// `./data`, but it caused the v0.1.39 bug where `Node::new` resolved
+/// it relative to cwd and segments landed in unexpected directories
+/// depending on launch context (Start menu shortcut → Program Files,
+/// admin PowerShell from System32 → C:\Windows\System32, …).
+/// Removing the field forecloses that whole bug class.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Base path for recordings and snapshots
-    pub path: String,
-
     /// Maximum storage size in GB (oldest deleted when exceeded)
     pub max_size_gb: u64,
 }
@@ -195,7 +202,6 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            path: "./data".to_string(),
             max_size_gb: 64,
         }
     }

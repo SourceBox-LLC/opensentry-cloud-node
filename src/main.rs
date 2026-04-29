@@ -338,23 +338,12 @@ fn run() -> Result<()> {
         //
         // After the wizard completes, hand control to `run_cloudnode`
         // which takes over the same console with the live TUI dashboard
-        // (cameras, logs, streaming counters). This is the same
-        // foreground path the cargo-build / Linux installs already
-        // use — there's no reason for the MSI install to behave
-        // differently.
-        //
-        // History: v0.1.26 routed MSI installs through
-        // start_msi_service_after_setup, which called sc.exe start to
-        // launch the SourceBoxSentryCloudNode Windows Service. That
-        // service has been broken since at least v0.1.22 in a way we
-        // can't diagnose — four defensive instrumentation builds
-        // (v0.1.27-v0.1.30) all produced zero trace output, suggesting
-        // the binary never reaches user-space code when SCM launches
-        // it. The service registration stays in place (WiX still
-        // registers it) for a future fix; in the meantime, the
-        // foreground path is the proper Windows desktop-app pattern
-        // — same as Discord, OBS, Spotify — and gets cameras
-        // streaming immediately.
+        // (cameras, logs, streaming counters).  Foreground TUI is the
+        // recommended runtime on every platform (cargo-build, install.sh,
+        // and now the MSI Start menu shortcut).  The MSI still
+        // registers a Windows Service named `SourceBoxSentryCloudNode`
+        // for unattended-operation use cases, but it's manual-start by
+        // default — see README "Running as a Windows Service".
         let auto_start = sourcebox_sentry_cloudnode::setup::run_setup()?;
 
         if !auto_start {

@@ -370,9 +370,17 @@ impl Node {
         // ── 5. Start heartbeat + WebSocket ───────────────────────────────────
         // Collect camera IDs so the heartbeat can report them as "streaming"
         let streaming_camera_ids: Vec<String> = camera_mapping.values().cloned().collect();
-        let heartbeat_handle = self.start_heartbeat_loop(dash.clone(), streaming_camera_ids.clone());
+        let heartbeat_handle = self.start_heartbeat_loop(
+            dash.clone(),
+            streaming_camera_ids.clone(),
+            recording_state.clone(),
+        );
 
-        // Start WebSocket command channel (runs alongside HTTP heartbeats)
+        // Start WebSocket command channel (runs alongside HTTP heartbeats).
+        // Recording state used to be plumbed through here for the
+        // start_recording / stop_recording commands; both were retired
+        // in v0.1.43 in favour of the heartbeat-driven reconciler in
+        // start_heartbeat_loop, so the WS task no longer needs it.
         let ws_handle = {
             let api_url = self.config.cloud.api_url.clone();
             let api_key = self.config.cloud.api_key.clone();
@@ -382,7 +390,6 @@ impl Node {
             let ws_dash = dash.clone();
             let ws_hls_dir = self.hls_output_dir.clone();
             let ws_db = self.db.clone();
-            let ws_rec_state = recording_state.clone();
             tokio::spawn(async move {
                 crate::api::websocket::run_ws_client(
                     api_url,
@@ -393,7 +400,6 @@ impl Node {
                     ws_dash,
                     ws_hls_dir,
                     ws_db,
-                    ws_rec_state,
                     motion_rx,
                 ).await;
             })
@@ -528,7 +534,12 @@ impl Node {
         Ok(())
     }
 
-    fn start_heartbeat_loop(&self, dash: Dashboard, camera_ids: Vec<String>) -> tokio::task::JoinHandle<()> {
+    fn start_heartbeat_loop(
+        &self,
+        dash: Dashboard,
+        camera_ids: Vec<String>,
+        recording_state: Arc<RwLock<HashSet<String>>>,
+    ) -> tokio::task::JoinHandle<()> {
         let api_url = self.config.cloud.api_url.clone();
         let api_key = self.config.cloud.api_key.clone();
         let node_id = self.config.node.node_id.clone();
@@ -632,6 +643,36 @@ impl Node {
                         // re-enabled one clears on the same cadence. The
                         // setter logs transitions — steady state is silent.
                         dash.set_disabled_cameras(r.disabled_cameras.clone());
+
+                        // Reconcile the in-memory recording_state with the
+                        // backend's authoritative answer (v0.1.43+).  The
+                        // backend computes "should this camera be recording
+                        // right now?" from the operator-set policy on each
+                        // Camera row — continuous_24_7 OR (scheduled AND
+                        // in-window).  We replace the local set wholesale,
+                        // so a manual record-button press, a Continuous-24/7
+                        // toggle, or the start of a scheduled window all
+                        // converge within one tick.
+                        //
+                        // Self-healing: a node that crashes loses its in-
+                        // memory set, but the next heartbeat re-asserts the
+                        // correct state.  No imperative WebSocket commands
+                        // involved.
+                        //
+                        // Older backends omit `recording_state` entirely —
+                        // we treat that as "no info, leave the current
+                        // set alone" so a backend rollback can't silently
+                        // disable archive on every connected node.
+                        if let Some(target) = r.recording_state.as_ref() {
+                            if let Ok(mut set) = recording_state.write() {
+                                set.clear();
+                                for (cam_id, should_record) in target {
+                                    if *should_record {
+                                        set.insert(cam_id.clone());
+                                    }
+                                }
+                            }
+                        }
                         // Surface "update available" hints from the backend
                         // exactly once per distinct version so the operator
                         // sees the nudge without the heartbeat loop turning

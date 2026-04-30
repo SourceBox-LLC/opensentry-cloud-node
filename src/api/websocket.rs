@@ -19,9 +19,8 @@
 //! maintains the connection with auto-reconnect. Sends heartbeats over the
 //! socket and listens for commands from the backend.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
@@ -70,7 +69,6 @@ pub async fn run_ws_client(
     dash: Dashboard,
     hls_base_dir: PathBuf,
     db: NodeDatabase,
-    recording_state: Arc<RwLock<HashSet<String>>>,
     mut motion_rx: tokio::sync::mpsc::Receiver<MotionEvent>,
 ) {
     let ws_url = build_ws_url(&api_url, &api_key, &node_id);
@@ -141,7 +139,7 @@ pub async fn run_ws_client(
                                 Some(Ok(Message::Text(text))) => {
                                     if let Some(response) = handle_message(
                                         &text, &dash,
-                                        &hls_base_dir, &db, &recording_state,
+                                        &hls_base_dir, &db,
                                     ).await {
                                         let resp_text = serde_json::to_string(&response)
                                             .unwrap_or_default();
@@ -356,7 +354,6 @@ async fn handle_message(
     dash: &Dashboard,
     hls_base_dir: &Path,
     db: &NodeDatabase,
-    recording_state: &Arc<RwLock<HashSet<String>>>,
 ) -> Option<WsMessage> {
     let msg: WsMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -381,7 +378,7 @@ async fn handle_message(
             dash.log_info(format!("Command received: {}", cmd));
 
             let result = dispatch_command(
-                cmd, &msg.payload, hls_base_dir, db, recording_state,
+                cmd, &msg.payload, hls_base_dir, db,
             ).await;
 
             let payload = match &result {
@@ -425,7 +422,6 @@ async fn dispatch_command(
     payload: &serde_json::Value,
     hls_base_dir: &Path,
     db: &NodeDatabase,
-    recording_state: &Arc<RwLock<HashSet<String>>>,
 ) -> std::result::Result<serde_json::Value, String> {
     match cmd {
         "take_snapshot" => {
@@ -434,24 +430,14 @@ async fn dispatch_command(
                 .ok_or("missing camera_id")?;
             cmd_take_snapshot(camera_id, hls_base_dir, db).await
         }
-        "start_recording" => {
-            let camera_id = payload.get("camera_id")
-                .and_then(|v| v.as_str())
-                .ok_or("missing camera_id")?;
-            recording_state.write().map_err(|e| e.to_string())?
-                .insert(camera_id.to_string());
-            tracing::info!("Recording started for camera {}", camera_id);
-            Ok(serde_json::json!({"recording": true, "camera_id": camera_id}))
-        }
-        "stop_recording" => {
-            let camera_id = payload.get("camera_id")
-                .and_then(|v| v.as_str())
-                .ok_or("missing camera_id")?;
-            recording_state.write().map_err(|e| e.to_string())?
-                .remove(camera_id);
-            tracing::info!("Recording stopped for camera {}", camera_id);
-            Ok(serde_json::json!({"recording": false, "camera_id": camera_id}))
-        }
+        // `start_recording` / `stop_recording` WS commands were retired in
+        // v0.1.43 when the heartbeat-driven recording_state reconciler
+        // replaced them.  Recording state now flows: operator click →
+        // Camera.continuous_24_7 in DB → heartbeat response → CloudNode
+        // recording_state set.  See `node::runner::start_heartbeat_loop`
+        // for the reconciler.  The backend stopped sending these commands
+        // in the same release; we keep the unknown-command branch below
+        // as the catch-all for any operator running a stale backend.
         "list_snapshots" => {
             let camera_id = payload.get("camera_id").and_then(|v| v.as_str());
             let snaps = db.list_snapshots(camera_id).map_err(|e| e.to_string())?;

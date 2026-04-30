@@ -257,6 +257,28 @@ pub struct HeartbeatResponse {
     /// plan change.
     #[serde(default)]
     pub disabled_cameras: Vec<String>,
+
+    /// Per-camera recording state, authoritative.  `{camera_id: bool}`.
+    /// Computed server-side from each camera's `continuous_24_7` /
+    /// `scheduled_recording` policy + the current wall-clock time, so
+    /// the answer is fresh as of THIS heartbeat tick.  CloudNode
+    /// reconciles its in-memory `recording_state: HashSet<camera_id>`
+    /// to exactly match this map: cameras with `true` get inserted,
+    /// cameras with `false` (or omitted) get removed.
+    ///
+    /// Self-healing: a node that crashes loses its in-memory set, but
+    /// the next heartbeat re-asserts the correct state from the
+    /// backend's source of truth.  No imperative WebSocket commands
+    /// involved; the `start_recording` / `stop_recording` WS path is
+    /// retained only for legacy clients.
+    ///
+    /// Missing on older backends (defaults to empty via serde) — the
+    /// node treats "missing field" as "no info, leave state alone"
+    /// rather than "all cameras stop recording," so a backend
+    /// rollback that drops the field doesn't silently disable the
+    /// archive on every node.
+    #[serde(default)]
+    pub recording_state: Option<std::collections::HashMap<String, bool>>,
 }
 
 #[cfg(test)]

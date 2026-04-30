@@ -243,7 +243,7 @@ Three tiers, each with a distinct purpose and lifetime. The mental model:
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Every segment always flows to the cloud** — that is the live feed. The disk tier is a pure staging buffer. The SQLite tier is *additive*: populated only when the operator opts in via the WebSocket `start_recording` command, layered on top of the existing cloud push.
+**Every segment always flows to the cloud** — that is the live feed. The disk tier is a pure staging buffer. The SQLite tier is *additive*: populated only when the camera's recording policy says so (per-camera `continuous_24_7` or in-window `scheduled_recording`, reconciled from the heartbeat's `recording_state` map), layered on top of the existing cloud push.
 
 #### Per-segment lifecycle
 

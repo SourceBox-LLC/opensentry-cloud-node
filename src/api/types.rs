@@ -269,8 +269,8 @@ pub struct HeartbeatResponse {
     /// Self-healing: a node that crashes loses its in-memory set, but
     /// the next heartbeat re-asserts the correct state from the
     /// backend's source of truth.  No imperative WebSocket commands
-    /// involved; the `start_recording` / `stop_recording` WS path is
-    /// retained only for legacy clients.
+    /// involved; the `start_recording` / `stop_recording` WS arms were
+    /// retired in v0.1.43 — see websocket.rs for the removal note.
     ///
     /// Missing on older backends (defaults to empty via serde) — the
     /// node treats "missing field" as "no info, leave state alone"

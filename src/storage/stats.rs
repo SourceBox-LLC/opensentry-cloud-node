@@ -36,7 +36,7 @@
 //! `StorageStats::collect` which runs from the heartbeat task tick
 //! (every 30s by default).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sysinfo::Disks;
@@ -132,8 +132,18 @@ impl StorageStats {
 /// `/var` is more specific.  Returns (0, 0) if no disk matches —
 /// expected on minimal Docker images that show a virtual rootfs but
 /// don't expose a backing block device through `/proc`.
+///
+/// Windows note: `Path::canonicalize` returns a verbatim/extended-length
+/// path (`\\?\C:\Foo`).  sysinfo reports mount points without that
+/// prefix (`C:\`), and `Path::starts_with` is component-based — so the
+/// two won't match even though they refer to the same drive.  We strip
+/// the verbatim prefix before comparing.  Without this strip every
+/// Windows node reports `(0, 0)` and the safety floor never trips.
 fn read_disk_info(data_dir: &Path) -> (u64, u64) {
-    let abs = data_dir.canonicalize().unwrap_or_else(|_| data_dir.to_path_buf());
+    let canonical = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    let abs = strip_verbatim_prefix(canonical);
 
     let disks = Disks::new_with_refreshed_list();
     let mut best: Option<&sysinfo::Disk> = None;
@@ -163,6 +173,32 @@ fn read_disk_info(data_dir: &Path) -> (u64, u64) {
 /// pressure.  Cheap atomic read; safe to call on the hot path.
 pub fn should_pause_recording() -> bool {
     RECORDING_PAUSED_FOR_DISK.load(Ordering::Relaxed)
+}
+
+/// Strip the Windows verbatim/extended-length prefix (`\\?\`) from a
+/// path so structural prefix comparison against sysinfo mount points
+/// works.  No-op on non-Windows.  Leaves UNC verbatim paths alone
+/// (`\\?\UNC\server\share` is a network share and won't match a local
+/// mount point anyway).
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = match p.to_str() {
+        Some(s) => s,
+        // Non-UTF8 path — leave it alone, the prefix-matching loop will
+        // just fail to match and we'll return (0, 0) as before.
+        None => return p,
+    };
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if !rest.starts_with("UNC\\") {
+            return PathBuf::from(rest);
+        }
+    }
+    p
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    p
 }
 
 /// Read the host filesystem's free + total bytes for the disk that
@@ -261,13 +297,53 @@ mod tests {
     #[test]
     fn suggested_max_gb_real_disk_returns_capped_value() {
         // The path the test runner is on has SOME real disk underneath.
-        // We don't know which one, but we know the suggestion should
-        // land in the [5, 64] range if it returns Some.
+        // We don't know which one, but we know the suggestion MUST
+        // succeed — `None` here would mean we lost disk identification
+        // for the very disk the binary is running on, which is the
+        // exact bug the verbatim-prefix strip fixes on Windows.
         let suggestion = suggested_max_gb(std::path::Path::new("."));
-        if let Some(gb) = suggestion {
-            assert!(gb >= 5, "below safety floor: {} GB", gb);
-            assert!(gb <= 64, "above historical cap: {} GB", gb);
-        }
+        let gb = suggestion.expect(
+            "disk identification failed for `.` — \
+             read_disk_info() couldn't match the test runner's disk \
+             against any sysinfo mount point. On Windows this usually \
+             means strip_verbatim_prefix isn't stripping the `\\\\?\\` \
+             prefix that canonicalize() introduced.",
+        );
+        assert!(gb >= 5, "below safety floor: {} GB", gb);
+        assert!(gb <= 64, "above historical cap: {} GB", gb);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_unwraps_canonicalized_disk_paths() {
+        // Sanity-check the helper directly: a canonicalized Windows path
+        // (\\?\C:\Foo) must come back out as C:\Foo so structural prefix
+        // matching against sysinfo's C:\ mount point works.
+        let stripped = strip_verbatim_prefix(
+            std::path::PathBuf::from(r"\\?\C:\ProgramData\SourceBoxSentry"),
+        );
+        assert_eq!(
+            stripped,
+            std::path::PathBuf::from(r"C:\ProgramData\SourceBoxSentry"),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_leaves_unc_paths_alone() {
+        // \\?\UNC\server\share is a network share — the prefix-match loop
+        // won't find a local mount point for it anyway, and stripping
+        // would corrupt the path shape, so we leave it as-is.
+        let unc = std::path::PathBuf::from(r"\\?\UNC\server\share\foo");
+        let stripped = strip_verbatim_prefix(unc.clone());
+        assert_eq!(stripped, unc);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_passthrough_for_normal_paths() {
+        let p = std::path::PathBuf::from(r"C:\Users\Foo");
+        assert_eq!(strip_verbatim_prefix(p.clone()), p);
     }
 
     #[test]

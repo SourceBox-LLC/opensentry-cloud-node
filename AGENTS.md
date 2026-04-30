@@ -39,8 +39,8 @@ Loading priority (in `Config::load()`):
 - `cloud` — `api_url`, `api_key` (never serialised), `heartbeat_interval`
 - `cameras` — `auto_detect`, optional manual `devices` list
 - `streaming` — `fps`, `jpeg_quality`, `encoder`, nested `hls` (`enabled`, `segment_duration`, `playlist_size`, `bitrate`)
-- `recording` — `enabled`, `format` (`mp4` or `mkv`)
-- `storage` — `path`, `max_size_gb`
+- `recording` — `enabled`, `format` (`mp4` or `mkv`).  Per-camera recording policy (continuous_24_7 / scheduled_recording / scheduled_start / scheduled_end) lives backend-side on the Camera row and is reconciled to CloudNode via the heartbeat response — see "Recording flow" below.
+- `storage` — `max_size_gb` (operator-chosen during setup based on disk-aware suggestion).  The legacy `path` field was removed in v0.1.40; `paths::data_dir()` is the canonical resolver.
 - `server` — local HTTP `port` + `bind`
 - `logging` — `level`
 - `motion` — `enabled`, `threshold` (scene-change score 0.0–1.0), `cooldown_secs`
@@ -310,31 +310,36 @@ Indexes: `idx_snap_camera`, `idx_rec_camera_date`, `idx_logs_timestamp`.
 
 Recording is **opt-in and additive**. Live streaming is unconditional; recording layers BLOB archival on top while the flag is set.
 
+State source-of-truth lives backend-side per-camera (`continuous_24_7`, `scheduled_recording`, `scheduled_start`, `scheduled_end` columns on `Camera`). Each heartbeat response carries an authoritative `recording_state: HashMap<camera_id, bool>` map computed by the backend from those columns + the org's wall-clock time. CloudNode reconciles its in-memory `recording_state` HashSet to exactly match the map every tick.
+
 ```
-   WebSocket (node ⟵ backend)                 recording_state                SQLite
-   ───────────────────────────                (in-memory HashSet)            ──────
+   HTTP heartbeat (node → backend, every 30s)              recording_state                SQLite
+   ───────────────────────────────────────────             (in-memory HashSet)            ──────
 
-   ┌──────────────────────────┐   write
-   │ { command: "start_recording",│ ──────▶  HashSet<String>
-   │   payload: { camera_id } }│             .insert(cam_id)
-   └──────────────────────────┘                     │
-                                                    │ read per-segment
-   ┌──────────────────────────┐                     │ inside uploader
-   │ normal uploader path     │                     ▼
-   │ .ts pushed to cloud      │             ┌──────────────────┐
-   │ bytes still in memory    │ ──────────▶ │ save_recording_  │
-   └──────────────────────────┘             │ segment(cam, seq,│
-                                            │ date, BLOB, size)│
-                                            └──────────────────┘
-
-   ┌──────────────────────────┐   write
-   │ { command: "stop_recording",│ ──────▶ HashSet.remove(cam_id)
-   │   payload: { camera_id } }│
-   └──────────────────────────┘            (.ts keeps flowing to cloud
-                                            with no DB insert)
+   ┌──────────────────────────────────────┐
+   │ POST /api/nodes/heartbeat            │
+   │ { node_id, cameras, version, ... }   │ ──────▶ backend computes per-camera target
+   └──────────────────────────────────────┘            from Camera.continuous_24_7 OR
+                                                       (scheduled_recording AND in-window
+                                                        per org timezone)
+   ┌──────────────────────────────────────┐
+   │ HeartbeatResponse                    │
+   │ { recording_state: { cam_id: bool } }│ ──────▶ runner.rs reconciler:
+   └──────────────────────────────────────┘             write lock on HashSet,
+                                                       clear, insert all `true` cams
+                                                            │
+                                                            │ read per-segment in uploader
+                                                            ▼
+   ┌──────────────────────────┐                     ┌──────────────────┐
+   │ normal uploader path     │ ──────────────────▶ │ save_recording_  │
+   │ .ts pushed to cloud      │   if cam in set     │ segment(cam, seq,│
+   │ bytes still in memory    │                     │ date, BLOB, size)│
+   └──────────────────────────┘                     └──────────────────┘
 ```
 
-`recording_state: Arc<RwLock<HashSet<String>>>` lives only in memory, so it resets on every restart. If a future requirement calls for persistent recording across reboots, the right fix is an ADR to move the flag into the `config` table and re-hydrate at startup.
+**Self-healing across restarts**: a node that crashes loses its in-memory `recording_state` set, but the next heartbeat re-asserts the correct state from the backend's source of truth. No imperative WebSocket commands involved; the legacy `start_recording` / `stop_recording` WS arms were retired in v0.1.43.
+
+The reconciler treats a missing `recording_state` field as "no info, leave the set alone" (older backend, transient hiccup) — that way a backend rollback or partial outage can't silently disable archive on every connected node.
 
 #### Retention and cleanup
 
@@ -350,7 +355,7 @@ Recording is **opt-in and additive**. Live streaming is unconditional; recording
 Recorded segments never leave the node through the local HTTP server — that server only serves the transient disk buffer (`data/hls/*`). Operators who want to pull archived clips go through the cloud:
 
 - **Backend MCP tools** (`mcp__opensentry__get_incident_clip`, `mcp__opensentry__attach_clip`, etc.) fetch clips via the Command Center, which in turn queries the node through the WebSocket command channel.
-- The node exposes `list_snapshots` and `list_recordings` commands in `api/websocket.rs::handle_message` — these return metadata rows from `snapshots` / `recording_segments`. Bulk retrieval of the BLOBs themselves currently runs through the cloud's own cache of pushed segments, not a per-BLOB fetch from the node; if a future incident-export feature needs the archived bytes directly, add a `get_recording` / `get_snapshot` handler next to those list commands.
+- The node exposes `list_snapshots` and `list_recordings` commands in `api/websocket.rs::dispatch_command` — these return metadata rows from `snapshots` / `recording_segments`. Bulk retrieval of the BLOBs themselves currently runs through the cloud's own cache of pushed segments, not a per-BLOB fetch from the node; if a future incident-export feature needs the archived bytes directly, add a `get_recording` / `get_snapshot` handler next to those list commands.
 
 ### Local HTTP server (warp, port 8080)
 

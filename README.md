@@ -284,13 +284,19 @@ Your live stream always goes to the cloud. A small rolling buffer stays on this 
 | **Command Center (cloud)** | The live stream — what your dashboard actually plays | Per your Command Center plan | Handled by the backend |
 | **`data/node.db` on this machine** | Snapshots, opt-in recordings, config, recent logs | Until it hits `storage.max_size_gb` (default 64 GB); oldest data purged first | Whatever you set |
 
-### Recording is opt-in
+### Recording is opt-in (per-camera)
 
-Live streaming to the cloud is always on whenever the node is running — nothing to configure, nothing to toggle. **Recording** is a separate switch that, when enabled for a camera, *also* saves each chunk into `data/node.db` so you have a local copy even if the cloud is unreachable later.
+Live streaming to the cloud is always on whenever the node is running — nothing to configure, nothing to toggle. **Recording** is a separate switch *per camera* that, when enabled, also saves each chunk into `data/node.db` so you have a local copy even if the cloud is unreachable later.
 
-Turn it on from your Command Center dashboard: click **Record** on a camera tile; click **Stop** to go back to stream-only. While recording is on, each uploaded chunk is simultaneously written to the local archive. The same bytes that went to the cloud are archived — there's no double-read of the disk.
+Three ways to enable it from Command Center:
 
-Note: the recording flag lives in memory. If you restart the node, the flag clears and you'll need to re-enable recording from the dashboard. Your already-archived content is not affected.
+- **Continuous 24/7** — toggle on per camera in Settings → Camera Nodes. Records all the time the node is online.
+- **Scheduled** — toggle on per camera with a wall-clock window (e.g. 18:00–06:00). Times are interpreted in your org's timezone, set in Settings → Time Zone.
+- **Manual** — the **Record** button on a camera tile in the dashboard. Same end state as Continuous 24/7 (it just flips the same flag).
+
+The two policy modes are mutually exclusive — turning Continuous on auto-clears Scheduled in the same change, and vice versa.
+
+**Self-healing across restarts** (v0.1.43+): the recording state lives in the backend's per-camera `continuous_24_7` / `scheduled_recording` columns. CloudNode reconciles its in-memory recording set from the heartbeat response every ~30s, so a node restart picks up the correct policy on its next heartbeat — operators don't have to re-enable anything after a power cycle.
 
 ### Snapshots
 
@@ -306,15 +312,15 @@ From the dashboard, **Take Snapshot** pulls one JPEG frame from that camera's mo
 
 Two safety nets:
 
-1. **Automatic retention.** When `data/node.db` exceeds `storage.max_size_gb`, the node deletes the oldest recordings and snapshots until it's back under the cap. You won't get an error; the node just keeps running with fresh data.
+1. **Automatic retention.** Every 5 minutes the node checks total stored bytes against the operator-chosen `max_size_gb` cap. When the cap is exceeded, oldest recording segments are deleted first (FIFO) until usage is back under the cap. You won't get an error; the node just keeps running with fresh data. The Command Center dashboard surfaces a per-node usage bar so you can see it climbing toward the cap.
 
-2. **Disk-exhausted annotation.** On Linux, if the underlying filesystem drops under 256 MiB free, the node tags its own status with `(disk exhausted: N MiB free)` and that string flows through to your dashboard. You'll see it without having to SSH in.
+2. **Host-disk safety floor.** Cross-platform via `sysinfo`: when the underlying filesystem drops below 1 GiB free, the node *pauses durable recording writes* on the next heartbeat tick (regardless of how the cap was set). Live streaming continues unchanged; only the archive is paused. Recording resumes automatically once free disk recovers above the floor — typically because retention has freed up space, or the operator cleared other files.
 
 ### How to start fresh
 
 Ordered from least to most destructive — pick the one that matches your goal:
 
-- **Just free some space.** Lower `storage.max_size_gb` in your config and let retention reclaim disk.
+- **Lower the cap.** Re-run the setup wizard and pick a smaller `max_size_gb`; retention will sweep oldest segments at the next 5-minute tick to fit the new cap.
 - **Wipe recordings and snapshots but keep your credentials.** From the node's live dashboard (TUI), open the command bar and run `/wipe`. This clears the recording and snapshot tables in `data/node.db` and asks the backend to drop the node record; setup will re-pair on next launch if you want.
 - **Reset credentials only.** If your node has the wrong ID or API key, the dashboard will surface a red "Registration Failed" screen offering to wipe credentials and re-launch the setup wizard. Accept it and you're back at step 1.
 - **Full reinstall.** Stop the node and delete the `data/` directory. On next launch the setup wizard runs from scratch.

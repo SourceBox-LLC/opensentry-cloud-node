@@ -377,40 +377,73 @@ impl HlsUploader {
 
                             last_uploaded.store(seq, std::sync::atomic::Ordering::SeqCst);
 
-                            // Local cleanup: save to DB if recording, otherwise just delete
-                            let buffer_size = local_buffer_size as u64;
-                            if seq > buffer_size {
-                                let oldest_to_keep = seq.saturating_sub(buffer_size);
-                                let scan_start = oldest_to_keep.saturating_sub(20);
-                                let is_recording = rec_state.read()
-                                    .map(|s| s.contains(&camera_id))
-                                    .unwrap_or(false);
+                            // Per-task cleanup: save THIS segment to the DB
+                            // (if recording) and delete THIS segment from
+                            // disk.  Touch nothing else.
+                            //
+                            // Race history (fixed in v0.1.45): the previous
+                            // version walked back through `[seq-25, seq-5)`
+                            // and deleted every segment in that window —
+                            // ostensibly to maintain a 5-segment local
+                            // buffer and reap orphans missed by earlier
+                            // tasks.  Safe in isolation, catastrophic with
+                            // concurrent uploads.
+                            //
+                            // The upload pool runs up to 4 segments in
+                            // parallel (UPLOAD_SEMAPHORE).  Tasks complete
+                            // in roughly-but-not-exactly seq order, and a
+                            // task for seq N finishing first would delete
+                            // segments still being uploaded by tasks for
+                            // seqs N-25 .. N-5.  Pi log captured the exact
+                            // pattern — bursts of ~20 sequential
+                            // `No such file or directory (os error 2)`
+                            // errors right at the buffer boundary,
+                            // recovering as soon as the racing task
+                            // finished its cleanup.
+                            //
+                            // Delete-my-own-segment-only is race-free: no
+                            // task touches another task's file.  Anything
+                            // that slips through (e.g. a task that errored
+                            // before reaching this point) is reaped by the
+                            // orphan sweeper below on its 60s cadence,
+                            // which is the appropriate scope for "files
+                            // nobody currently owns" cleanup.
+                            //
+                            // _ used on local_buffer_size below — kept in
+                            // the config for API compatibility but no
+                            // longer drives behaviour.
+                            let _ = local_buffer_size;
+                            let _ = hls_output_dir;
 
-                                // Safety floor: if the host disk is critically
-                                // low (set by storage::stats::collect from the
-                                // heartbeat task), skip recording writes
-                                // entirely.  We still delete the source file —
-                                // the live HLS rolling buffer must keep
-                                // rotating or FFmpeg fills the disk anyway.
-                                // What we drop is just the durable archive
-                                // copy.  The retention loop will free up DB
-                                // space on its 5-min cadence.
-                                let paused = crate::storage::should_pause_recording();
+                            let is_recording = rec_state.read()
+                                .map(|s| s.contains(&camera_id))
+                                .unwrap_or(false);
 
-                                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                                for s in scan_start..oldest_to_keep {
-                                    let filename = format!("segment_{:05}.ts", s);
-                                    let src = hls_output_dir.join(&filename);
-                                    if is_recording && !paused {
-                                        if let Ok(data) = tokio::fs::read(&src).await {
-                                            let _ = db.save_recording_segment(
-                                                &camera_id, s, &today, &data,
-                                            );
-                                        }
-                                    }
-                                    let _ = tokio::fs::remove_file(&src).await;
+                            // Safety floor: if the host disk is critically
+                            // low (set by storage::stats::collect from the
+                            // heartbeat task), skip recording writes
+                            // entirely.  We still delete the source file —
+                            // the live HLS rolling buffer must keep
+                            // rotating or FFmpeg fills the disk anyway.
+                            // What we drop is just the durable archive
+                            // copy.  The retention loop will free up DB
+                            // space on its 5-min cadence.
+                            let paused = crate::storage::should_pause_recording();
+
+                            if is_recording && !paused {
+                                let today = chrono::Utc::now()
+                                    .format("%Y-%m-%d").to_string();
+                                if let Ok(data) = tokio::fs::read(&segment_path).await {
+                                    let _ = db.save_recording_segment(
+                                        &camera_id, seq, &today, &data,
+                                    );
                                 }
                             }
+
+                            // Always remove the local file after upload (and
+                            // optional DB save).  Concurrent tasks hold their
+                            // own segment_path values so this never races.
+                            let _ = tokio::fs::remove_file(&segment_path).await;
                         }
                         Ok(false) => {
                             tracing::debug!("Skipped segment {} (too small)", seq);

@@ -154,9 +154,14 @@ button {
 }
 
 /* ── Camera grid ─────────────────────────────────────────────── */
+/* `auto-fit` (not auto-fill) collapses empty tracks so a single tile
+   doesn't pin to the left edge — combined with `justify-content: center`
+   and a max width per column, a one-camera install centers neatly while
+   multi-camera installs still flow naturally across the row. */
 .cameras-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(360px, 480px));
+  justify-content: center;
   gap: 1rem;
 }
 

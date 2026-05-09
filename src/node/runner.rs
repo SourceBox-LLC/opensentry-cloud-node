@@ -146,11 +146,39 @@ impl Node {
         stop_flag: Arc<AtomicBool>,
         render_tui: bool,
     ) -> Result<()> {
-        // ── Create dashboard ────────────────────────────────────────────────
-        let node_id = self.config.node.node_id
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let dash = Dashboard::new(&node_id, &self.config.cloud.api_url);
+        // ── Resolve node_id before creating the dashboard ───────────────────
+        // The dashboard caches the id in its state and renders it in the
+        // status bar / web UI header.  We resolve it up-front so the SPA
+        // never shows "UNKNOWN":
+        //   - Connected mode: id comes from a prior registration, persisted
+        //     in `config.node.node_id`.  First boot of a Connected install
+        //     still shows "unknown" briefly (a few seconds, until
+        //     register_with_cloud returns), which is acceptable for a flow
+        //     that's already gating on a network round-trip.
+        //   - Local mode: get-or-create a stable 8-char UUID in the SQLite
+        //     `local_node_id` KV row.  Generated on first Local boot and
+        //     persisted, so per-camera IDs (and the dashboard header) stay
+        //     consistent across restarts.
+        let initial_node_id = if self.config.mode.is_local() {
+            match self.db.get_config("local_node_id")? {
+                Some(id) => id,
+                None => {
+                    let id: String = uuid::Uuid::new_v4()
+                        .simple()
+                        .to_string()
+                        .chars()
+                        .take(8)
+                        .collect();
+                    self.db.set_config("local_node_id", &id)?;
+                    id
+                }
+            }
+        } else {
+            self.config.node.node_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+        let dash = Dashboard::new(&initial_node_id, &self.config.cloud.api_url);
         dash.set_settings(self.build_settings_info());
         dash.set_db(self.db.clone(), self.hls_output_dir.clone());
         // Pass the API client so `/wipe confirm` can ask the backend
@@ -191,33 +219,14 @@ impl Node {
         // the per-camera fallback below generates IDs from
         // `<local_node_id>_<sanitized_device_path>`.
         let (node_id, camera_mapping) = if self.config.mode.is_local() {
-            // Get-or-create the persistent local node id.  8 hex chars
-            // matches the format Command Center registration returns,
-            // so all the downstream string formatting (status bar
-            // truncation to 8 chars, camera-id namespacing) keeps
-            // working without special-casing.
-            let local_id = match self.db.get_config("local_node_id")? {
-                Some(id) => id,
-                None => {
-                    let id: String = uuid::Uuid::new_v4()
-                        .simple()
-                        .to_string()
-                        .chars()
-                        .take(8)
-                        .collect();
-                    self.db.set_config("local_node_id", &id)?;
-                    dash.log_info(format!(
-                        "Generated local node id: {}",
-                        id.cyan().bold()
-                    ));
-                    id
-                }
-            };
+            // `initial_node_id` was already resolved (and persisted) above
+            // before Dashboard::new so the web UI header doesn't show
+            // "UNKNOWN".  Just reuse it here.
             dash.log_info(format!(
                 "Local mode — skipping Command Center registration (node {})",
-                local_id.cyan().bold()
+                initial_node_id.cyan().bold()
             ));
-            (local_id, HashMap::<String, String>::new())
+            (initial_node_id.clone(), HashMap::<String, String>::new())
         } else {
             dash.log_info("Registering with cloud…");
             let registration = self.register_with_cloud(&detected_cameras, &dash).await?;

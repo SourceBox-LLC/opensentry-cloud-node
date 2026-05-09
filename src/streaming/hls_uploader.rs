@@ -354,7 +354,10 @@ impl HlsUploader {
                             // in another ~1 s anyway.
                             let api = api_client.clone();
                             let cam = cam_id_for_playlist;
-                            let dir = output_dir;
+                            // Clone so `output_dir` stays usable below
+                            // (the local-recording branch reads
+                            // `stream.m3u8` for #EXTINF parsing).
+                            let dir = output_dir.clone();
                             tokio::spawn(async move {
                                 let playlist_path = dir.join("stream.m3u8");
                                 let content = match tokio::fs::read_to_string(&playlist_path).await {
@@ -449,8 +452,23 @@ impl HlsUploader {
                                 let today = chrono::Utc::now()
                                     .format("%Y-%m-%d").to_string();
                                 if let Ok(data) = tokio::fs::read(&segment_path).await {
+                                    // Parse #EXTINF for this segment from
+                                    // stream.m3u8 so the dynamic playback
+                                    // playlist (Phase B local web UI) has
+                                    // accurate per-segment durations.
+                                    // FFmpeg's HLS muxer with target=1s
+                                    // mostly produces ~1.000s segments but
+                                    // boundaries vary; fall back to 1000ms
+                                    // when the playlist isn't readable yet
+                                    // (e.g. supervisor just restarted).
+                                    let duration_ms = read_segment_duration_ms(
+                                        &output_dir,
+                                        seq,
+                                    )
+                                    .await
+                                    .unwrap_or(1000);
                                     let _ = db.save_recording_segment(
-                                        &camera_id, seq, &today, &data,
+                                        &camera_id, seq, &today, &data, duration_ms,
                                     );
                                 }
                             }
@@ -582,6 +600,42 @@ fn extract_sequence_number(filename: &str) -> Option<u64> {
 ///
 /// Keeps the `keep_count` segments with the **highest sequence numbers**
 /// (not mtime — sequence is monotonic, filesystem timestamps on FAT / SD
+/// Read the per-segment EXTINF duration from a freshly-written
+/// `stream.m3u8` and return it in milliseconds.
+///
+/// The HLS muxer writes lines like
+///   #EXTINF:1.001000,
+///   segment_00042.ts
+/// for every segment in the rolling window.  We find the line ending
+/// in `segment_<seq>.ts` and pull the `#EXTINF:` value above it.
+///
+/// Returns None when the playlist isn't readable yet, when the segment
+/// isn't in the playlist (uploader's poll loop can win the race against
+/// the muxer's atomic playlist replace), or when the EXTINF parse fails.
+/// Caller falls back to a configured default (1000 ms = 1.0 s, which is
+/// the muxer's target_duration).
+pub(crate) async fn read_segment_duration_ms(
+    output_dir: &std::path::Path,
+    seq: u64,
+) -> Option<u32> {
+    let playlist_path = output_dir.join("stream.m3u8");
+    let body = tokio::fs::read_to_string(&playlist_path).await.ok()?;
+    let needle = format!("segment_{:05}.ts", seq);
+    let mut last_extinf: Option<f64> = None;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("#EXTINF:") {
+            // Format: `#EXTINF:1.000000,` (the comma terminates the
+            // duration; some encoders also append a title after it).
+            let value = rest.split(',').next()?.trim();
+            last_extinf = value.parse::<f64>().ok();
+        } else if trimmed.ends_with(&needle) {
+            return last_extinf.map(|s| (s * 1000.0).round() as u32);
+        }
+    }
+    None
+}
+
 /// cards can skew by seconds) and removes the rest.  Returns
 /// `(files_removed, bytes_freed)`.
 ///

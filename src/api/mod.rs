@@ -16,6 +16,7 @@
 //! API Client for communicating with SourceBox Sentry Command Center
 
 mod client;
+pub mod commands;
 mod types;
 pub mod websocket;
 

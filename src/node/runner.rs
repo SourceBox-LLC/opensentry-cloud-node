@@ -257,6 +257,32 @@ impl Node {
         let recording_state: Arc<RwLock<HashSet<String>>> =
             Arc::new(RwLock::new(HashSet::new()));
 
+        // Phase B: in Local mode, seed the recording set from the
+        // `local_recording_state` SQLite table so per-camera record
+        // toggles survive restarts.  In Connected mode this seed gets
+        // overwritten ~30 s later by the heartbeat reconciler (which
+        // is the canonical source of truth there), so seeding is a
+        // no-op there but harmless.
+        if self.config.mode.is_local() {
+            match self.db.get_local_recording_state() {
+                Ok(map) => {
+                    if let Ok(mut set) = recording_state.write() {
+                        for (cam, enabled) in map {
+                            if enabled {
+                                set.insert(cam);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load local recording state from DB: {} — continuing with empty set",
+                        e,
+                    );
+                }
+            }
+        }
+
         // Shared shutdown flag — set on Ctrl+C, /quit, or by the Windows
         // Service Control Manager via the public run_headless entry point.
         // Owned by the caller now (was created here in older versions);
@@ -423,8 +449,23 @@ impl Node {
         }
 
         // ── 4. Start HTTP server ──────────────────────────────────────────────
+        // Build the Phase B `/api/*` state alongside the HLS map.  Both
+        // modes (Local + Connected) get the same API surface — the
+        // recording-toggle endpoint returns 409 in Connected mode (CC
+        // is the source of truth) but everything else works identically.
         let camera_map: HashMap<String, PathBuf> = cameras_with_hls.into_iter().collect();
-        let http_server = self.create_http_server_with_hls(camera_map);
+        let api_state = crate::server::LocalApiState::new(
+            dash.clone(),
+            self.db.clone(),
+            recording_state.clone(),
+            self.config.mode,
+            self.hls_output_dir.clone(),
+        );
+        let http_server = crate::server::HttpServer::new_with_api(
+            self.config.server.clone(),
+            camera_map,
+            api_state,
+        );
         tokio::spawn(async move {
             if let Err(e) = http_server.run().await {
                 tracing::error!("HTTP server error: {}", e);
@@ -902,9 +943,6 @@ impl Node {
         }
     }
 
-    fn create_http_server_with_hls(&self, hls_cameras: HashMap<String, PathBuf>) -> HttpServer {
-        HttpServer::new_with_hls(self.config.server.clone(), hls_cameras)
-    }
 }
 
 fn get_local_ip() -> Option<String> {

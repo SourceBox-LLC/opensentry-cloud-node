@@ -15,6 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! HTTP Server for serving recordings and MJPEG stream
 
+pub mod api;
 mod http;
 
+pub use api::LocalApiState;
 pub use http::HttpServer;

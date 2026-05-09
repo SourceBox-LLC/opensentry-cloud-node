@@ -459,141 +459,41 @@ async fn dispatch_command(
 
 // ── Command handlers ─────────────────────────────────────────────────────────
 
-/// Extract a JPEG frame from the latest HLS segment and save it to the DB.
+/// WS-side `take_snapshot` adapter.
+///
+/// Delegates the FFmpeg-grab + DB-save flow to
+/// [`crate::api::commands::take_snapshot`] (shared with the local
+/// `/api/cameras/{id}/snapshot` HTTP route in Phase B), then re-reads
+/// the saved JPEG and base64-encodes it for transport over the WS
+/// JSON envelope.  Pre-Phase-B this whole flow lived inline here.
 async fn cmd_take_snapshot(
     camera_id: &str,
     hls_base_dir: &Path,
     db: &NodeDatabase,
 ) -> std::result::Result<serde_json::Value, String> {
-    let camera_hls_dir = hls_base_dir.join(camera_id);
-    let latest_segment = find_latest_segment(&camera_hls_dir)
-        .ok_or_else(|| format!("No segments found for camera {}", camera_id))?;
+    let meta = crate::api::commands::take_snapshot(camera_id, hls_base_dir, db).await?;
 
-    // Use FFmpeg to extract a single frame as JPEG
-    let temp_path = std::env::temp_dir()
-        .join(format!("sourcebox_sentry_snap_{}.jpg", camera_id));
-
-    let ffmpeg = crate::streaming::find_ffmpeg();
-
-    let output = tokio::process::Command::new(&ffmpeg)
-        .args([
-            "-y",
-            "-i", &latest_segment.to_string_lossy(),
-            "-frames:v", "1",
-            "-q:v", "2",
-        ])
-        .arg(&temp_path)
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("FFmpeg failed: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last_line = stderr.lines().last().unwrap_or("unknown error");
-        return Err(format!("FFmpeg error: {}", last_line));
-    }
-
-    // Read the JPEG data and save to database
-    let data = tokio::fs::read(&temp_path).await
-        .map_err(|e| format!("Failed to read snapshot: {}", e))?;
-    let _ = tokio::fs::remove_file(&temp_path).await;
-
-    let now = chrono::Utc::now();
-    let filename = format!(
-        "{}_{}.jpg",
-        camera_id.replace(['/', '\\'], "_"),
-        now.format("%Y%m%d_%H%M%S"),
-    );
-    let timestamp = now.timestamp_millis();
-    let size = data.len() as u64;
-
-    // Base64-encode the JPEG for transfer over WebSocket
-    let image_b64 = BASE64_STANDARD.encode(&data);
-
-    // Safety floor: if the host disk is critically low, skip the durable
-    // DB write but still hand the operator the live image — they wanted
-    // a snapshot, and not getting one is a worse failure than not
-    // archiving it. The base64 image still rides back on the WebSocket.
-    if crate::storage::should_pause_recording() {
-        tracing::warn!(
-            "snapshot skipped DB write: host disk under safety floor (camera {})",
-            camera_id,
-        );
-    } else {
-        db.save_snapshot(camera_id, &filename, timestamp, &data)
-            .map_err(|e| format!("DB save error: {}", e))?;
-    }
-
-    tracing::info!("Snapshot captured: {} ({} bytes)", filename, size);
+    // Re-fetch the JPEG bytes for WS transport.  When the safety floor
+    // skipped the DB write, `id == 0` and we have no bytes to return —
+    // surface that as a clear error so operator sees a real failure
+    // rather than an empty image.
+    let jpeg = crate::api::commands::fetch_snapshot_jpeg(db, meta.id).await?;
+    let image_b64 = BASE64_STANDARD.encode(&jpeg);
 
     Ok(serde_json::json!({
-        "filename": filename,
-        "size_bytes": size,
-        "timestamp": timestamp,
+        "filename": meta.filename,
+        "size_bytes": meta.size_bytes,
+        "timestamp": meta.timestamp,
         "image_b64": image_b64,
     }))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Find the newest *complete* `.ts` segment for a camera.
-///
-/// **Primary**: parse `stream.m3u8` — segments listed there are guaranteed
-/// complete (the one currently being written has not been appended yet).
-///
-/// **Fallback**: filesystem scan using the *second*-to-latest sequence number,
-/// since the very latest on disk may still be under active write by FFmpeg.
-fn find_latest_segment(dir: &Path) -> Option<PathBuf> {
-    // Strategy 1: playlist — authoritative source of complete segments
-    if let Some(seg) = last_segment_from_playlist(dir) {
-        return Some(seg);
-    }
-    // Strategy 2: filesystem — skip the segment currently being written
-    last_segment_from_fs(dir)
-}
-
-/// Parse `stream.m3u8` and return the path of the last `.ts` entry.
-fn last_segment_from_playlist(dir: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(dir.join("stream.m3u8")).ok()?;
-    let seg_line = content
-        .lines()
-        .rev()
-        .find(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#') && t.ends_with(".ts")
-        })?
-        .trim();
-    // The entry may carry a relative/absolute prefix — normalise to a
-    // plain filename so we can resolve it against `dir`.
-    let filename = std::path::Path::new(seg_line).file_name()?;
-    let path = dir.join(filename);
-    path.is_file().then_some(path)
-}
-
-/// Scan the directory for `segment_<seq>.ts` files and return the
-/// *second*-to-latest by sequence number — the latest may be incomplete.
-fn last_segment_from_fs(dir: &Path) -> Option<PathBuf> {
-    let mut segs: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".ts") { return None; }
-            let parts: Vec<&str> = name.split('_').collect();
-            if parts.len() != 2 { return None; }
-            let seq = parts[1].trim_end_matches(".ts").parse::<u64>().ok()?;
-            Some((seq, e.path()))
-        })
-        .collect();
-    if segs.is_empty() { return None; }
-    segs.sort_unstable_by_key(|(seq, _)| *seq);
-    // The very latest segment may still be under active write by the
-    // streaming FFmpeg, so prefer the second-to-latest when available.
-    if segs.len() >= 2 { segs.pop(); }
-    segs.pop().map(|(_, p)| p)
-}
+//
+// `find_latest_segment` + helpers + their tests moved to
+// `crate::api::commands` in Phase B so the local /api/* HTTP routes can
+// share the same logic.  Both the WS dispatcher (above) and the HTTP
+// snapshot route call `commands::take_snapshot` which uses them.
 
 fn get_local_ip() -> Option<String> {
     use std::net::UdpSocket;
@@ -749,75 +649,6 @@ mod tests {
         );
     }
 
-    // ── Segment-selection tests ──────────────────────────────────
-
-    #[test]
-    fn segment_selection_prefers_playlist_over_fs() {
-        let dir = std::env::temp_dir().join("sourcebox_sentry_test_playlist");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Three segment files on disk — third is "still being written"
-        std::fs::write(dir.join("segment_00001.ts"), b"seg1").unwrap();
-        std::fs::write(dir.join("segment_00002.ts"), b"seg2").unwrap();
-        std::fs::write(dir.join("segment_00003.ts"), b"incomplete").unwrap();
-
-        // Playlist only lists the first two (complete)
-        std::fs::write(
-            dir.join("stream.m3u8"),
-            "#EXTM3U\n#EXTINF:1.0,\nsegment_00001.ts\n#EXTINF:1.0,\nsegment_00002.ts\n",
-        ).unwrap();
-
-        let result = find_latest_segment(&dir);
-        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00002.ts");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn segment_selection_fs_fallback_skips_latest() {
-        let dir = std::env::temp_dir().join("sourcebox_sentry_test_fs_fallback");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // No playlist — only segment files
-        std::fs::write(dir.join("segment_00001.ts"), b"seg1").unwrap();
-        std::fs::write(dir.join("segment_00002.ts"), b"seg2").unwrap();
-        std::fs::write(dir.join("segment_00003.ts"), b"seg3").unwrap();
-
-        let result = find_latest_segment(&dir);
-        // Should return second-to-latest, not the latest
-        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00002.ts");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn segment_selection_single_segment_still_returned() {
-        let dir = std::env::temp_dir().join("sourcebox_sentry_test_single_seg");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        std::fs::write(dir.join("segment_00001.ts"), b"seg1").unwrap();
-
-        let result = find_latest_segment(&dir);
-        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00001.ts");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn playlist_parser_handles_path_prefix() {
-        let dir = std::env::temp_dir().join("sourcebox_sentry_test_path_prefix");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        std::fs::write(dir.join("segment_00005.ts"), b"seg5").unwrap();
-        // Playlist entry has a path prefix (observed in the wild)
-        std::fs::write(
-            dir.join("stream.m3u8"),
-            "#EXTM3U\n#EXTINF:1.0,\n./data/hls/cam1/segment_00005.ts\n",
-        ).unwrap();
-
-        let result = last_segment_from_playlist(&dir);
-        assert_eq!(result.unwrap().file_name().unwrap(), "segment_00005.ts");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // Segment-selection tests moved to crate::api::commands tests in
+    // Phase B alongside the helpers themselves.
 }

@@ -95,7 +95,8 @@ impl NodeDatabase {
                  segment_seq INTEGER NOT NULL,
                  date        TEXT    NOT NULL,
                  data        BLOB   NOT NULL,
-                 size_bytes  INTEGER NOT NULL
+                 size_bytes  INTEGER NOT NULL,
+                 duration_ms INTEGER NOT NULL DEFAULT 1000
              );
 
              CREATE TABLE IF NOT EXISTS config (
@@ -110,6 +111,15 @@ impl NodeDatabase {
                  message   TEXT    NOT NULL
              );
 
+             /* Phase B (local web UI) — per-camera recording toggle for
+                Local-mode installs. In Connected mode this table is
+                ignored; CC's heartbeat reconciler is the source of
+                truth for recording_state. */
+             CREATE TABLE IF NOT EXISTS local_recording_state (
+                 camera_id TEXT    PRIMARY KEY,
+                 enabled   INTEGER NOT NULL
+             );
+
              CREATE INDEX IF NOT EXISTS idx_snap_camera
                  ON snapshots(camera_id);
              CREATE INDEX IF NOT EXISTS idx_rec_camera_date
@@ -118,6 +128,21 @@ impl NodeDatabase {
                  ON logs(id DESC);",
         )
         .map_err(|e| Error::Storage(format!("DB init error: {}", e)))?;
+
+        // Schema migration for existing DBs: add duration_ms column if it
+        // doesn't already exist.  SQLite has no ADD COLUMN IF NOT EXISTS
+        // pre-3.35, so just run the ALTER and swallow the duplicate-column
+        // error.  The CREATE TABLE above already includes the column for
+        // fresh installs.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE recording_segments ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 1000",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") && !msg.contains("already exists") {
+                return Err(Error::Storage(format!("DB migration error: {}", e)));
+            }
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -215,6 +240,7 @@ impl NodeDatabase {
         segment_seq: u64,
         date: &str,
         data: &[u8],
+        duration_ms: u32,
     ) -> Result<()> {
         // See `save_snapshot` for why `size_bytes` is the plaintext length.
         let plaintext_len = data.len() as i64;
@@ -225,12 +251,149 @@ impl NodeDatabase {
             .map_err(|e| Error::Storage(format!("Recording encrypt error: {}", e)))?;
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO recording_segments (camera_id, segment_seq, date, data, size_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![camera_id, segment_seq as i64, date, encrypted, plaintext_len],
+            "INSERT INTO recording_segments (camera_id, segment_seq, date, data, size_bytes, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![camera_id, segment_seq as i64, date, encrypted, plaintext_len, duration_ms as i64],
         )
         .map_err(|e| Error::Storage(format!("Recording insert error: {}", e)))?;
         Ok(())
+    }
+
+    // ── Phase B (local web UI) accessors ────────────────────────────
+
+    /// Look up the row id of the most-recently-saved snapshot matching
+    /// (camera_id, filename, timestamp).  Used by the take_snapshot
+    /// flow to return a stable id to the caller — `last_insert_rowid`
+    /// would race if two snapshots fired concurrently on different
+    /// connections; the (camera_id, filename, timestamp) tuple is
+    /// effectively unique because `filename` includes a per-second
+    /// timestamp and `timestamp` is millisecond-resolution.
+    pub fn last_snapshot_id_for(
+        &self,
+        camera_id: &str,
+        filename: &str,
+        timestamp: i64,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM snapshots
+                 WHERE camera_id = ?1 AND filename = ?2 AND timestamp = ?3
+                 ORDER BY id DESC LIMIT 1",
+                params![camera_id, filename, timestamp],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Storage(format!("Snapshot id lookup error: {}", e)))?;
+        Ok(id)
+    }
+
+    /// Decrypt and return the JPEG bytes for a saved snapshot.  The
+    /// AAD is recomputed from (camera_id, filename, timestamp) so a
+    /// row whose blob got swapped at rest fails decryption.
+    pub fn get_snapshot_data(&self, id: i64) -> Result<Vec<u8>> {
+        let conn = self.lock()?;
+        let (camera_id, filename, timestamp, blob): (String, String, i64, Vec<u8>) = conn
+            .query_row(
+                "SELECT camera_id, filename, timestamp, data
+                 FROM snapshots WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|e| Error::Storage(format!("Snapshot lookup error: {}", e)))?;
+        let aad = snapshot_aad(&camera_id, &filename, timestamp);
+        decrypt_bytes(&blob, &aad)
+            .map_err(|e| Error::Storage(format!("Snapshot decrypt error: {}", e)))
+    }
+
+    /// List `(segment_seq, duration_ms)` for a given camera + date,
+    /// ordered ascending so the M3U8 builder can emit segments in
+    /// playback order.  Empty Vec when no recordings match.
+    pub fn list_recording_segment_seqs(
+        &self,
+        camera_id: &str,
+        date: &str,
+    ) -> Result<Vec<(u64, u32)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT segment_seq, duration_ms FROM recording_segments
+                 WHERE camera_id = ?1 AND date = ?2
+                 ORDER BY segment_seq ASC",
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let iter = stmt
+            .query_map(params![camera_id, date], |row| {
+                let seq: i64 = row.get(0)?;
+                let dur: i64 = row.get(1)?;
+                Ok((seq as u64, dur as u32))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in iter {
+            out.push(r.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Decrypt and return the raw MPEG-TS bytes for a single recording
+    /// segment.  Errors when no row matches the (camera_id, date,
+    /// segment_seq) tuple — caller should map that to HTTP 404.
+    pub fn get_recording_segment(
+        &self,
+        camera_id: &str,
+        date: &str,
+        segment_seq: u64,
+    ) -> Result<Vec<u8>> {
+        let conn = self.lock()?;
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT data FROM recording_segments
+                 WHERE camera_id = ?1 AND date = ?2 AND segment_seq = ?3",
+                params![camera_id, date, segment_seq as i64],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Storage(format!("Segment lookup error: {}", e)))?;
+        let aad = recording_aad(camera_id, segment_seq, date);
+        decrypt_bytes(&blob, &aad)
+            .map_err(|e| Error::Storage(format!("Segment decrypt error: {}", e)))
+    }
+
+    /// Set the local recording flag for one camera (Local-mode only).
+    /// In Connected mode this table is ignored; CC's heartbeat
+    /// reconciler is the source of truth.
+    pub fn set_local_recording(&self, camera_id: &str, enabled: bool) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO local_recording_state (camera_id, enabled)
+             VALUES (?1, ?2)
+             ON CONFLICT(camera_id) DO UPDATE SET enabled = excluded.enabled",
+            params![camera_id, if enabled { 1 } else { 0 }],
+        )
+        .map_err(|e| Error::Storage(format!("Local recording write error: {}", e)))?;
+        Ok(())
+    }
+
+    /// Read the entire local recording-state map.  Called once at boot
+    /// to seed the in-memory `recording_state` HashSet, so a Local-mode
+    /// node remembers per-camera record toggles across restarts.
+    pub fn get_local_recording_state(&self) -> Result<std::collections::HashMap<String, bool>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT camera_id, enabled FROM local_recording_state")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let iter = stmt
+            .query_map([], |row| {
+                let cam: String = row.get(0)?;
+                let enabled: i64 = row.get(1)?;
+                Ok((cam, enabled != 0))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let mut out = std::collections::HashMap::new();
+        for r in iter {
+            let (k, v) = r.map_err(|e| Error::Storage(e.to_string()))?;
+            out.insert(k, v);
+        }
+        Ok(out)
     }
 
     pub fn list_recordings(

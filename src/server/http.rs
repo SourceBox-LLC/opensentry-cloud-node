@@ -42,14 +42,34 @@ use crate::error::Result;
 pub struct HttpServer {
     config: ServerConfig,
     hls_cameras: HashMap<String, PathBuf>,
+    api_state: Option<super::api::LocalApiState>,
 }
 
 impl HttpServer {
-    /// Create HTTP server with HLS camera map.
+    /// Create HTTP server with HLS camera map.  No `/api/*` routes —
+    /// kept for callers that haven't been migrated to the Phase B
+    /// `LocalApiState` plumbing yet.  Phase D will retire this.
     pub fn new_with_hls(config: ServerConfig, hls_cameras: HashMap<String, PathBuf>) -> Self {
         Self {
             config,
             hls_cameras,
+            api_state: None,
+        }
+    }
+
+    /// Create HTTP server with HLS map + Phase B `/api/*` routes.
+    /// `api_state` carries the dashboard handle, DB, recording-state
+    /// set, mode, and HLS base dir.  See `super::api::routes` for the
+    /// full endpoint list and threat model.
+    pub fn new_with_api(
+        config: ServerConfig,
+        hls_cameras: HashMap<String, PathBuf>,
+        api_state: super::api::LocalApiState,
+    ) -> Self {
+        Self {
+            config,
+            hls_cameras,
+            api_state: Some(api_state),
         }
     }
 
@@ -132,9 +152,23 @@ impl HttpServer {
                 }
             });
 
-        let routes = health.or(hls_playlist).or(hls_segment);
-
-        warp::serve(routes).run(bind_addr).await;
+        // Compose the route chain.  warp's `or` builds a tagged-union
+        // of Reply types — the typed health / HLS handlers and the
+        // BoxedFilter from `super::api::routes` chain naturally without
+        // any erasure on our side.  The api_state is consumed below,
+        // so chain-building has to happen in two arms.
+        let api_state = self.api_state.clone();
+        if let Some(state) = api_state {
+            let api_routes = super::api::routes(state);
+            let routes = health.or(hls_playlist).or(hls_segment).or(api_routes);
+            warp::serve(routes).run(bind_addr).await;
+        } else {
+            // Pre-Phase-B fallback: run without /api/* routes.  Used
+            // by tests and by run_quick_setup / run-once paths that
+            // don't construct a LocalApiState.
+            let routes = health.or(hls_playlist).or(hls_segment);
+            warp::serve(routes).run(bind_addr).await;
+        }
 
         Ok(())
     }

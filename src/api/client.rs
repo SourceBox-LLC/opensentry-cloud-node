@@ -246,6 +246,12 @@ impl ApiClient {
         video_codec: &str,
         audio_codec: &str,
     ) -> Result<()> {
+        // Local mode has no Command Center to report to — succeed
+        // silently so the caller's "first segment pushed" branch
+        // doesn't keep retrying on every segment.
+        if self.is_local() {
+            return Ok(());
+        }
         let _node_id = self
             .node_id
             .as_ref()
@@ -336,6 +342,12 @@ impl ApiClient {
         timestamp: &str,
         segment_seq: u64,
     ) -> Result<()> {
+        // Local mode: motion events stay on-box.  No CC to notify, so
+        // succeed silently rather than logging a failure for every
+        // motion-detected segment.
+        if self.is_local() {
+            return Ok(());
+        }
         let _node_id = self.node_id.as_ref()
             .ok_or_else(|| Error::Api("Node not registered".into()))?;
 
@@ -400,6 +412,13 @@ impl ApiClient {
 
     /// Update the HLS playlist on the server
     pub async fn update_playlist(&self, camera_id: &str, playlist_content: &str) -> Result<()> {
+        // Local mode: no CC to push to.  Returning Ok keeps the
+        // uploader's spawned playlist-push loop quiet — without this
+        // every segment write logs "Playlist push failed after 3
+        // attempts: API error: Node not registered".
+        if self.is_local() {
+            return Ok(());
+        }
         let _node_id = self.node_id.as_ref()
             .ok_or_else(|| Error::Api("Node not registered".into()))?;
 

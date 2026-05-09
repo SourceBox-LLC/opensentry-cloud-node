@@ -262,6 +262,27 @@ impl Node {
             (node_id, camera_mapping)
         };
 
+        // ── 2b. Local mode: stamp dashboard rows with the locally-derived
+        // camera_id ────────────────────────────────────────────────────────
+        // The Connected branch above already filled this in from the CC
+        // mapping.  In Local mode we generate IDs deterministically below
+        // (in the per-camera supervisor loop) using the same formula —
+        // mirror that here so the SPA's `/api/cameras` returns
+        // `/hls/{cam_id}/stream.m3u8` instead of the broken
+        // `/hls//stream.m3u8` (empty camera_id) that 404s in the browser.
+        if self.config.mode.is_local() {
+            for cam in &detected_cameras {
+                let sanitized = cam.device_path
+                    .replace("/", "_")
+                    .replace("\\", "_")
+                    .replace(" ", "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let cid = format!("{}_{}", node_id, sanitized);
+                dash.set_camera_id(&cam.name, &cid);
+            }
+        }
+
         // ── 3. Start HLS streams ──────────────────────────────────────────────
         let mut running_streams: Vec<RunningStream> = Vec::new();
         let mut cameras_with_hls: Vec<(String, PathBuf)> = Vec::new();

@@ -1,4 +1,20 @@
-# Build stage
+# ── Frontend build stage (Phase C, 2026-05-09) ─────────────────────────
+# The Rust binary embeds `web-dist/` via rust-embed at compile time.
+# Build the SPA in a separate node image to keep the rust builder lean.
+FROM node:20-alpine AS web-builder
+
+WORKDIR /web
+
+# Cache npm install when only source changes
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+# `npm run build` writes to ../web-dist/ (per vite.config.ts), so the
+# output lands at /web-dist (one dir up from /web).
+
+# ── Rust build stage ───────────────────────────────────────────────────
 FROM rust:1-alpine AS builder
 
 # pkg-config + openssl-dev are needed because reqwest's default-tls feature
@@ -8,10 +24,16 @@ RUN apk add --no-cache musl-dev pkgconf openssl-dev perl make
 WORKDIR /app
 
 # Cache dependencies
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
     cargo build --release && \
     rm -rf src target/release/sourcebox-sentry-cloudnode*
+
+# Pull the freshly-built SPA bundle from the web-builder stage so
+# rust-embed picks it up at compile time.  build.rs would otherwise
+# write a "Web UI not built" placeholder and the binary would 503
+# the browser dashboard.
+COPY --from=web-builder /web-dist ./web-dist
 
 # Build application
 COPY src ./src

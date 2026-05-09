@@ -17,8 +17,75 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Operating mode chosen at install time.
+///
+/// `Connected` (default for back-compat): the node registers with a
+/// SourceBox Sentry Command Center, opens a WebSocket for inbound
+/// commands, sends heartbeats, and pushes HLS segments. The node is
+/// just one half of a SaaS product.
+///
+/// `Local`: standalone install with no Command Center pairing. The
+/// node still discovers cameras, runs FFmpeg pipelines, serves HLS
+/// locally, and records to the encrypted SQLite — but every
+/// CC-coupled path in `node::runner::run_internal` is gated off.
+/// Users open `http://<node-ip>:8080` in a browser and use the local
+/// web UI for snapshots / recording / playback.
+///
+/// New nodes pick this at the setup wizard's first prompt. Existing
+/// installs upgrade in-place: an absent `mode` row in `node.db`
+/// defaults to `Connected`, so behaviour is unchanged after binary
+/// swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeMode {
+    Local,
+    Connected,
+}
+
+impl Default for NodeMode {
+    fn default() -> Self {
+        Self::Connected
+    }
+}
+
+impl NodeMode {
+    /// String form persisted in the SQLite KV (`config` table) and used
+    /// by serde when serialising config. Stable wire value — don't
+    /// rename without a migration.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeMode::Local => "local",
+            NodeMode::Connected => "connected",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "local" => Self::Local,
+            // Treat any other (or absent) value as Connected — that's
+            // the only safe default for a node already running, since
+            // turning off CC paths on a running install would silently
+            // stop heartbeats / segment push.
+            _ => Self::Connected,
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, NodeMode::Local)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        matches!(self, NodeMode::Connected)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Local-only vs Connected install (see `NodeMode`).  Defaults to
+    /// Connected for existing-install back-compat — see the type's
+    /// rustdoc.
+    #[serde(default)]
+    pub mode: NodeMode,
     pub node: NodeConfig,
     pub cloud: CloudConfig,
     pub cameras: CamerasConfig,
@@ -36,6 +103,7 @@ impl Default for Config {
             sysinfo::System::host_name().unwrap_or_else(|| "sourcebox-sentry-node".to_string());
 
         Self {
+            mode: NodeMode::default(),
             node: NodeConfig::default(),
             cloud: CloudConfig::default(),
             cameras: CamerasConfig::default(),
@@ -264,5 +332,110 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod node_mode_tests {
+    //! Pin the wire format + back-compat behaviour of the install-time
+    //! mode flag.  Default = Connected because absent rows in
+    //! `node.db` (older binaries that wrote no `mode` row) must keep
+    //! their existing CC behaviour after binary swap.
+    use super::*;
+
+    #[test]
+    fn default_is_connected() {
+        assert_eq!(NodeMode::default(), NodeMode::Connected);
+        let cfg = Config::default();
+        assert!(cfg.mode.is_connected());
+        assert!(!cfg.mode.is_local());
+    }
+
+    #[test]
+    fn from_str_round_trip() {
+        assert_eq!(NodeMode::from_str("local"), NodeMode::Local);
+        assert_eq!(NodeMode::from_str("connected"), NodeMode::Connected);
+        // Anything else (typo, missing row, future value) decays to
+        // Connected so a running install never silently flips to
+        // Local on a malformed read.
+        assert_eq!(NodeMode::from_str(""), NodeMode::Connected);
+        assert_eq!(NodeMode::from_str("LOCAL"), NodeMode::Connected);
+        assert_eq!(NodeMode::from_str("future_mode"), NodeMode::Connected);
+    }
+
+    #[test]
+    fn as_str_matches_persisted_format() {
+        assert_eq!(NodeMode::Local.as_str(), "local");
+        assert_eq!(NodeMode::Connected.as_str(), "connected");
+    }
+
+    #[test]
+    fn predicate_helpers_are_consistent() {
+        assert!(NodeMode::Local.is_local());
+        assert!(!NodeMode::Local.is_connected());
+        assert!(NodeMode::Connected.is_connected());
+        assert!(!NodeMode::Connected.is_local());
+    }
+
+    #[test]
+    fn config_serde_writes_mode_field() {
+        // Pin the wire format: an explicitly-Local config serialises
+        // to YAML with `mode: local`.  The reverse direction (full
+        // round-trip) doesn't work because CloudConfig::api_key has
+        // `skip_serializing` and is required on deserialize — that's
+        // a pre-existing quirk, exercised by the back-compat test
+        // below that handcrafts the input YAML.
+        let cfg = Config {
+            mode: NodeMode::Local,
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&cfg).expect("serialize");
+        assert!(yaml.contains("mode: local"), "yaml was: {}", yaml);
+
+        let cfg_connected = Config::default();
+        let yaml = serde_yaml::to_string(&cfg_connected).expect("serialize");
+        assert!(yaml.contains("mode: connected"), "yaml was: {}", yaml);
+    }
+
+    #[test]
+    fn config_serde_back_compat_missing_mode_field() {
+        // Yaml from a pre-mode-flag binary won't have a `mode` field.
+        // The `#[serde(default)]` attribute on `Config::mode` should
+        // make it default to Connected.
+        let yaml = r#"
+node:
+  name: legacy-node
+cloud:
+  api_url: https://example.com
+  api_key: ""
+  heartbeat_interval: 30
+cameras:
+  auto_detect: true
+streaming:
+  fps: 30
+  jpeg_quality: 85
+  encoder: ""
+  hls:
+    enabled: true
+    segment_duration: 1
+    playlist_size: 15
+    bitrate: "2500k"
+recording:
+  enabled: true
+  format: "mp4"
+storage:
+  max_size_gb: 64
+server:
+  port: 8080
+  bind: "127.0.0.1"
+logging:
+  level: "info"
+motion:
+  enabled: true
+  threshold: 0.02
+  cooldown_secs: 30
+"#;
+        let parsed: Config = serde_yaml::from_str(yaml).expect("legacy yaml parses");
+        assert!(parsed.mode.is_connected(), "missing mode → Connected");
     }
 }

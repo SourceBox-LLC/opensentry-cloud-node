@@ -62,7 +62,22 @@ impl SegmentUploader {
     }
 
     /// Push a segment to the backend. Returns true if pushed, false if skipped (too small).
+    ///
+    /// In `NodeMode::Local` (`api_client.is_local() == true`) this returns
+    /// `Ok(true)` without ever opening a network connection — the
+    /// caller's local-recording archive path (which writes the same
+    /// segment to encrypted SQLite for later playback) runs whether
+    /// or not we'd push to a Command Center.
     pub async fn push_segment(&self, task: UploadTask, api_client: &ApiClient) -> Result<bool> {
+        // Local-only fast path: skip the upload, return success so
+        // the caller's "uploaded" counter still ticks (operator-facing
+        // metric — counts segments successfully handled, not segments
+        // that crossed the network).  The local archive is handled
+        // separately by HlsUploader::start_with_dashboard.
+        if api_client.is_local() {
+            return Ok(true);
+        }
+
         tracing::debug!(
             "Pushing segment {} for camera {}",
             task.sequence,

@@ -83,6 +83,11 @@ impl Config {
     pub fn load_from_db(db: &NodeDatabase) -> Result<Self> {
         let mut config = Config::default();
 
+        // Mode (Local | Connected). Absent row → Connected (back-compat
+        // for any DB written by a pre-mode-flag binary).
+        if let Some(v) = db.get_config("mode")? {
+            config.mode = NodeMode::from_str(&v);
+        }
         if let Some(v) = db.get_config("node_id")? {
             config.node.node_id = Some(v);
         }
@@ -147,6 +152,9 @@ impl Config {
     /// Save all config values to the SQLite database.
     /// The API key is encrypted at rest.
     pub fn save_to_db(&self, db: &NodeDatabase) -> Result<()> {
+        // Persist mode so a freshly-installed Local-mode node's
+        // run_cloudnode_once doesn't fall back to Connected validation.
+        db.set_config("mode", self.mode.as_str())?;
         if let Some(ref id) = self.node.node_id {
             db.set_config("node_id", id)?;
         }

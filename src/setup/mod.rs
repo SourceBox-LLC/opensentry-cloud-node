@@ -47,6 +47,12 @@ pub use validator::ValidationResult;
 /// Setup configuration
 #[derive(Debug, Clone)]
 pub struct SetupConfig {
+    /// Local-only vs Connected install — chosen at the very first
+    /// wizard prompt (see `tui::configure_node`). In Local mode the
+    /// `node_id` / `api_key` / `api_url` fields stay empty strings;
+    /// `save_config_to_database` (in `tui.rs`) detects mode=Local and
+    /// skips the Cloud-coupled DB writes.
+    pub mode: crate::config::NodeMode,
     pub node_id: String,
     pub api_key: String,
     pub api_url: String,

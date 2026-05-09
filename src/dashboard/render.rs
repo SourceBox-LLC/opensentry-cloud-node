@@ -16,6 +16,7 @@ use crossterm::terminal;
 
 use super::handle::Dashboard;
 use super::types::{CameraStatus, LogEntry, LogLevel, View};
+use crate::config::NodeMode;
 
 // ─── Box drawing ────────────────────────────────────────────────────────────
 const TL: &str = "╔";
@@ -54,26 +55,50 @@ impl Dashboard {
             cyan_bold(TR),
         ));
 
-        // Status bar
-        let api_short = truncate(
-            &state.api_url.replace("https://", "").replace("http://", ""),
-            30,
-        );
+        // Status bar — mode-aware.
+        // Connected mode: shows the Command Center URL + plan pill.
+        // Local mode: shows a [LOCAL] badge + the local web-UI URL the
+        // operator should open in a browser. The "↑ segs" counter
+        // still ticks in Local mode because the segment_uploader's
+        // success counter is operator-facing ("segments handled"),
+        // not a CC-coupled metric — the Local fast-path returns
+        // Ok(true) so the count goes up the same way.
         let total_bytes: u64 = state.cameras.iter().map(|c| c.bytes_uploaded).sum();
         let data_str = format_bytes(total_bytes);
-        // Plan pill appears next to Node ID when the backend has reported one;
-        // empty string (and zero visual space) otherwise, so the bar still
-        // reads naturally on old backends that don't send the field.
-        let plan_part = state
-            .plan
-            .as_deref()
-            .map(|p| format!(" {}", plan_badge(p)))
-            .unwrap_or_default();
+        let is_local = matches!(state.settings.mode, NodeMode::Local);
+        let middle_text = if is_local {
+            // Surface the LAN URL — what the operator actually wants.
+            // Empty until the runner has resolved it (one tick at boot),
+            // in which case fall back to a placeholder so the layout
+            // doesn't shift mid-frame.
+            let url = if state.settings.local_url.is_empty() {
+                "starting…".to_string()
+            } else {
+                state.settings.local_url.clone()
+            };
+            truncate(&url, 36)
+        } else {
+            truncate(
+                &state.api_url.replace("https://", "").replace("http://", ""),
+                30,
+            )
+        };
+        // Mode badge: [LOCAL] in Local mode (purple-ish to stand out
+        // against the cyan node id), otherwise the plan pill from CC.
+        let mode_part = if is_local {
+            format!(" {}", "[LOCAL]".bright_magenta().bold())
+        } else {
+            state
+                .plan
+                .as_deref()
+                .map(|p| format!(" {}", plan_badge(p)))
+                .unwrap_or_default()
+        };
         let status_content = format!(
             "  Node: {}{}   │   {}   │   ↑ {} segs  {}   │   ⏱ {}",
             state.node_id.cyan().bold(),
-            plan_part,
-            api_short.white(),
+            mode_part,
+            middle_text.white(),
             state.total_segments.to_string().cyan(),
             format!("({})", data_str).dimmed(),
             state.uptime().white(),

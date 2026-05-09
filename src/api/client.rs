@@ -17,20 +17,30 @@
 
 use reqwest::Client;
 
+use crate::config::NodeMode;
 use crate::error::{Error, Result};
 use super::types::*;
 
-/// API Client for communicating with SourceBox Sentry Command Center
+/// API Client for communicating with SourceBox Sentry Command Center.
+///
+/// In `NodeMode::Connected` (default constructor `new`) every method
+/// makes its real HTTP call.  In `NodeMode::Local` (constructor
+/// `local_stub`) every CC-bound method short-circuits to a typed error
+/// without ever touching the network — `node::runner::run_internal`
+/// gates the call sites instead, so the stub is mostly belt-and-
+/// suspenders against future call sites being added without a mode
+/// check.
 #[derive(Clone)]
 pub struct ApiClient {
     client: Client,
     base_url: String,
     api_key: String,
     node_id: Option<String>,
+    mode: NodeMode,
 }
 
 impl ApiClient {
-    /// Create a new API client
+    /// Create a new API client for Connected mode.
     pub fn new(base_url: &str, api_key: &str) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -44,7 +54,40 @@ impl ApiClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             node_id: None,
+            mode: NodeMode::Connected,
         })
+    }
+
+    /// Create a no-op API client for Local mode.
+    ///
+    /// Every Cloud-bound method on this client returns
+    /// `Error::Api("local mode")` without making a network call.  Code
+    /// that holds an `ApiClient` (Dashboard's `/wipe` flow, the
+    /// uploader, ...) keeps the same shape as Connected mode without
+    /// needing `Option<ApiClient>` plumbing throughout.
+    pub fn local_stub() -> Result<Self> {
+        // We still build a real reqwest client because `Clone` is cheap
+        // and the type signatures elsewhere assume one exists.  The
+        // empty base_url / api_key make accidental real requests fail
+        // loudly even if a code path slips past the mode guard.
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| Error::Api(format!("Failed to create HTTP client: {}", e)))?;
+        Ok(Self {
+            client,
+            base_url: String::new(),
+            api_key: String::new(),
+            node_id: None,
+            mode: NodeMode::Local,
+        })
+    }
+
+    /// Returns true when this client is a no-op stub for Local mode.
+    /// Used by callers that want to early-exit before constructing a
+    /// request body.
+    pub fn is_local(&self) -> bool {
+        self.mode.is_local()
     }
 
     /// Set the node ID (for heartbeat after registration)
@@ -379,5 +422,27 @@ impl ApiClient {
         tracing::debug!("Playlist updated for camera {}", camera_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod local_stub_tests {
+    //! Local-mode ApiClient stub.  These tests pin two contracts:
+    //!  1. `is_local()` answers truthfully so the segment-uploader's
+    //!     fast path can short-circuit network IO.
+    //!  2. The constructor doesn't require valid creds (Local-mode
+    //!     installs have empty api_key / api_url).
+    use super::*;
+
+    #[test]
+    fn local_stub_reports_local() {
+        let client = ApiClient::local_stub().expect("local_stub builds");
+        assert!(client.is_local());
+    }
+
+    #[test]
+    fn new_reports_connected_by_default() {
+        let client = ApiClient::new("http://localhost:8000", "key").expect("new builds");
+        assert!(!client.is_local());
     }
 }

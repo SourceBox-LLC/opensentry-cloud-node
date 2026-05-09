@@ -370,6 +370,8 @@ fn detect_cameras_with_retry(
 // ─── Step 2: Configure ───────────────────────────────────────────────────────
 
 fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
+    use crate::config::NodeMode;
+
     panel_top("Step 2 / 5 — Node Configuration");
     panel_blank();
 
@@ -381,150 +383,225 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
     panel_divider();
     panel_blank();
 
+    // ── Mode selection (Local vs Connected) ─────────────────────────
+    // First decision in setup. Connected = the existing SaaS-paired
+    // flow (registers with Command Center, opens WS, ships HLS).
+    // Local = standalone install on the LAN; the runtime gates every
+    // CC-coupled path on `mode == Local`.
     panel_row(&format!(
-        "  Open {} in your browser:",
-        "SourceBox Sentry Command Center".cyan().bold()
-    ));
-    panel_row(&format!(
-        "  {} {}",
-        "→".cyan(),
-        "https://opensentry-command.fly.dev".bright_white()
+        "  {}",
+        "How do you want to run this node?".bright_white()
     ));
     panel_blank();
     panel_row(&format!(
-        "  Navigate to: {} → {} → {}",
-        "Settings".cyan(),
-        "Nodes".cyan(),
-        "Add Node".cyan()
+        "  {} {}",
+        "•".cyan(),
+        "Connected — pair with SourceBox Sentry Command Center for".bright_white()
     ));
+    panel_row("    multi-site dashboards, AI agent, mobile remote access,");
+    panel_row("    email alerts, and team workflows. Free account required.");
+    panel_blank();
+    panel_row(&format!(
+        "  {} {}",
+        "•".cyan(),
+        "Local-only — runs on your LAN, no Command Center pairing.".bright_white()
+    ));
+    panel_row("    Browser dashboard, snapshots, recording, playback. Free.");
     panel_blank();
     panel_bottom();
     println!();
 
-    // Inputs (outside panel — inquire draws its own UI)
-    let node_id = Text::new("  Node ID:")
-        .with_placeholder("cf394d69")
-        .with_validator(|input: &str| {
-            if input.len() == 8 && input.chars().all(|c| c.is_ascii_hexdigit()) {
-                Ok(Validation::Valid)
-            } else {
-                Ok(Validation::Invalid(
-                    "Must be 8 hexadecimal characters (e.g. cf394d69)".into(),
-                ))
-            }
-        })
+    let connect_to_cc = Confirm::new("  Connect this node to a Command Center?")
+        .with_help_message(
+            "Yes = Connected mode (full SaaS).  No = Local-only mode (LAN-only, no account).",
+        )
+        .with_default(true)
         .prompt()?;
 
-    let api_key = Text::new("  API Key:")
-        .with_placeholder("f3eda4fd-7810-4577-94a8-290fbb6d9523")
-        .with_validator(|input: &str| {
-            let parts: Vec<&str> = input.trim().split('-').collect();
-            if parts.len() == 5
-                && parts[0].len() == 8
-                && parts[1].len() == 4
-                && parts[2].len() == 4
-                && parts[3].len() == 4
-                && parts[4].len() == 12
-                && parts
-                    .iter()
-                    .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
-            {
-                Ok(Validation::Valid)
+    let mode = if connect_to_cc {
+        NodeMode::Connected
+    } else {
+        NodeMode::Local
+    };
+
+    // ── Connected-mode: CC creds + validation ──────────────────────
+    // Local-mode skips this entire block; the empty-string defaults
+    // below feed save_config_to_database, which detects mode=Local
+    // and writes only the rows that make sense for a standalone node.
+    let (node_id, api_key, api_url) = if mode.is_connected() {
+        println!();
+        panel_top("Command Center Pairing");
+        panel_blank();
+        panel_row(&format!(
+            "  Open {} in your browser:",
+            "SourceBox Sentry Command Center".cyan().bold()
+        ));
+        panel_row(&format!(
+            "  {} {}",
+            "→".cyan(),
+            "https://opensentry-command.fly.dev".bright_white()
+        ));
+        panel_blank();
+        panel_row(&format!(
+            "  Navigate to: {} → {} → {}",
+            "Settings".cyan(),
+            "Nodes".cyan(),
+            "Add Node".cyan()
+        ));
+        panel_blank();
+        panel_bottom();
+        println!();
+
+        // Inputs (outside panel — inquire draws its own UI)
+        let node_id = Text::new("  Node ID:")
+            .with_placeholder("cf394d69")
+            .with_validator(|input: &str| {
+                if input.len() == 8 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    Ok(Validation::Valid)
+                } else {
+                    Ok(Validation::Invalid(
+                        "Must be 8 hexadecimal characters (e.g. cf394d69)".into(),
+                    ))
+                }
+            })
+            .prompt()?;
+
+        let api_key = Text::new("  API Key:")
+            .with_placeholder("f3eda4fd-7810-4577-94a8-290fbb6d9523")
+            .with_validator(|input: &str| {
+                let parts: Vec<&str> = input.trim().split('-').collect();
+                if parts.len() == 5
+                    && parts[0].len() == 8
+                    && parts[1].len() == 4
+                    && parts[2].len() == 4
+                    && parts[3].len() == 4
+                    && parts[4].len() == 12
+                    && parts
+                        .iter()
+                        .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+                {
+                    Ok(Validation::Valid)
+                } else {
+                    Ok(Validation::Invalid(
+                        "Must be a UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".into(),
+                    ))
+                }
+            })
+            .prompt()?;
+
+        let default_url = "https://opensentry-command.fly.dev";
+        let api_url = Text::new("  Command Center URL:")
+            .with_placeholder(default_url)
+            .with_default(default_url)
+            .with_validator(|input: &str| {
+                // HTTPS is required for production Command Centers — the API
+                // key travels in headers and must not go over the wire in
+                // plaintext.  We carve out an exception for `http://localhost`
+                // and `http://127.0.0.1` so dev workflows running a local
+                // Command Center on plain HTTP keep working (the loopback
+                // interface never leaves the host).
+                //
+                // Rejecting plain http:// for any other host closes a real
+                // footgun: an operator who fat-fingers `http://` in front of
+                // a public Command Center URL would silently ship their API
+                // key over an unencrypted connection.  Better to fail loudly
+                // at setup than to leak credentials in transit.
+                if input.starts_with("https://") {
+                    Ok(Validation::Valid)
+                } else if input.starts_with("http://localhost")
+                    || input.starts_with("http://127.0.0.1")
+                {
+                    Ok(Validation::Valid)
+                } else if input.starts_with("http://") {
+                    Ok(Validation::Invalid(
+                        "Plain http:// is only allowed for localhost. Use https:// for production Command Centers — the API key travels in request headers and must not go over the wire unencrypted.".into(),
+                    ))
+                } else {
+                    Ok(Validation::Invalid(
+                        "Must start with https:// (or http://localhost for local dev)".into(),
+                    ))
+                }
+            })
+            .prompt()?;
+
+        // Validation panel
+        println!();
+        panel_top("Validating Connection");
+        panel_blank();
+
+        let mut spinner = Spinner::new();
+        panel_spinner_row(&spinner.advance(), &format!("Connecting to {}...", api_url));
+        flush();
+
+        let validation = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(super::validator::validate_api_connection(
+                &api_url, &node_id, &api_key,
+            ))?;
+
+        print!("\r");
+        flush();
+
+        if !validation.is_valid {
+            panel_error("Connection failed");
+            if let Some(msg) = &validation.error_message {
+                for line in msg.lines() {
+                    panel_row(&format!("  {}", line.red()));
+                }
+            }
+            panel_blank();
+            panel_bottom();
+            println!();
+
+            let retry = Confirm::new("  Try again with different credentials?")
+                .with_default(true)
+                .prompt()?;
+            if retry {
+                println!();
+                return configure_node(platform);
             } else {
-                Ok(Validation::Invalid(
-                    "Must be a UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".into(),
-                ))
+                println!();
+                println!(
+                    "  {}",
+                    "Run 'sourcebox-sentry-cloudnode setup' to try again.".yellow()
+                );
+                std::process::exit(1);
             }
-        })
-        .prompt()?;
+        }
 
-    let default_url = "https://opensentry-command.fly.dev";
-    let api_url = Text::new("  Command Center URL:")
-        .with_placeholder(default_url)
-        .with_default(default_url)
-        .with_validator(|input: &str| {
-            // HTTPS is required for production Command Centers — the API
-            // key travels in headers and must not go over the wire in
-            // plaintext.  We carve out an exception for `http://localhost`
-            // and `http://127.0.0.1` so dev workflows running a local
-            // Command Center on plain HTTP keep working (the loopback
-            // interface never leaves the host).
-            //
-            // Rejecting plain http:// for any other host closes a real
-            // footgun: an operator who fat-fingers `http://` in front of
-            // a public Command Center URL would silently ship their API
-            // key over an unencrypted connection.  Better to fail loudly
-            // at setup than to leak credentials in transit.
-            if input.starts_with("https://") {
-                Ok(Validation::Valid)
-            } else if input.starts_with("http://localhost")
-                || input.starts_with("http://127.0.0.1")
-            {
-                Ok(Validation::Valid)
-            } else if input.starts_with("http://") {
-                Ok(Validation::Invalid(
-                    "Plain http:// is only allowed for localhost. Use https:// for production Command Centers — the API key travels in request headers and must not go over the wire unencrypted.".into(),
-                ))
-            } else {
-                Ok(Validation::Invalid(
-                    "Must start with https:// (or http://localhost for local dev)".into(),
-                ))
-            }
-        })
-        .prompt()?;
-
-    // Validation panel
-    println!();
-    panel_top("Validating Connection");
-    panel_blank();
-
-    let mut spinner = Spinner::new();
-    panel_spinner_row(&spinner.advance(), &format!("Connecting to {}...", api_url));
-    flush();
-
-    let validation = tokio::runtime::Runtime::new()
-        .expect("tokio runtime")
-        .block_on(super::validator::validate_api_connection(
-            &api_url, &node_id, &api_key,
-        ))?;
-
-    print!("\r");
-    flush();
-
-    if !validation.is_valid {
-        panel_error("Connection failed");
-        if let Some(msg) = &validation.error_message {
-            for line in msg.lines() {
-                panel_row(&format!("  {}", line.red()));
-            }
+        panel_check("Connected successfully");
+        if let Some(name) = &validation.node_name {
+            panel_sub(&format!("Node name: {}", name));
         }
         panel_blank();
         panel_bottom();
         println!();
 
-        let retry = Confirm::new("  Try again with different credentials?")
-            .with_default(true)
-            .prompt()?;
-        if retry {
-            println!();
-            return configure_node(platform);
-        } else {
-            println!();
-            println!(
-                "  {}",
-                "Run 'sourcebox-sentry-cloudnode setup' to try again.".yellow()
-            );
-            std::process::exit(1);
-        }
-    }
+        (node_id, api_key, api_url)
+    } else {
+        // Local mode: no creds, no remote validation.  The TUI status
+        // bar will print the LAN URL once the node boots; setup just
+        // needs to confirm what the user is about to install.
+        println!();
+        panel_top("Local-only Mode");
+        panel_blank();
+        panel_row("  This node will run standalone on your local network.");
+        panel_row("  No Command Center pairing, no account, no cloud.");
+        panel_blank();
+        panel_row(&format!(
+            "  After setup, open the dashboard in any browser on the LAN:"
+        ));
+        panel_row(&format!(
+            "    {}",
+            "http://<node-IP>:8080".bright_white()
+        ));
+        panel_row("    (the IP appears in the TUI status bar after boot)");
+        panel_blank();
+        panel_bottom();
+        println!();
 
-    panel_check("Connected successfully");
-    if let Some(name) = &validation.node_name {
-        panel_sub(&format!("Node name: {}", name));
-    }
-    panel_blank();
-    panel_bottom();
-    println!();
+        (String::new(), String::new(), String::new())
+    };
 
     // Deployment + auto-start
     let deployment_method = select_deployment_method(platform)?;
@@ -595,13 +672,23 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
         .with_default(true)
         .prompt()?;
 
-    // Summary panel
+    // Summary panel — mode-aware. Local mode hides the CC creds rows
+    // (they're empty strings) and surfaces the LAN dashboard URL
+    // instead, since that's the daily-driver entry point.
     println!();
     panel_top("Configuration Summary");
     panel_blank();
-    panel_kv("  Node ID     :", &node_id);
-    panel_kv("  API Key     :", &format!("{}…", &api_key[..10]));
-    panel_kv("  API URL     :", &api_url);
+    panel_kv(
+        "  Mode        :",
+        if mode.is_local() { "Local-only" } else { "Connected" },
+    );
+    if mode.is_connected() {
+        panel_kv("  Node ID     :", &node_id);
+        panel_kv("  API Key     :", &format!("{}…", &api_key[..10]));
+        panel_kv("  API URL     :", &api_url);
+    } else {
+        panel_kv("  Dashboard   :", "http://<node-IP>:8080");
+    }
     panel_kv("  Deploy      :", &format!("{:?}", deployment_method));
     panel_kv("  Storage cap :", &format!("{} GB", max_size_gb));
     panel_kv("  Auto-start  :", if auto_start { "Yes" } else { "No" });
@@ -619,6 +706,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
     }
 
     Ok(SetupConfig {
+        mode,
         node_id,
         api_key,
         api_url,
@@ -1050,10 +1138,21 @@ fn save_config_to_database(config: &SetupConfig) -> Result<()> {
     let db = crate::storage::NodeDatabase::new(&db_path)
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
+    // In Local mode, `node_id` and `api_key` are empty strings from the
+    // wizard — leave node_id as None and let save_to_db skip the api_key
+    // row (it already gates on `is_empty`).  We rely on the `mode='local'`
+    // row to signal "configured for local-only" to needs_setup at boot.
+    let node_id_opt = if config.mode.is_connected() {
+        Some(config.node_id.clone())
+    } else {
+        None
+    };
+
     let app_config = crate::config::Config {
+        mode: config.mode,
         node: crate::config::NodeConfig {
             name: crate::config::NodeConfig::default().name,
-            node_id: Some(config.node_id.clone()),
+            node_id: node_id_opt,
         },
         cloud: crate::config::CloudConfig {
             api_url: config.api_url.clone(),

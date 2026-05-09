@@ -107,4 +107,13 @@ pub struct SettingsInfo {
     pub motion_enabled: bool,
     pub motion_sensitivity: f64,
     pub motion_cooldown: u64,
+    /// Operating mode (Local vs Connected) chosen at install.  Surfaced
+    /// in the status bar so the operator sees at a glance whether this
+    /// node is talking to a Command Center or running standalone.
+    pub mode: crate::config::NodeMode,
+    /// Local web-UI URL printed in the status bar — `http://<bind>:<port>`
+    /// where `bind` is `0.0.0.0` resolved to the node's LAN IP, or
+    /// `127.0.0.1` if the operator picked localhost-only.  Empty until
+    /// the runner has resolved the IP (one-tick delay at boot).
+    pub local_url: String,
 }

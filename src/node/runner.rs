@@ -53,7 +53,17 @@ struct RunningStream {
 
 impl Node {
     pub async fn new(config: Config) -> Result<Self> {
-        let api_client = ApiClient::new(&config.cloud.api_url, &config.cloud.api_key)?;
+        // Local-mode nodes never talk to a Command Center — give them a
+        // stub client so the rest of the codebase keeps the same shape
+        // (Dashboard's `/wipe` flow + the uploader both hold an
+        // `ApiClient`) without `Option<ApiClient>` plumbing.  Connected
+        // mode builds the real reqwest-backed client with the configured
+        // URL + API key.
+        let api_client = if config.mode.is_local() {
+            ApiClient::local_stub()?
+        } else {
+            ApiClient::new(&config.cloud.api_url, &config.cloud.api_key)?
+        };
         // `paths::data_dir()` is the canonical absolute resolver for
         // where node.db / HLS segments / recordings live: env var
         // (`SOURCEBOX_SENTRY_DATA_DIR`) → platform default
@@ -76,6 +86,18 @@ impl Node {
     }
 
     fn build_settings_info(&self) -> crate::dashboard::SettingsInfo {
+        // Compute the local URL the operator should open in a browser.
+        // bind=0.0.0.0 expands to the resolved LAN IP (more useful on
+        // the status bar than literal "0.0.0.0"); other binds are
+        // shown as-is.
+        let local_url = {
+            let host = if self.config.server.bind == "0.0.0.0" {
+                get_local_ip().unwrap_or_else(|| "0.0.0.0".to_string())
+            } else {
+                self.config.server.bind.clone()
+            };
+            format!("http://{}:{}", host, self.config.server.port)
+        };
         crate::dashboard::SettingsInfo {
             node_name: self.config.node.name.clone(),
             storage_path: crate::paths::data_dir().display().to_string(),
@@ -88,6 +110,8 @@ impl Node {
             motion_enabled: self.config.motion.enabled,
             motion_sensitivity: self.config.motion.threshold,
             motion_cooldown: self.config.motion.cooldown_secs,
+            mode: self.config.mode,
+            local_url,
         }
     }
 
@@ -156,37 +180,76 @@ impl Node {
             });
         }
 
-        // ── 2. Register with cloud ────────────────────────────────────────────
-        dash.log_info("Registering with cloud…");
-        let registration = self.register_with_cloud(&detected_cameras, &dash).await?;
-        let node_id = registration.node_id.clone();
-        let camera_mapping: HashMap<String, String> = registration.cameras;
-        // Surface the plan in the status bar. Advisory only — see the doc
-        // comment on RegisterResponse::plan.  `None` on older backends that
-        // don't send the field, in which case the dashboard hides the pill.
-        dash.set_plan(registration.plan);
-        dash.log_info(format!("Registered as node {}", node_id.cyan().bold()));
-
-        // If the backend dropped any cameras for being over the plan cap,
-        // surface it both as a pre-TUI yellow panel (visible in scrollback
-        // after the dashboard takes over) and as a persistent WARN line in
-        // the log buffer. Pure UX — enforcement already happened server-side.
-        if let Some(hit) = registration.plan_limit_hit.as_ref() {
-            dash.log_warn(format!(
-                "Plan limit reached: {} camera(s) skipped — {}",
-                hit.skipped.len(),
-                hit.detail,
+        // ── 2. Register with cloud (or fabricate locally) ───────────────────
+        // Connected mode: round-trip to Command Center to register the
+        // node + receive its assigned node_id and per-camera id mapping.
+        // Local mode: skip the network call.  Use the stable
+        // `local_node_id` SQLite KV row (created on first Local-mode
+        // boot) as the namespace prefix; camera_mapping stays empty so
+        // the per-camera fallback below generates IDs from
+        // `<local_node_id>_<sanitized_device_path>`.
+        let (node_id, camera_mapping) = if self.config.mode.is_local() {
+            // Get-or-create the persistent local node id.  8 hex chars
+            // matches the format Command Center registration returns,
+            // so all the downstream string formatting (status bar
+            // truncation to 8 chars, camera-id namespacing) keeps
+            // working without special-casing.
+            let local_id = match self.db.get_config("local_node_id")? {
+                Some(id) => id,
+                None => {
+                    let id: String = uuid::Uuid::new_v4()
+                        .simple()
+                        .to_string()
+                        .chars()
+                        .take(8)
+                        .collect();
+                    self.db.set_config("local_node_id", &id)?;
+                    dash.log_info(format!(
+                        "Generated local node id: {}",
+                        id.cyan().bold()
+                    ));
+                    id
+                }
+            };
+            dash.log_info(format!(
+                "Local mode — skipping Command Center registration (node {})",
+                local_id.cyan().bold()
             ));
-            crate::setup::recovery::show_plan_limit_hit(hit, &self.config.cloud.api_url);
-        }
+            (local_id, HashMap::<String, String>::new())
+        } else {
+            dash.log_info("Registering with cloud…");
+            let registration = self.register_with_cloud(&detected_cameras, &dash).await?;
+            let node_id = registration.node_id.clone();
+            let camera_mapping: HashMap<String, String> = registration.cameras;
+            // Surface the plan in the status bar. Advisory only — see the doc
+            // comment on RegisterResponse::plan.  `None` on older backends that
+            // don't send the field, in which case the dashboard hides the pill.
+            dash.set_plan(registration.plan);
+            dash.log_info(format!("Registered as node {}", node_id.cyan().bold()));
 
-        // Attach cloud-assigned camera_id to each dashboard row so per-ID
-        // lookups (e.g. the heartbeat's real-status read) can find them.
-        for cam in &detected_cameras {
-            if let Some(cid) = camera_mapping.get(&cam.device_path) {
-                dash.set_camera_id(&cam.name, cid);
+            // If the backend dropped any cameras for being over the plan cap,
+            // surface it both as a pre-TUI yellow panel (visible in scrollback
+            // after the dashboard takes over) and as a persistent WARN line in
+            // the log buffer. Pure UX — enforcement already happened server-side.
+            if let Some(hit) = registration.plan_limit_hit.as_ref() {
+                dash.log_warn(format!(
+                    "Plan limit reached: {} camera(s) skipped — {}",
+                    hit.skipped.len(),
+                    hit.detail,
+                ));
+                crate::setup::recovery::show_plan_limit_hit(hit, &self.config.cloud.api_url);
             }
-        }
+
+            // Attach cloud-assigned camera_id to each dashboard row so per-ID
+            // lookups (e.g. the heartbeat's real-status read) can find them.
+            for cam in &detected_cameras {
+                if let Some(cid) = camera_mapping.get(&cam.device_path) {
+                    dash.set_camera_id(&cam.name, cid);
+                }
+            }
+
+            (node_id, camera_mapping)
+        };
 
         // ── 3. Start HLS streams ──────────────────────────────────────────────
         let mut running_streams: Vec<RunningStream> = Vec::new();
@@ -294,7 +357,13 @@ impl Node {
 
                 // Build the uploader task (unchanged — it polls for
                 // segments on disk regardless of who's writing them).
-                let uploader_config = HlsUploaderConfig::new(camera_id.clone(), camera_hls_dir);
+                // `is_local` flips the segment-push fast path: in Local
+                // mode `SegmentUploader::push_segment` returns
+                // Ok(true) without ever opening a network connection,
+                // and the local archive write to encrypted SQLite (for
+                // playback through the local web UI) runs as usual.
+                let uploader_config = HlsUploaderConfig::new(camera_id.clone(), camera_hls_dir)
+                    .with_local(self.config.mode.is_local());
                 let cam_name = detected.name.clone();
                 let uploader = HlsUploader::new(
                     uploader_config,
@@ -368,41 +437,75 @@ impl Node {
         ));
 
         // ── 5. Start heartbeat + WebSocket ───────────────────────────────────
-        // Collect camera IDs so the heartbeat can report them as "streaming"
+        // Connected mode only — Local mode never registers, never
+        // heartbeats, never opens the inbound-command WebSocket.
+        // FFmpeg + HLS supervisor + retention loop + HTTP server all
+        // keep running unchanged so the local web UI (Phase B+) sees
+        // the same state.
+        //
+        // The motion_rx receiver still has to be consumed somewhere or
+        // the bounded-mpsc channel fills up after ~64 events and the
+        // uploader's `motion_tx.try_send` starts erroring (harmless,
+        // just noisy in logs).  Phase B converts this channel to a
+        // broadcast::Sender so multiple subscribers can listen; for
+        // now in Local mode we drain the receiver in a tiny task.
         let streaming_camera_ids: Vec<String> = camera_mapping.values().cloned().collect();
-        let heartbeat_handle = self.start_heartbeat_loop(
-            dash.clone(),
-            streaming_camera_ids.clone(),
-            recording_state.clone(),
-        );
+        let (heartbeat_handle, ws_handle) = if self.config.mode.is_connected() {
+            let hb = self.start_heartbeat_loop(
+                dash.clone(),
+                streaming_camera_ids.clone(),
+                recording_state.clone(),
+            );
 
-        // Start WebSocket command channel (runs alongside HTTP heartbeats).
-        // Recording state used to be plumbed through here for the
-        // start_recording / stop_recording commands; both were retired
-        // in v0.1.43 in favour of the heartbeat-driven reconciler in
-        // start_heartbeat_loop, so the WS task no longer needs it.
-        let ws_handle = {
-            let api_url = self.config.cloud.api_url.clone();
-            let api_key = self.config.cloud.api_key.clone();
-            let ws_node_id = node_id.clone();
-            let ws_camera_ids = streaming_camera_ids;
-            let ws_interval = self.config.cloud.heartbeat_interval;
-            let ws_dash = dash.clone();
-            let ws_hls_dir = self.hls_output_dir.clone();
-            let ws_db = self.db.clone();
-            tokio::spawn(async move {
-                crate::api::websocket::run_ws_client(
-                    api_url,
-                    api_key,
-                    ws_node_id,
-                    ws_camera_ids,
-                    ws_interval,
-                    ws_dash,
-                    ws_hls_dir,
-                    ws_db,
-                    motion_rx,
-                ).await;
-            })
+            // Start WebSocket command channel (runs alongside HTTP heartbeats).
+            // Recording state used to be plumbed through here for the
+            // start_recording / stop_recording commands; both were retired
+            // in v0.1.43 in favour of the heartbeat-driven reconciler in
+            // start_heartbeat_loop, so the WS task no longer needs it.
+            let ws = {
+                let api_url = self.config.cloud.api_url.clone();
+                let api_key = self.config.cloud.api_key.clone();
+                let ws_node_id = node_id.clone();
+                let ws_camera_ids = streaming_camera_ids;
+                let ws_interval = self.config.cloud.heartbeat_interval;
+                let ws_dash = dash.clone();
+                let ws_hls_dir = self.hls_output_dir.clone();
+                let ws_db = self.db.clone();
+                tokio::spawn(async move {
+                    crate::api::websocket::run_ws_client(
+                        api_url,
+                        api_key,
+                        ws_node_id,
+                        ws_camera_ids,
+                        ws_interval,
+                        ws_dash,
+                        ws_hls_dir,
+                        ws_db,
+                        motion_rx,
+                    ).await;
+                })
+            };
+            (hb, ws)
+        } else {
+            // Local-mode placeholders.  Both tasks just await shutdown
+            // so the existing `select!` / await-pattern in the rest of
+            // run_internal doesn't need to grow a `Option<JoinHandle>`.
+            let _ = streaming_camera_ids;
+            let mut motion_rx_drain = motion_rx;
+            let drain_handle = tokio::spawn(async move {
+                while motion_rx_drain.recv().await.is_some() {
+                    // Discard — Phase B turns this into a broadcast
+                    // channel that feeds an SSE endpoint.
+                }
+            });
+            // Make a no-op heartbeat handle so the function's later
+            // joins don't need a separate code path.
+            let noop_hb = tokio::spawn(async move {
+                // Park forever; cancelled on shutdown by abort() in the
+                // shutdown block below.
+                std::future::pending::<()>().await;
+            });
+            (noop_hb, drain_handle)
         };
 
         // ── 6. Start retention cleanup (enforce max_size_gb) ──────────────────

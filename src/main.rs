@@ -302,7 +302,19 @@ fn run() -> Result<()> {
         Some(Commands::Setup { .. }) => true,
         Some(Commands::Run { .. }) | None => {
             !Config::load(args.config.as_deref())
-                .map(|c| !c.cloud.api_key.is_empty() && c.node.node_id.is_some())
+                .map(|c| {
+                    // Local-mode nodes don't have CC credentials by
+                    // design — having mode=Local set is itself the
+                    // "configured" signal.  Connected-mode still
+                    // requires both api_key and node_id; without them
+                    // the runtime has nothing to register or
+                    // heartbeat with.
+                    if c.mode.is_local() {
+                        true
+                    } else {
+                        !c.cloud.api_key.is_empty() && c.node.node_id.is_some()
+                    }
+                })
                 .unwrap_or(false)
         }
         _ => false,
@@ -454,17 +466,23 @@ fn run_cloudnode_once(
         api_url,
     });
 
-    // Validate configuration
-    if config.cloud.api_key.is_empty() {
-        return Err(sourcebox_sentry_cloudnode::Error::Config(
-            "API key required. Set SOURCEBOX_SENTRY_API_KEY env var or use --api-key flag".to_string()
-        ));
-    }
+    // Validate configuration.  Local-mode nodes don't have CC
+    // credentials and don't need them — `run_internal` skips every
+    // CC-coupled path when mode=Local (registration, heartbeat, WS,
+    // segment push).  Only enforce the Connected-mode requirements
+    // when we're actually going to talk to a Command Center.
+    if config.mode.is_connected() {
+        if config.cloud.api_key.is_empty() {
+            return Err(sourcebox_sentry_cloudnode::Error::Config(
+                "API key required. Set SOURCEBOX_SENTRY_API_KEY env var or use --api-key flag".to_string()
+            ));
+        }
 
-    if config.node.node_id.is_none() {
-        return Err(sourcebox_sentry_cloudnode::Error::Config(
-            "Node ID required. Set SOURCEBOX_SENTRY_NODE_ID env var or use --node-id flag".to_string()
-        ));
+        if config.node.node_id.is_none() {
+            return Err(sourcebox_sentry_cloudnode::Error::Config(
+                "Node ID required. Set SOURCEBOX_SENTRY_NODE_ID env var or use --node-id flag".to_string()
+            ));
+        }
     }
 
     info!("Node name: {}", config.node.name);

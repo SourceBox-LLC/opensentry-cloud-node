@@ -60,6 +60,11 @@ pub struct HlsUploaderConfig {
     pub retry_count: u32,
     /// Number of segments to keep locally after upload
     pub local_buffer_size: u32,
+    /// True when the node is running in local-only mode.  When set,
+    /// `push_segment` short-circuits and segments are never sent to a
+    /// Command Center; the local recording write path runs as usual
+    /// so playback through the local web UI still works.
+    pub is_local: bool,
 }
 
 impl HlsUploaderConfig {
@@ -69,7 +74,17 @@ impl HlsUploaderConfig {
             output_dir,
             retry_count: 3,
             local_buffer_size: 5, // Keep 5 segments locally (~5 seconds with 1s segments)
+            is_local: false,
         }
+    }
+
+    /// Builder-style helper used by `node::runner::run_internal` when
+    /// the node was configured for local-only mode.  Equivalent to
+    /// `HlsUploaderConfig::new(...).with_local(true)` but avoids the
+    /// extra binding at the call site.
+    pub fn with_local(mut self, is_local: bool) -> Self {
+        self.is_local = is_local;
+        self
     }
 }
 
@@ -643,6 +658,20 @@ mod tests {
         assert_eq!(config.camera_id, "camera_123");
         assert_eq!(config.local_buffer_size, 5);
         assert_eq!(config.retry_count, 3);
+        // is_local defaults to false (Connected mode is the back-compat
+        // default — matches NodeMode::default).
+        assert!(!config.is_local);
+    }
+
+    #[test]
+    fn test_hls_uploader_config_with_local_builder() {
+        let config = HlsUploaderConfig::new(
+            "camera_456".into(),
+            PathBuf::from("/data/hls/camera_456"),
+        )
+        .with_local(true);
+        assert!(config.is_local);
+        assert_eq!(config.camera_id, "camera_456");
     }
 
     // ── Orphan sweeper regression tests ───────────────────────────────

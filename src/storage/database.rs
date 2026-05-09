@@ -627,12 +627,21 @@ impl NodeDatabase {
         Ok(())
     }
 
-    /// Check if any config values exist in the database.
+    /// Check if the DB looks "configured" — i.e. the wizard has run.
+    ///
+    /// Two configured shapes count as a yes:
+    ///   - `mode='local'` row present (Local-mode install — by design
+    ///     no `node_id` / `api_key` are written), OR
+    ///   - `node_id` row present (Connected-mode install).
+    ///
+    /// A bare DB with neither falls through to the YAML/env loader
+    /// path so a stale `data/node.db` next to a `config.yaml` doesn't
+    /// shadow the YAML.
     pub fn has_config(&self) -> bool {
-        self.get_config("node_id")
-            .ok()
-            .flatten()
-            .is_some()
+        if let Ok(Some(_)) = self.get_config("mode") {
+            return true;
+        }
+        self.get_config("node_id").ok().flatten().is_some()
     }
 
     // ── Wipe ─────────────────────────────────────────────────────────────

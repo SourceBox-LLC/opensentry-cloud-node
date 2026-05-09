@@ -1031,9 +1031,20 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     panel_divider();
     panel_blank();
 
-    // Summary
-    panel_kv("  Node ID     :", &config.node_id);
-    panel_kv("  API URL     :", &config.api_url);
+    // Summary — mode-aware. Local installs hide the empty Node ID /
+    // API URL rows (they're empty strings by design) and surface the
+    // LAN dashboard URL placeholder instead, since that's the
+    // daily-driver entry point.
+    panel_kv(
+        "  Mode        :",
+        if config.mode.is_local() { "Local-only" } else { "Connected" },
+    );
+    if config.mode.is_connected() {
+        panel_kv("  Node ID     :", &config.node_id);
+        panel_kv("  API URL     :", &config.api_url);
+    } else {
+        panel_kv("  Dashboard   :", "http://<node-IP>:8080");
+    }
     panel_kv(
         "  Deploy      :",
         &format!("{:?}", config.deployment_method),
@@ -1076,8 +1087,14 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
         }
     }
 
-    let dashboard = if config.api_url.contains("localhost") || config.api_url.contains("127.0.0.1")
-    {
+    // Dashboard URL printed in the post-install "Next steps" block.
+    // Local installs hand the operator the local LAN URL — that's the
+    // daily-driver dashboard now.  Connected installs point at the
+    // Command Center URL they paired with, with a localhost dev
+    // fallback for `http://localhost`/`127.0.0.1` API URLs.
+    let dashboard = if config.mode.is_local() {
+        "http://<node-IP>:8080  (URL in TUI status bar after boot)".to_string()
+    } else if config.api_url.contains("localhost") || config.api_url.contains("127.0.0.1") {
         "http://localhost:5173".to_string()
     } else {
         config.api_url.clone()
@@ -1148,6 +1165,19 @@ fn save_config_to_database(config: &SetupConfig) -> Result<()> {
         None
     };
 
+    // Local mode binds to 0.0.0.0 by default so a phone on the LAN can
+    // open the dashboard at http://<node-ip>:8080.  Connected mode
+    // keeps the safe loopback-only default; the public Command Center
+    // is the canonical surface for remote management there.
+    let server = if config.mode.is_local() {
+        crate::config::ServerConfig {
+            port: 8080,
+            bind: "0.0.0.0".to_string(),
+        }
+    } else {
+        crate::config::ServerConfig::default()
+    };
+
     let app_config = crate::config::Config {
         mode: config.mode,
         node: crate::config::NodeConfig {
@@ -1167,6 +1197,7 @@ fn save_config_to_database(config: &SetupConfig) -> Result<()> {
         storage: crate::config::StorageConfig {
             max_size_gb: config.max_size_gb,
         },
+        server,
         ..Default::default()
     };
 

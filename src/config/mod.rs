@@ -130,6 +130,13 @@ impl Config {
         if let Some(v) = db.get_config("server_port")? {
             config.server.port = v.parse().unwrap_or(8080);
         }
+        // Phase A made `bind` mode-dependent (127.0.0.1 in Connected,
+        // 0.0.0.0 in Local) — persist it so the wizard's choice survives
+        // a restart.  Pre-Phase-A DBs have no row; defaults stay at
+        // 127.0.0.1 via Config::default — safe for Connected installs.
+        if let Some(v) = db.get_config("server_bind")? {
+            config.server.bind = v;
+        }
         if let Some(v) = db.get_config("log_level")? {
             config.logging.level = v;
         }
@@ -172,6 +179,7 @@ impl Config {
         db.set_config("hls_enabled", if self.streaming.hls.enabled { "true" } else { "false" })?;
         db.set_config("bitrate", &self.streaming.hls.bitrate)?;
         db.set_config("server_port", &self.server.port.to_string())?;
+        db.set_config("server_bind", &self.server.bind)?;
         db.set_config("log_level", &self.logging.level)?;
         db.set_config("motion_enabled", if self.motion.enabled { "true" } else { "false" })?;
         db.set_config("motion_sensitivity", &self.motion.threshold.to_string())?;

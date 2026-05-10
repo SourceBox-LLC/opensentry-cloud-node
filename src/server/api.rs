@@ -85,6 +85,37 @@ impl LocalApiState {
             node_version: env!("CARGO_PKG_VERSION"),
         }
     }
+
+    /// Returns true if `camera_id` is currently registered with the
+    /// dashboard.  Used by the snapshot route to reject unknown ids
+    /// before they reach the filesystem layer — without this check, a
+    /// LAN attacker could pass an arbitrary path (e.g. `..%2F..%2Fetc`
+    /// percent-decoded by warp's String extractor) into
+    /// `hls_base_dir.join(camera_id)` and trick FFmpeg into reading
+    /// files outside the HLS root.  The dashboard's camera list is
+    /// populated synchronously in `runner::run_internal` before the
+    /// HTTP server starts accepting requests, so this is race-free.
+    pub fn is_known_camera_id(&self, camera_id: &str) -> bool {
+        // Reject empty / suspiciously-shaped ids cheaply before taking
+        // the dashboard lock.  The deterministic id formula is
+        // `<8-hex>_<sanitised-device-path>` — letters, digits,
+        // underscore, hyphen, dot.  Anything else (slashes, encoded
+        // bytes, traversal sequences) shouldn't reach this code path
+        // because the warp `String` extractor matches a single segment
+        // — but layered defence is cheap.
+        if camera_id.is_empty() || camera_id.len() > 256 {
+            return false;
+        }
+        if !camera_id.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.'
+        }) {
+            return false;
+        }
+        match self.dashboard.0.lock() {
+            Ok(guard) => guard.cameras.iter().any(|c| c.camera_id == camera_id),
+            Err(p) => p.into_inner().cameras.iter().any(|c| c.camera_id == camera_id),
+        }
+    }
 }
 
 /// Combine all `/api/*` route filters into a single boxed filter that
@@ -311,6 +342,18 @@ fn post_snapshot(
         .and(warp::post())
         .and(with_state(state))
         .and_then(|camera_id: String, st: LocalApiState| async move {
+            // Reject unknown ids before they hit the filesystem layer.
+            // Without this check a path-traversal payload in `camera_id`
+            // (warp's String extractor decodes `%2F`, `%2E%2E`, etc.)
+            // would let `hls_base_dir.join(camera_id)` escape the HLS
+            // root and have FFmpeg read arbitrary files.
+            if !st.is_known_camera_id(&camera_id) {
+                return Ok::<_, Rejection>(error_response(
+                    404,
+                    "unknown_camera",
+                    "no camera with that id is currently registered",
+                ));
+            }
             let result = crate::api::commands::take_snapshot(
                 &camera_id,
                 &st.hls_base_dir,
@@ -318,6 +361,19 @@ fn post_snapshot(
             )
             .await;
             let reply: ApiReply = match result {
+                Ok(meta) if meta.id == 0 => {
+                    // The capture succeeded but the DB write was skipped
+                    // because the host disk is under the safety floor.
+                    // Tell the operator clearly — without this, the SPA
+                    // shows "captured" then 404s when the gallery tries
+                    // to load /api/snapshots/0.
+                    error_response(
+                        503,
+                        "disk_safety_floor",
+                        "Snapshot captured but archive skipped — host disk is critically low. \
+                         Free space in the data directory and try again.",
+                    )
+                }
                 Ok(meta) => {
                     let body = serde_json::json!({
                         "id": meta.id,

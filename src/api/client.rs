@@ -390,6 +390,13 @@ impl ApiClient {
     /// TUI frame. Retrying here would just delay the inevitable local
     /// wipe (which the operator already confirmed).
     pub async fn decommission(&self) -> Result<()> {
+        // Local mode: nothing to unpair, return Ok so the TUI's
+        // `/wipe confirm` flow doesn't surface a misleading "Backend
+        // unpair failed" line.  base_url is empty in Local installs
+        // and reqwest would otherwise fail with "URL is missing scheme".
+        if self.is_local() {
+            return Ok(());
+        }
         let response = self
             .client
             .post(format!("{}/api/nodes/self/decommission", self.base_url))

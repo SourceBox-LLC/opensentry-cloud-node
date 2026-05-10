@@ -184,11 +184,31 @@ pub async fn fetch_snapshot_jpeg(
 /// **Fallback**: filesystem scan using the *second*-to-latest sequence
 /// number, since the very latest on disk may still be under active
 /// write by FFmpeg.
+///
+/// Defence-in-depth: any returned path is verified to live inside
+/// `dir` after canonicalisation.  Callers that pass an attacker-
+/// controlled `dir` (the snapshot HTTP route's `hls_base_dir.join(
+/// camera_id)` is the only one in v0.1.52) get a hard guarantee
+/// that the FFmpeg `-i` argument can't traverse out, even if the
+/// route-level allowlist is bypassed in the future.
 pub(crate) fn find_latest_segment(dir: &Path) -> Option<PathBuf> {
-    if let Some(seg) = last_segment_from_playlist(dir) {
-        return Some(seg);
+    let seg = last_segment_from_playlist(dir).or_else(|| last_segment_from_fs(dir))?;
+    // Canonicalise both sides so symlinks / `..` segments / mixed
+    // path separators all resolve to a single comparable form.
+    // `canonicalize` requires the path to exist, which is exactly
+    // what we want — a non-existent segment can't be a valid target.
+    let dir_real = std::fs::canonicalize(dir).ok()?;
+    let seg_real = std::fs::canonicalize(&seg).ok()?;
+    if seg_real.starts_with(&dir_real) {
+        Some(seg)
+    } else {
+        tracing::warn!(
+            "find_latest_segment refused out-of-tree path: dir={} seg={}",
+            dir_real.display(),
+            seg_real.display(),
+        );
+        None
     }
-    last_segment_from_fs(dir)
 }
 
 /// Parse `stream.m3u8` and return the path of the last `.ts` entry.
@@ -311,5 +331,41 @@ mod tests {
         let result = last_segment_from_playlist(&dir);
         assert_eq!(result.unwrap().file_name().unwrap(), "segment_00005.ts");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// If the playlist names a `.ts` file outside `dir`,
+    /// `find_latest_segment` must reject it after canonicalisation.
+    /// Regression guard for the path-traversal class fixed in v0.1.52.
+    #[test]
+    fn find_latest_segment_rejects_out_of_tree_target() {
+        let parent = std::env::temp_dir().join("sbs_cmds_test_traversal_parent");
+        let dir = parent.join("inner");
+        let outside = parent.join("outside");
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Place a "real" segment outside the camera dir.
+        let outside_seg = outside.join("segment_00001.ts");
+        std::fs::write(&outside_seg, b"hostile").unwrap();
+
+        // Write a playlist inside the camera dir that points at the
+        // outside segment via `..`.  Without the canonicalisation
+        // guard, find_latest_segment would happily return it.
+        std::fs::write(
+            dir.join("stream.m3u8"),
+            "#EXTM3U\n#EXTINF:1.0,\n../outside/segment_00001.ts\n",
+        )
+        .unwrap();
+        // Don't put any in-tree segment — we want to confirm the
+        // function returns None rather than the outside file.
+
+        let result = find_latest_segment(&dir);
+        assert!(
+            result.is_none(),
+            "find_latest_segment must refuse paths outside dir, got {:?}",
+            result,
+        );
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

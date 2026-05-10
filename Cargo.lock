@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "sourcebox-sentry-cloudnode"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
  "aes-gcm",
  "anyhow",

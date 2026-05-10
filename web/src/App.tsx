@@ -63,7 +63,40 @@ export default function App() {
           <span className={`app-mode-pill ${mode}`}>{mode === "local" ? "Local" : "Connected"}</span>
         </header>
         <Outlet context={status} />
+        {/* Local-mode upsell footer.  Only renders when this node hasn't
+            been paired with a Command Center org — connected installs
+            already have the full management surface and don't need the
+            CTA.  Keep it tasteful: describe the capabilities, no social
+            proof / "X cameras online" claims (we're pre-PMF). */}
+        {mode === "local" && <LocalUpsell />}
       </div>
     </ToastProvider>
+  )
+}
+
+const COMMAND_CENTER_URL = "https://opensentry-command.fly.dev"
+
+function LocalUpsell() {
+  return (
+    <footer className="local-upsell">
+      <div className="local-upsell-content">
+        <div className="local-upsell-title">Get more out of your cameras</div>
+        <p className="local-upsell-body">
+          Connect this node to{" "}
+          <strong>SourceBox Sentry Command Center</strong> for access from
+          anywhere, motion-event email alerts, multi-node dashboards, and AI
+          assistants that can see what your cameras see — all without losing
+          your local-only setup.
+        </p>
+      </div>
+      <a
+        href={COMMAND_CENTER_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="btn btn-primary local-upsell-cta"
+      >
+        Explore Command Center →
+      </a>
+    </footer>
   )
 }

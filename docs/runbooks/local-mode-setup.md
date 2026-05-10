@@ -26,6 +26,27 @@ set is comparable to Plex's local-only mode or a basic Synology NAS.
 You can defer the Command Center decision indefinitely; pairing later
 just requires re-running setup.
 
+## Browser dashboard tabs
+
+The SPA at `http://<node-ip>:8080/` has three tabs in both modes:
+
+- **Cameras (`/`)** — live HLS grid, one tile per camera with
+  Snapshot + Record buttons.  Refreshes every 5 s.  Local mode shows
+  a centered tile when only one camera is registered; the Record
+  toggle is interactive in Local mode and disabled with a "Managed
+  by Command Center" tooltip in Connected mode.
+- **Snapshots (`/snapshots`)** — gallery of every JPEG you've
+  captured, click-to-zoom modal, per-tile Delete button.  The image
+  bytes come from the encrypted SQLite blob store — same archive the
+  Command Center sees in Connected mode.
+- **Recordings (`/recordings`)** — one cell per `(camera, date)`
+  bucket.  Click → modal HLS.js player seeking through the dynamic
+  VOD playlist for that day.
+
+Local-mode installs additionally see a "Get more out of your cameras"
+footer at the bottom of every page linking to Command Center.
+Connected installs don't see it.
+
 ## Picking Local at install time
 
 Run setup interactively:
@@ -138,6 +159,22 @@ Recording is opt-in and per-camera.  In Local mode, click the
 **Record** button on the camera tile and wait at least one segment
 (~1 s by default) to see something in the Recordings tab.  In
 Connected mode, set the camera's recording policy in CC.
+
+### "Snapshot failed: No segments found for camera"
+Only seen on the very first ~1-2 s after a camera starts (FFmpeg
+hasn't written segment 00000 yet).  Wait for the camera tile to show
+the live feed, then click Snapshot again.  Steady-state captures are
+reliable from v0.1.50 onward — the per-task segment cleanup that used
+to race the snapshot grab is now skipped in Local mode (the orphan
+sweeper handles disk pressure on a 60 s cadence with ≥30 segments
+retained, ~12 MB/camera).
+
+### "Snapshot captured but archive skipped — host disk is critically low"
+The host filesystem dropped below the 1 GiB safety floor.  The
+capture itself succeeded but the durable DB write was skipped to
+avoid filling the disk further.  Free space in the data directory
+(see Storage section in the README) and try again — recording resumes
+automatically once free disk recovers above the floor.
 
 ### Node won't start in Local mode after setup
 Check `data/node.db` has a `mode='local'` row:

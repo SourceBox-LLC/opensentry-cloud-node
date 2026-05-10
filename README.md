@@ -121,11 +121,18 @@ What the browser dashboard does:
 
 - **Cameras tab (`/`)** — live HLS grid, one tile per camera with
   snapshot + record-toggle buttons.  Refreshes every 5 s.
+- **Snapshots tab (`/snapshots`)** — gallery of every still you've
+  captured, click-to-zoom modal, per-tile delete.  Image bytes come
+  from the encrypted SQLite blob store via `/api/snapshots/{id}`.
 - **Recordings tab (`/recordings`)** — one cell per (camera, date).
   Click → modal player with HLS.js seeking through the encrypted
   SQLite blob store via `/api/recordings/{cam}/{date}/playlist.m3u8`.
 - **Mode pill** in the header shows `Local` or `Connected` so the
   operator always knows which surface they're on.
+- **Command Center upsell footer** — Local-mode installs see a
+  tasteful "Get more out of your cameras" footer at the bottom of
+  every page linking to Command Center.  Connected installs don't see
+  it.
 
 Authentication: **none in v1.**  The server binds to `127.0.0.1` in
 Connected mode (localhost-only) and to `0.0.0.0` in Local mode (any
@@ -279,7 +286,7 @@ If the service fails to start, the most common cause is that setup wasn't run or
 
 ## Storage — where your video goes
 
-Your live stream always goes to the cloud. A small rolling buffer stays on this machine while segments are being uploaded. Anything you explicitly **record** (and every snapshot you capture) is archived in an encrypted database on this machine — these are the only things with any real footprint.
+In **Connected mode**, your live stream goes to Command Center. In **Local mode**, the cloud upload is skipped — segments are written to disk only, and the embedded SPA streams them direct from the LAN. Either way, a small rolling buffer stays on this machine, and anything you explicitly **record** (plus every snapshot you capture) is archived in an encrypted SQLite database on this machine — these are the only things with any real footprint.
 
 ```
              ┌────────── YOUR CAMERAS ──────────┐
@@ -475,17 +482,39 @@ docker run -d \
 
 ## API Endpoints
 
-The node runs an HTTP server on port 8080 for local access:
+The node runs a single warp HTTP server on port 8080 that powers both the live HLS feed and the browser dashboard's `/api/*` surface.
+
+### Live + health
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check (also used by the Docker `HEALTHCHECK`) |
-| GET | `/hls/{camera_id}/stream.m3u8` | HLS playlist (local) |
-| GET | `/hls/{camera_id}/segment_{n}.ts` | Video segment (local) — filename must be `segment_<digits>.ts` |
+| GET | `/hls/{camera_id}/stream.m3u8` | Live HLS playlist |
+| GET | `/hls/{camera_id}/segment_{n}.ts` | Live video segment — filename must be `segment_<digits>.ts` |
 
-The server has **no authentication** and binds to `127.0.0.1` by default — only the local machine can reach it. If you need LAN-local HLS playback (e.g. `VITE_LOCAL_HLS=true` on the Command Center frontend from another device), set `server.bind = "0.0.0.0"` in your config — and understand you're exposing live video to everyone on that network. In normal cloud operation the browser fetches video through the backend proxy, not directly from the node.
+### Local web UI (`/api/*`)
 
-Recordings and snapshots now live inside the encrypted SQLite database rather than on the filesystem; the old `/recordings/*` and `/snapshots/*` routes were removed.
+These power the embedded SPA at `http://<node-ip>:8080/`. Same shape in both modes; the recording-toggle endpoint returns `409` in Connected mode (Command Center is the source of truth there).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/cameras` | List cameras with status + `hls_url` for each tile |
+| POST | `/api/cameras/{id}/snapshot` | Capture one JPEG from latest complete segment, save to encrypted SQLite, return metadata |
+| POST | `/api/cameras/{id}/recording` | Body `{ "recording": bool }` — Local: flip + persist; Connected: returns `409` |
+| GET | `/api/snapshots` | List snapshots (optional `?camera_id=` filter) |
+| GET | `/api/snapshots/{id}` | Decrypted JPEG bytes (`Content-Type: image/jpeg`) |
+| DELETE | `/api/snapshots/{id}` | Delete a snapshot row |
+| GET | `/api/recordings` | List `(camera_id, date)` buckets with segment count + bytes |
+| GET | `/api/recordings/{cam}/{date}/playlist.m3u8` | Dynamic VOD HLS playlist (sealed, with `EXT-X-ENDLIST`) |
+| GET | `/api/recordings/{cam}/{date}/segment_{n}.ts` | Decrypted MPEG-TS segment from SQLite |
+| GET | `/api/status` | Node status — mode, version, uptime, camera count, plan |
+
+The server has **no authentication**. Bind defaults differ by mode:
+
+- **Connected mode default — `bind = 127.0.0.1`** (localhost-only). Anyone with shell access on the box could already wipe `data/node.db`, so the additional surface is zero.
+- **Local mode default — `bind = 0.0.0.0`** (any device on the LAN). Operators on the same network can read live HLS, snapshots, recordings, and toggle the local recording flag. Acceptable for v1's home / small-business LAN target. **Don't expose this server to the public internet.** See [docs/runbooks/local-mode-setup.md](docs/runbooks/local-mode-setup.md) for the threat model and discovery options.
+
+The snapshot route validates `camera_id` against the dashboard's known set before touching the filesystem to defeat path-traversal payloads. `find_latest_segment` additionally canonicalises the chosen segment and refuses anything that doesn't live under the camera's HLS dir as defence-in-depth.
 
 **Outbound calls to Command Center** (via `reqwest`):
 
@@ -522,12 +551,15 @@ cargo fmt -- --check     # Format check
 src/
 ├── main.rs               # CLI entry point (clap)
 ├── lib.rs                # Library re-exports
-├── dashboard.rs          # Live TUI dashboard + slash commands
+├── dashboard/            # Live TUI dashboard + slash commands (split package)
 ├── error.rs              # Custom Error enum + Result type
 ├── logging.rs            # tracing subscriber setup
-├── api/                  # Cloud API client + WebSocket
-│   ├── client.rs         # ApiClient — register, heartbeat, codec, push-segment, playlist, motion
-│   ├── websocket.rs      # WebSocket loop with auto-reconnect; sends motion events
+├── api/                  # Cloud API client + shared command implementations
+│   ├── client.rs         # ApiClient — register, heartbeat, codec, push-segment, playlist, motion;
+│   │                     # CC-only methods short-circuit when is_local()
+│   ├── commands.rs       # Shared take_snapshot — used by both WS dispatcher (Connected)
+│   │                     # and /api/cameras/{id}/snapshot HTTP route (Local web UI)
+│   ├── websocket.rs      # WebSocket loop with auto-reconnect; relays motion events
 │   ├── types.rs          # Request/response types
 │   └── mod.rs
 ├── camera/               # Detection and capture (platform-specific)
@@ -535,18 +567,31 @@ src/
 │   ├── capture.rs        # Frame capture
 │   ├── platform/         # Linux (v4l2) / Windows (DirectShow) / macOS (AVFoundation)
 │   └── types.rs
-├── config/               # Config loader (DB → YAML → env → CLI)
+├── config/               # Config loader (DB → YAML → env → CLI) — includes NodeMode (Local | Connected)
 ├── node/                 # Orchestration and lifecycle
-│   └── runner.rs
-├── server/               # Local HTTP server (warp) — health, HLS, recordings, snapshots
-├── setup/                # Interactive TUI setup wizard (crossterm + inquire)
+│   └── runner.rs         # Runtime fork: Local skips registration / heartbeat / WS / segment-push
+├── server/               # Local HTTP server (warp)
+│   ├── http.rs           # /health + /hls/* routes; chains to api.rs
+│   └── api.rs            # /api/* routes + LocalApiState + embedded SPA static_routes()
+├── setup/                # Interactive TUI setup wizard — first prompt picks Local vs Connected
 ├── streaming/            # HLS pipeline
 │   ├── hls_generator.rs   # FFmpeg subprocess per camera (HLS muxer)
-│   ├── hls_uploader.rs    # Watches HLS dir, hands segments to SegmentUploader, updates playlist, drives motion events
-│   ├── segment_uploader.rs# Posts each .ts to POST /push-segment with retry
+│   ├── supervisor.rs      # Per-camera FFmpeg supervisor with backoff + stall watchdog
+│   ├── hls_uploader.rs    # Watches HLS dir, hands segments to SegmentUploader, updates playlist
+│   ├── segment_uploader.rs# Posts each .ts to POST /push-segment with retry (Local: no-op)
 │   ├── motion_detector.rs # Parallel FFmpeg scene-change scorer
 │   └── codec_detector.rs  # FFprobe-based codec detection
 └── storage/              # SQLite-backed local storage (BLOBs + config)
+    └── database.rs       # NodeDatabase — snapshots, recordings, config, logs, local_recording_state
+
+web/                      # Browser dashboard SPA — Vite + React 18 + TypeScript
+├── src/                  # Source: pages (Cameras, Snapshots, Recordings),
+│                         # components (HlsPlayer), lib (typed /api/* fetch wrappers)
+└── package.json          # Pinned: react 18, vite 5, hls.js 1.5, react-router-dom 6
+                          # Builds to ../web-dist/ which rust-embed picks up at compile time
+
+build.rs                  # Pre-build hook — writes a placeholder web-dist/index.html if the
+                          # dir is empty, so cargo build succeeds before npm run build runs
 ```
 
 ### Cross-compilation

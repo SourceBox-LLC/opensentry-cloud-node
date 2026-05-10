@@ -7,6 +7,7 @@ Supplementary documentation for SourceBox Sentry CloudNode. The top-level `READM
 Step-by-step procedures for when something's gone wrong. Each runbook names the symptom, lists what access you need, walks through the diagnostic steps in order, and ends with a rollback + escalation path.
 
 - [video-not-showing.md](runbooks/video-not-showing.md) — camera registered but the tile is black / buffering / stuck on "stream not started yet"
+- [local-mode-setup.md](runbooks/local-mode-setup.md) — installing standalone on a LAN with no Command Center pairing: how to find the node URL, the threat model, recording-toggle behaviour per mode, and the upgrade path to Connected
 
 ## Architecture Decision Records (`docs/adr/`)
 

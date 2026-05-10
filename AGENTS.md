@@ -185,15 +185,21 @@ web/                        # Phase C local browser dashboard — Vite + React 1
 ├── index.html
 └── src/
     ├── main.tsx            # React entry + react-router-dom routes
-    ├── App.tsx             # Shell — brand + nav + mode pill, polls /api/status
+    ├── App.tsx             # Shell — brand + nav + mode pill, polls /api/status.
+    │                       # Renders the Local-mode upsell footer (CC CTA) when
+    │                       # status.mode === "local"; Connected installs see nothing extra.
     ├── styles.css          # Plain CSS; CSS variables match Command Center dark theme
     ├── components/
-    │   └── HlsPlayer.tsx   # HLS.js wrapper + native-Safari fallback
+    │   └── HlsPlayer.tsx   # HLS.js wrapper + native-Safari fallback.  Surfaces
+    │                       # fatal HLS errors as a "Stream unavailable" overlay
+    │                       # with a Retry button instead of leaving the tile black.
     ├── lib/
     │   ├── api.ts          # Typed fetch wrappers per /api/* endpoint
     │   └── toasts.tsx      # Tiny dependency-free toast context
     └── pages/
         ├── CamerasPage.tsx     # Live HLS grid, snapshot + record-toggle buttons
+        ├── SnapshotsPage.tsx   # Gallery of saved JPEGs, click-to-zoom modal,
+        │                       #   per-tile delete (DELETE /api/snapshots/{id})
         └── RecordingsPage.tsx  # (camera × date) cells → modal HLS player
 
 build.rs                    # Pre-build hook — writes a placeholder web-dist/index.html if
@@ -447,7 +453,19 @@ Recorded segments never leave the node through the local HTTP server — that se
 
 ### Local HTTP server (warp, port 8080)
 
-Exposes the same `.ts` and `.m3u8` files the uploader pushes to the cloud, so you can stream locally without going through the backend (`VITE_LOCAL_HLS=true` on the frontend):
+A single warp server hosts three logical surfaces. Routes mounted in
+this order (first match wins):
+
+1. `/health` + `/hls/*` — typed handlers in `src/server/http.rs`.
+2. `/api/*` — the Phase B local web-UI API. Filter chain in
+   `src/server/api.rs` behind `LocalApiState`. Every handler returns
+   `ApiReply = warp::http::Response<Vec<u8>>` so the warp `or().unify()`
+   chain stays uniform.
+3. Static SPA — `static_routes()` in `src/server/api.rs` serves the
+   embedded `web-dist/` bundle (rust-embed) for `/`, `/assets/*`, and
+   the SPA-fallback catch-all so React Router deep-links resolve.
+
+**Live + health:**
 
 | Method | Path | Notes |
 |--------|------|-------|
@@ -455,23 +473,42 @@ Exposes the same `.ts` and `.m3u8` files the uploader pushes to the cloud, so yo
 | GET | `/hls/{camera_id}/stream.m3u8` | Local HLS playlist |
 | GET | `/hls/{camera_id}/segment_{n}.ts` | Local segment — filename must match `segment_<digits>.ts` exactly |
 
-**Security:** the server has no authentication and binds to `127.0.0.1` by default. Only set `server.bind = "0.0.0.0"` if you explicitly want LAN-local HLS playback; changing it exposes live video to anyone on the network.
+**Local web UI (`/api/*`):**
 
-Recordings and snapshots used to be served here from the filesystem. They now live inside the encrypted SQLite DB and are fetched over the cloud API — the old `/recordings/*` and `/snapshots/*` routes were removed.
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/cameras` | Project the dashboard's camera list to JSON, including `hls_url` per camera |
+| POST | `/api/cameras/{id}/snapshot` | Capture one JPEG from latest complete segment, persist encrypted, return metadata. `id` is allowlist-validated against `LocalApiState::is_known_camera_id` to defeat path-traversal payloads |
+| POST | `/api/cameras/{id}/recording` | Body `{recording: bool}`. Local: flip `recording_state` set + persist via `db.set_local_recording`. Connected: returns `409 Conflict` (CC heartbeat reconciler is canonical) |
+| GET | `/api/snapshots` | List snapshots, optional `?camera_id=` query filter |
+| GET | `/api/snapshots/{id}` | Decrypted JPEG bytes, `Content-Type: image/jpeg` |
+| DELETE | `/api/snapshots/{id}` | Delete a snapshot row (per-tile trash button in the SPA) |
+| GET | `/api/recordings` | List `(camera_id, date)` buckets with segment count + total bytes |
+| GET | `/api/recordings/{cam}/{date}/playlist.m3u8` | Dynamic VOD HLS playlist (`EXT-X-PLAYLIST-TYPE:VOD`, per-segment `EXTINF`, `EXT-X-ENDLIST`) |
+| GET | `/api/recordings/{cam}/{date}/segment_{n}.ts` | Decrypted MPEG-TS segment from SQLite |
+| GET | `/api/status` | Mode, version, uptime, camera count, plan |
+
+Defence-in-depth: `find_latest_segment` in `src/api/commands.rs` canonicalises the chosen segment after picking it (playlist parse → FS fallback) and refuses anything that doesn't live under the camera's HLS directory. Regression test `find_latest_segment_rejects_out_of_tree_target` locks this in.
+
+**Security model — no auth in v1:**
+
+- Connected default — `bind = 127.0.0.1` (localhost only). Anyone with shell access could already wipe `data/node.db` directly, so the additional surface is zero.
+- Local default — `bind = 0.0.0.0` (any LAN device). Acceptable for v1's home / small-business LAN target. **Don't expose to the public internet.** See `docs/runbooks/local-mode-setup.md` for the threat model.
 
 ### Outbound API surface
 
-All outbound calls use `ApiClient` in `src/api/client.rs`:
+All outbound calls use `ApiClient` in `src/api/client.rs`. Local-mode nodes hold a no-op `local_stub()` client; CC-only methods short-circuit at the top with `if self.is_local() { return Ok(()); }` so the per-segment hot path never builds a request, and the per-camera background tasks (codec report, motion fallback, playlist push) stay quiet instead of spamming "Node not registered" warnings.
 
-| Method | Path | Header | Body | When |
-|--------|------|--------|------|------|
-| POST | `/api/nodes/register` | `X-API-Key` | `RegisterRequest` JSON | Startup |
-| POST | `/api/nodes/heartbeat` | `X-API-Key` | `HeartbeatRequest` JSON | Every `heartbeat_interval` s (fallback path; WS heartbeat is primary) |
-| POST | `/api/cameras/{id}/codec` | `X-Node-API-Key` | `{video_codec, audio_codec}` JSON | After first segment or codec change |
-| POST | `/api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | raw `.ts` bytes (`video/mp2t`) | Every segment |
-| POST | `/api/cameras/{id}/playlist` | `X-Node-API-Key` | playlist text (`text/plain`) | Every playlist rewrite |
-| POST | `/api/cameras/{id}/motion` | `X-Node-API-Key` | `{score, timestamp, segment_seq}` JSON | Motion event when WS is disconnected |
-| WS | `/ws/node?api_key=…&node_id=…` | query params | JSON frames | Connected continuously; carries heartbeat, commands, motion events |
+| Method | Path | Header | Body | When | Local-mode behavior |
+|--------|------|--------|------|------|---------------------|
+| POST | `/api/nodes/register` | `X-API-Key` | `RegisterRequest` JSON | Startup | Skipped — `runner.rs` doesn't call it |
+| POST | `/api/nodes/heartbeat` | `X-API-Key` | `HeartbeatRequest` JSON | Every `heartbeat_interval` s | Skipped — heartbeat task isn't spawned |
+| POST | `/api/cameras/{id}/codec` | `X-Node-API-Key` | `{video_codec, audio_codec}` JSON | After first segment or codec change | `is_local()` short-circuit returns `Ok(())` |
+| POST | `/api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | raw `.ts` bytes (`video/mp2t`) | Every segment | `SegmentUploader` short-circuits `Ok(true)` without HTTP |
+| POST | `/api/cameras/{id}/playlist` | `X-Node-API-Key` | playlist text (`text/plain`) | Every playlist rewrite | `is_local()` short-circuit returns `Ok(())` |
+| POST | `/api/cameras/{id}/motion` | `X-Node-API-Key` | `{score, timestamp, segment_seq}` JSON | Motion event when WS is disconnected | `is_local()` short-circuit returns `Ok(())` |
+| POST | `/api/nodes/self/decommission` | `X-Node-API-Key` | (empty) | `/wipe confirm` in TUI | `is_local()` short-circuit returns `Ok(())` so no misleading "Backend unpair failed" line |
+| WS | `/ws/node?api_key=…&node_id=…` | query params | JSON frames | Connected continuously | Skipped — WS task isn't spawned |
 
 **WebSocket message types:**
 
@@ -540,7 +577,7 @@ mod windows;
 ## Testing
 
 **Unit tests:** `cargo test`
-- 121+ unit tests across streaming / setup / node modules
+- 177+ unit tests across streaming / setup / node / api / server / storage modules
 - Integration tests in `tests/integration.rs`
 - Uses `tokio-test` for async testing
 - Key regression tests in `streaming/hls_generator.rs`:

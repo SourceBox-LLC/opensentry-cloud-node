@@ -151,13 +151,29 @@ impl NodeDatabase {
 
     // ── Snapshots ────────────────────────────────────────────────────────
 
+    /// Insert a snapshot row and return its primary-key id.
+    ///
+    /// Returning the id directly from `conn.last_insert_rowid()` while
+    /// still holding the connection lock is the race-free way to map a
+    /// just-inserted row to its id.  The previous flow saved the
+    /// snapshot here, then a separate `last_snapshot_id_for(camera_id,
+    /// filename, timestamp)` query looked up "the" id — but two
+    /// snapshots fired in the same millisecond on the same camera
+    /// (HTTP route + WS dispatcher both triggering) end up with
+    /// identical `(camera_id, filename, timestamp)` tuples, and the
+    /// lookup's `ORDER BY id DESC LIMIT 1` returns the *later* row to
+    /// both callers — the earlier caller then fetches the later
+    /// caller's bytes.  Using `last_insert_rowid` per-connection
+    /// closes that race because SQLite's rowid counter is
+    /// connection-local and the lock here is the same lock that
+    /// guards the INSERT.
     pub fn save_snapshot(
         &self,
         camera_id: &str,
         filename: &str,
         timestamp: i64,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<i64> {
         // `size_bytes` records the *plaintext* length — that's what the
         // retention quota and the user-facing "disk usage" display care
         // about. Storing the ciphertext length would drift the retention
@@ -178,7 +194,7 @@ impl NodeDatabase {
             params![camera_id, filename, timestamp, encrypted, plaintext_len],
         )
         .map_err(|e| Error::Storage(format!("Snapshot insert error: {}", e)))?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn list_snapshots(&self, camera_id: Option<&str>) -> Result<Vec<SnapshotRecord>> {
@@ -271,31 +287,14 @@ impl NodeDatabase {
 
     // ── Phase B (local web UI) accessors ────────────────────────────
 
-    /// Look up the row id of the most-recently-saved snapshot matching
-    /// (camera_id, filename, timestamp).  Used by the take_snapshot
-    /// flow to return a stable id to the caller — `last_insert_rowid`
-    /// would race if two snapshots fired concurrently on different
-    /// connections; the (camera_id, filename, timestamp) tuple is
-    /// effectively unique because `filename` includes a per-second
-    /// timestamp and `timestamp` is millisecond-resolution.
-    pub fn last_snapshot_id_for(
-        &self,
-        camera_id: &str,
-        filename: &str,
-        timestamp: i64,
-    ) -> Result<i64> {
-        let conn = self.lock()?;
-        let id: i64 = conn
-            .query_row(
-                "SELECT id FROM snapshots
-                 WHERE camera_id = ?1 AND filename = ?2 AND timestamp = ?3
-                 ORDER BY id DESC LIMIT 1",
-                params![camera_id, filename, timestamp],
-                |row| row.get(0),
-            )
-            .map_err(|e| Error::Storage(format!("Snapshot id lookup error: {}", e)))?;
-        Ok(id)
-    }
+    // `last_snapshot_id_for` lived here pre-v0.1.57.  It looked up the
+    // just-inserted row by (camera_id, filename, timestamp), but two
+    // snapshots fired in the same millisecond on the same camera
+    // produced identical tuples and the lookup's `ORDER BY id DESC
+    // LIMIT 1` returned the later row to both callers.  `save_snapshot`
+    // now returns `last_insert_rowid` directly under the connection
+    // lock instead — race-free.  Helper removed; the call site in
+    // `api/commands.rs::take_snapshot` uses the new return value.
 
     /// Decrypt and return the JPEG bytes for a saved snapshot.  The
     /// AAD is recomputed from (camera_id, filename, timestamp) so a

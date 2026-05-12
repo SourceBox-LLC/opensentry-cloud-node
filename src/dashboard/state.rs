@@ -95,34 +95,73 @@ impl DashboardState {
         }
     }
 
-    pub fn log(&mut self, level: LogLevel, message: impl Into<String>) {
-        // Suppress debug-level noise briefly after a command so output stays visible
+    /// In-memory part of a log event.  Pushes onto the ring buffer
+    /// and returns a `(timestamp, level_str, body)` triple that the
+    /// caller should pass to `NodeDatabase::save_log` **after**
+    /// releasing the dashboard mutex.
+    ///
+    /// Why split: pre-v0.1.57 this method took the dashboard mutex
+    /// *and* synchronously called `db.save_log` (which takes the
+    /// SQLite mutex) while still holding it.  Every `Dashboard::log_*`
+    /// caller — the render loop (2 ×/s), every spawned upload task
+    /// (per-segment `is_camera_suspended` check + per-segment debug
+    /// log), the heartbeat loop, the WS write-loop — would block on
+    /// any other slow log call.  A WAL checkpoint or encrypted-row
+    /// fsync pause would freeze the whole TUI for that duration.
+    ///
+    /// Splitting keeps the dashboard lock held for purely-in-memory
+    /// work (push to `VecDeque`, prune to capacity).  Returns `None`
+    /// when the log was suppressed (debug-level inside the
+    /// post-command quiet window).
+    #[must_use]
+    pub fn log_inmem(
+        &mut self,
+        level: LogLevel,
+        message: impl Into<String>,
+    ) -> Option<(String, &'static str, String)> {
+        // Suppress debug-level noise briefly after a command so output
+        // stays visible.
         if matches!(level, LogLevel::Debug) {
             if let Some(until) = self.suppress_debug_until {
                 if Instant::now() < until {
-                    return;
+                    return None;
                 }
                 self.suppress_debug_until = None;
             }
         }
         let msg = message.into();
 
-        // Persist to database before creating the display entry
-        if let Some(ref db) = self.db {
-            let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
-            let lvl = match level {
-                LogLevel::Info  => "INFO",
-                LogLevel::Warn  => "WARN",
-                LogLevel::Error => "ERROR",
-                LogLevel::Debug => "DEBUG",
-            };
-            let _ = db.save_log(&ts, lvl, &msg);
-        }
-
-        let entry = LogEntry::new(level, msg);
+        let entry = LogEntry::new(level, msg.clone());
         self.logs.push_back(entry);
         while self.logs.len() > self.log_capacity {
             self.logs.pop_front();
+        }
+
+        // Hand the persist row back to the caller — they'll write it
+        // outside the lock.  Only emit when a DB is wired up.
+        if self.db.is_some() {
+            let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+            let lvl = match level {
+                LogLevel::Info => "INFO",
+                LogLevel::Warn => "WARN",
+                LogLevel::Error => "ERROR",
+                LogLevel::Debug => "DEBUG",
+            };
+            Some((ts, lvl, msg))
+        } else {
+            None
+        }
+    }
+
+    /// Legacy synchronous log path that writes to the DB while still
+    /// holding the dashboard lock.  Kept for non-handle callers (none
+    /// in-tree today) and existing tests; new code in `handle.rs`
+    /// uses `log_inmem` + an outside-the-lock persist.
+    pub fn log(&mut self, level: LogLevel, message: impl Into<String>) {
+        if let Some((ts, lvl, body)) = self.log_inmem(level, message) {
+            if let Some(ref db) = self.db {
+                let _ = db.save_log(&ts, lvl, &body);
+            }
         }
     }
 

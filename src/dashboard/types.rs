@@ -7,7 +7,7 @@
 
 use chrono::Local;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum LogLevel {
     Info,
     Warn,

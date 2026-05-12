@@ -319,12 +319,41 @@ impl HlsUploader {
                             dash.update_camera_status(&camera_name, CameraStatus::Streaming);
                             dash.log_debug(format!("Segment {:05} pushed ({} KB)", seq, kb));
 
-                            // Codec detection (only first successful segment)
-                            if !codec_detected.load(std::sync::atomic::Ordering::SeqCst) {
+                            // Codec detection (only first successful segment).
+                            //
+                            // Claim the slot atomically before doing any work,
+                            // not after.  Four concurrent upload tasks
+                            // (UPLOAD_SEMAPHORE = 4) used to all see
+                            // `codec_detected == false` and race through
+                            // detect_codec + set_codec + report_codec,
+                            // hitting the backend with 4 identical codec
+                            // reports per camera-start.  compare_exchange
+                            // makes the first task to arrive the only one
+                            // that runs the detection.
+                            //
+                            // Trade-off: if `report_codec` fails after we
+                            // claimed the slot, no other task in this run
+                            // will retry — the next process boot re-runs
+                            // detection on the first segment then.  That's
+                            // acceptable: the codec is also rendered into
+                            // the dashboard regardless of CC's view, and
+                            // CC is the only consumer of the report.
+                            if codec_detected
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
                                 if let Ok(info) = super::codec_detector::detect_codec(&segment_path) {
                                     dash.set_codec(&camera_name, &info.video_codec, &info.audio_codec);
-                                    if let Ok(_) = api_client.report_codec(&camera_id, &info.video_codec, &info.audio_codec).await {
-                                        codec_detected.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    if api_client
+                                        .report_codec(&camera_id, &info.video_codec, &info.audio_codec)
+                                        .await
+                                        .is_ok()
+                                    {
                                         dash.log_info("Codec reported to cloud");
                                     }
                                 }
@@ -393,7 +422,14 @@ impl HlsUploader {
                                 }
                             });
 
-                            last_uploaded.store(seq, std::sync::atomic::Ordering::SeqCst);
+                            // `fetch_max` (not `store`) — out-of-order
+                            // task completion (4 parallel uploads + variable
+                            // network latency) could otherwise make
+                            // `last_uploaded_seq` regress.  The atomic
+                            // feeds the `seen`-set prune cutoff at
+                            // `start_with_dashboard`, which expects a
+                            // monotonic high-water mark.
+                            last_uploaded.fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
 
                             // Per-task cleanup: save THIS segment to the DB
                             // (if recording) and delete THIS segment from

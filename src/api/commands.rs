@@ -65,15 +65,31 @@ pub async fn take_snapshot(
     // Use FFmpeg to extract a single frame as JPEG.  Tempfile path is
     // process-unique and cleaned up below — multiple parallel snapshots
     // on the same camera would collide (rare but possible if HTTP and
-    // WS both fire), so we suffix with the current PID + a nanosecond
-    // counter to avoid the race.
+    // WS both fire), so the suffix layers three pieces of entropy:
+    //
+    //   - `process::id()` distinguishes any future multi-instance
+    //     deployment (Docker rebuilds, side-by-side test harnesses).
+    //   - `SystemTime::now().as_nanos()` gives per-second granularity
+    //     on every platform.
+    //   - A per-process `AtomicU64` counter is the actual collision
+    //     defence: on Windows `SystemTime::now()` has ~15 ms resolution
+    //     (the system tick), so two snapshots fired within 15 ms get
+    //     identical nanos — only the counter pulls them apart.  Without
+    //     it the second FFmpeg invocation truncates the first's output,
+    //     the loser's `tokio::fs::remove_file` deletes the survivor,
+    //     and both callers see a corrupt JPEG.
+    static SNAP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = SNAP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let temp_path = std::env::temp_dir().join(format!(
-        "sourcebox_sentry_snap_{}_{}.jpg",
+        "sourcebox_sentry_snap_{}_{}_{}_{}.jpg",
         camera_id,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
+        std::process::id(),
+        nanos,
+        counter,
     ));
 
     let ffmpeg = crate::streaming::find_ffmpeg();
@@ -137,18 +153,14 @@ pub async fn take_snapshot(
         });
     }
 
-    db.save_snapshot(camera_id, &filename, timestamp, &data)
-        .map_err(|e| format!("DB save error: {}", e))?;
-
-    // Look up the row id we just inserted so the HTTP route can return
-    // a stable image_url. SQLite's last_insert_rowid is the cleanest
-    // path; expose it through a small DB helper rather than re-running
-    // a SELECT-by-(filename, timestamp) — the latter has a real race
-    // when two snapshots fire in the same millisecond on the same
-    // camera (rare but possible).
+    // `save_snapshot` returns the inserted rowid directly under its
+    // own connection lock — race-free even when two snapshots fire on
+    // the same camera in the same millisecond.  The previous separate
+    // `last_snapshot_id_for` lookup had a real race window where both
+    // callers got the later row's id.
     let id = db
-        .last_snapshot_id_for(camera_id, &filename, timestamp)
-        .map_err(|e| format!("DB id lookup error: {}", e))?;
+        .save_snapshot(camera_id, &filename, timestamp, &data)
+        .map_err(|e| format!("DB save error: {}", e))?;
 
     tracing::info!("Snapshot captured: {} ({} bytes)", filename, size);
 

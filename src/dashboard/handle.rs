@@ -26,20 +26,37 @@ impl Dashboard {
     }
 
     pub fn log_info(&self, msg: impl Into<String>) {
-        if let Ok(mut s) = self.0.lock() {
-            s.log(LogLevel::Info, msg);
-        }
+        self.log_at(LogLevel::Info, msg);
     }
 
     pub fn log_warn(&self, msg: impl Into<String>) {
-        if let Ok(mut s) = self.0.lock() {
-            s.log(LogLevel::Warn, msg);
-        }
+        self.log_at(LogLevel::Warn, msg);
     }
 
     pub fn log_error(&self, msg: impl Into<String>) {
-        if let Ok(mut s) = self.0.lock() {
-            s.log(LogLevel::Error, msg);
+        self.log_at(LogLevel::Error, msg);
+    }
+
+    /// Shared body for `log_info`/`log_warn`/`log_error` (and the
+    /// `log_debug` variant added below).  Acquires the dashboard lock
+    /// only for the in-memory push, then persists to the SQLite log
+    /// table **outside** the lock.  See the
+    /// `DashboardState::log_inmem` doc for the rationale —
+    /// short version: avoid blocking the render loop and every
+    /// per-segment upload task on a slow WAL checkpoint.
+    fn log_at(&self, level: LogLevel, msg: impl Into<String>) {
+        let (to_persist, db_handle) = match self.0.lock() {
+            Ok(mut s) => {
+                let p = s.log_inmem(level, msg);
+                // Clone is cheap — NodeDatabase is Arc<Mutex<…>>.
+                (p, s.db.clone())
+            }
+            Err(_) => return,
+        };
+        // Lock is dropped here.  The SQLite write below can take its
+        // own mutex / wait on disk without blocking the dashboard.
+        if let (Some((ts, lvl, body)), Some(db)) = (to_persist, db_handle) {
+            let _ = db.save_log(&ts, lvl, &body);
         }
     }
 
@@ -163,9 +180,7 @@ impl Dashboard {
     }
 
     pub fn log_debug(&self, msg: impl Into<String>) {
-        if let Ok(mut s) = self.0.lock() {
-            s.log(LogLevel::Debug, msg);
-        }
+        self.log_at(LogLevel::Debug, msg);
     }
 
     pub fn add_camera(&self, state: CameraState) {

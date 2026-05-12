@@ -866,13 +866,54 @@ impl Node {
                         // set alone" so a backend rollback can't silently
                         // disable archive on every connected node.
                         if let Some(target) = r.recording_state.as_ref() {
-                            if let Ok(mut set) = recording_state.write() {
-                                set.clear();
-                                for (cam_id, should_record) in target {
-                                    if *should_record {
-                                        set.insert(cam_id.clone());
+                            // Project the heartbeat's HashMap<id, bool>
+                            // into a HashSet<id> of cameras that should
+                            // be recording right now — easier to diff
+                            // against the existing in-memory set.
+                            let target_on: HashSet<String> = target
+                                .iter()
+                                .filter_map(|(cam, on)| {
+                                    if *on { Some(cam.clone()) } else { None }
+                                })
+                                .collect();
+                            // Apply + diff under a single write lock so
+                            // the result is consistent.  Compute the
+                            // newly-on / newly-off lists for logging
+                            // OUTSIDE the lock — `dash.log_info` takes
+                            // the dashboard mutex and we don't want to
+                            // nest.
+                            let (newly_on, newly_off): (Vec<String>, Vec<String>) =
+                                match recording_state.write() {
+                                    Ok(mut set) => {
+                                        let on: Vec<String> = target_on
+                                            .difference(&*set)
+                                            .cloned()
+                                            .collect();
+                                        let off: Vec<String> = set
+                                            .difference(&target_on)
+                                            .cloned()
+                                            .collect();
+                                        *set = target_on;
+                                        (on, off)
                                     }
-                                }
+                                    Err(_) => (Vec::new(), Vec::new()),
+                                };
+                            // Log transitions so the operator can see
+                            // their CC click landed on the node.
+                            // Steady-state heartbeats produce empty
+                            // diffs and no log output, so this doesn't
+                            // spam the buffer.
+                            for cam_id in &newly_on {
+                                dash.log_info(format!(
+                                    "Recording started — {} (per Command Center)",
+                                    cam_id.cyan().bold(),
+                                ));
+                            }
+                            for cam_id in &newly_off {
+                                dash.log_info(format!(
+                                    "Recording stopped — {}",
+                                    cam_id.cyan().bold(),
+                                ));
                             }
                         }
                         // Surface "update available" hints from the backend

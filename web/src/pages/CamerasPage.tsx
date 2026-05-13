@@ -8,7 +8,7 @@ import { useOutletContext } from "react-router-dom"
 import HlsPlayer from "../components/HlsPlayer"
 import {
   Camera,
-  COMMAND_CENTER_URL,
+  COMMAND_CENTER_URL_FALLBACK,
   listCameras,
   NodeStatus,
   setRecording,
@@ -159,7 +159,7 @@ export default function CamerasPage() {
                   Snapshots and recordings captured here still archive locally.
                 </div>
                 <a
-                  href={COMMAND_CENTER_URL}
+                  href={status?.command_center_url ?? COMMAND_CENTER_URL_FALLBACK}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="btn btn-primary"

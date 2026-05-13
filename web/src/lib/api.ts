@@ -2,15 +2,18 @@
 // Same-origin: every request lands on the warp server that's also
 // serving this SPA, so no base URL or CORS dance.
 
-/// The canonical Command Center URL.  Used by:
-///   - the Local-mode upsell footer (App.tsx) to point unpaired
-///     installs at the SaaS product
-///   - the Cameras tab's Connected-mode CTA (CamerasPage.tsx) so
-///     operators land in CC's live viewer instead of seeing a
-///     redundant local HLS player
-/// Pinned at build time; if the deployment moves we ship a new
-/// release.  Surfacing from /api/status is on the polish list.
-export const COMMAND_CENTER_URL = "https://opensentry-command.fly.dev"
+/// Fallback Command Center URL used by the SPA when `/api/status`
+/// either hasn't responded yet or omits the field (older nodes).  The
+/// authoritative value lives in `NodeStatus.command_center_url` and is
+/// surfaced from the node's config so a deployment move doesn't
+/// require shipping a new SPA bundle.  Used by:
+///   - the Local-mode upsell footer (App.tsx)
+///   - the Cameras tab's Connected-mode CTA (CamerasPage.tsx)
+export const COMMAND_CENTER_URL_FALLBACK = "https://opensentry-command.fly.dev"
+
+/// Backwards-compat alias for the constant.  New code should prefer
+/// `status?.command_center_url ?? COMMAND_CENTER_URL_FALLBACK`.
+export const COMMAND_CENTER_URL = COMMAND_CENTER_URL_FALLBACK
 
 export type CameraStatus =
   | "starting"
@@ -72,6 +75,10 @@ export interface NodeStatus {
   total_segments: number
   total_bytes_uploaded: number
   plan: string | null
+  /// Command Center URL the node was configured with (or the canonical
+  /// default in Local mode).  Optional for back-compat with nodes
+  /// pre-v0.1.61; callers should fall back to `COMMAND_CENTER_URL_FALLBACK`.
+  command_center_url?: string
 }
 
 class ApiError extends Error {

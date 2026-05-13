@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use base64::prelude::*;
 use crate::dashboard::Dashboard;
 use crate::storage::NodeDatabase;
-use crate::streaming::hls_uploader::MotionEvent;
 
 /// Characters that must be percent-encoded inside a URL query parameter value.
 ///
@@ -69,7 +68,6 @@ pub async fn run_ws_client(
     dash: Dashboard,
     hls_base_dir: PathBuf,
     db: NodeDatabase,
-    mut motion_rx: tokio::sync::mpsc::Receiver<MotionEvent>,
 ) {
     let ws_url = build_ws_url(&api_url, &api_key, &node_id);
     let mut backoff = Duration::from_secs(1);
@@ -107,31 +105,12 @@ pub async fn run_ws_client(
                             }
                         }
 
-                        // -- Motion event from uploader (cooldown already applied) --
-                        Some(event) = motion_rx.recv() => {
-                            dash.log_info(format!(
-                                "Motion detected on {} (score {}%)",
-                                event.camera_id, event.score
-                            ));
-
-                            let msg = WsMessage {
-                                msg_type: "event".to_string(),
-                                id: None,
-                                command: Some("motion_detected".to_string()),
-                                payload: serde_json::json!({
-                                    "camera_id": event.camera_id,
-                                    "score": event.score,
-                                    "timestamp": event.timestamp,
-                                    "segment_seq": event.segment_seq,
-                                }),
-                            };
-                            if let Ok(text) = serde_json::to_string(&msg) {
-                                if write.send(Message::Text(text)).await.is_err() {
-                                    dash.log_warn("WebSocket send failed — reconnecting");
-                                    break;
-                                }
-                            }
-                        }
+                        // (Pre-v0.1.61 a `Some(event) = motion_rx.recv()` branch
+                        // forwarded motion events as `motion_detected` WS frames.
+                        // `motion_rx` was never written to — `spawn_motion_detection`
+                        // takes `_tx` as unused — so the branch fired never.
+                        // Motion events are delivered HTTP-only via
+                        // `api_client.report_motion`.  Branch + plumbing removed.)
 
                         // -- Incoming message from backend --
                         incoming = read.next() => {

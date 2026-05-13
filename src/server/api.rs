@@ -65,7 +65,20 @@ pub struct LocalApiState {
     pub hls_base_dir: PathBuf,
     pub uptime_start: std::time::Instant,
     pub node_version: &'static str,
+    /// Command Center URL surfaced via `/api/status` so the SPA's
+    /// Local-mode upsell footer + Connected-mode "Live view in CC"
+    /// CTA can link to the right deployment without a hardcoded
+    /// constant.  In Local mode this is the canonical default
+    /// (operator hasn't paired yet).  In Connected mode it's the
+    /// `config.cloud.api_url` the operator entered at setup.
+    pub command_center_url: String,
 }
+
+/// Canonical Command Center URL used as the Local-mode default for
+/// `LocalApiState.command_center_url`.  Operators in Connected mode
+/// override this with whatever `config.cloud.api_url` was set to at
+/// setup time.
+pub const DEFAULT_COMMAND_CENTER_URL: &str = "https://opensentry-command.fly.dev";
 
 impl LocalApiState {
     pub fn new(
@@ -74,7 +87,17 @@ impl LocalApiState {
         recording_state: Arc<RwLock<std::collections::HashSet<String>>>,
         mode: NodeMode,
         hls_base_dir: PathBuf,
+        cloud_api_url: String,
     ) -> Self {
+        // Empty `cloud_api_url` happens in Local-mode installs that
+        // never paired.  Fall back to the canonical default so the
+        // SPA's upsell footer always has a link to send the operator
+        // through.
+        let command_center_url = if cloud_api_url.trim().is_empty() {
+            DEFAULT_COMMAND_CENTER_URL.to_string()
+        } else {
+            cloud_api_url
+        };
         Self {
             dashboard,
             db,
@@ -83,6 +106,7 @@ impl LocalApiState {
             hls_base_dir,
             uptime_start: std::time::Instant::now(),
             node_version: env!("CARGO_PKG_VERSION"),
+            command_center_url,
         }
     }
 
@@ -617,6 +641,7 @@ fn status(
                 "total_segments": dash.total_segments,
                 "total_bytes_uploaded": total_bytes,
                 "plan": plan,
+                "command_center_url": st.command_center_url.clone(),
             });
             json_response(&body, 200)
         })

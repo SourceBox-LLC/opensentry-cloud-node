@@ -232,6 +232,12 @@ impl Node {
             let registration = self.register_with_cloud(&detected_cameras, &dash).await?;
             let node_id = registration.node_id.clone();
             let camera_mapping: HashMap<String, String> = registration.cameras;
+            // Push the CC-assigned id into the dashboard so the TUI
+            // status bar + `/api/status` SPA header stop showing
+            // "unknown" on a fresh Connected install (the dashboard
+            // was created earlier with `config.node.node_id`, which is
+            // None on first boot — see `run_internal` head).
+            dash.set_node_id(&node_id);
             // Surface the plan in the status bar. Advisory only — see the doc
             // comment on RegisterResponse::plan.  `None` on older backends that
             // don't send the field, in which case the dashboard hides the pill.
@@ -320,10 +326,10 @@ impl Node {
         // Owned by the caller now (was created here in older versions);
         // every supervisor task gets a clone below.
 
-        // Motion event channel — uploaders send, WebSocket client receives
-        let (motion_tx, motion_rx) = tokio::sync::mpsc::channel::<
-            crate::streaming::hls_uploader::MotionEvent,
-        >(64);
+        // (Pre-v0.1.61 a `motion_tx`/`motion_rx` mpsc channel lived here
+        // for a never-implemented WS-forwarding path; motion events have
+        // always gone over HTTP via `report_motion`, not the channel.
+        // Removed in v0.1.61.)
 
         // Clean all HLS directories on startup so segment numbering resets fresh
         if let Ok(entries) = std::fs::read_dir(&self.hls_output_dir) {
@@ -429,7 +435,6 @@ impl Node {
                     recording_state.clone(),
                     self.db.clone(),
                     motion_cfg,
-                    motion_tx.clone(),
                 );
                 // Shared between uploader and supervisor.  The uploader
                 // sets it after ~20s of no new segments; the supervisor
@@ -492,6 +497,7 @@ impl Node {
             recording_state.clone(),
             self.config.mode,
             self.hls_output_dir.clone(),
+            self.config.cloud.api_url.clone(),
         );
         let http_server = crate::server::HttpServer::new_with_api(
             self.config.server.clone(),
@@ -541,13 +547,6 @@ impl Node {
         // FFmpeg + HLS supervisor + retention loop + HTTP server all
         // keep running unchanged so the local web UI (Phase B+) sees
         // the same state.
-        //
-        // The motion_rx receiver still has to be consumed somewhere or
-        // the bounded-mpsc channel fills up after ~64 events and the
-        // uploader's `motion_tx.try_send` starts erroring (harmless,
-        // just noisy in logs).  Phase B converts this channel to a
-        // broadcast::Sender so multiple subscribers can listen; for
-        // now in Local mode we drain the receiver in a tiny task.
         let streaming_camera_ids: Vec<String> = camera_mapping.values().cloned().collect();
         let (heartbeat_handle, ws_handle) = if self.config.mode.is_connected() {
             let hb = self.start_heartbeat_loop(
@@ -580,7 +579,6 @@ impl Node {
                         ws_dash,
                         ws_hls_dir,
                         ws_db,
-                        motion_rx,
                     ).await;
                 })
             };
@@ -590,12 +588,8 @@ impl Node {
             // so the existing `select!` / await-pattern in the rest of
             // run_internal doesn't need to grow a `Option<JoinHandle>`.
             let _ = streaming_camera_ids;
-            let mut motion_rx_drain = motion_rx;
             let drain_handle = tokio::spawn(async move {
-                while motion_rx_drain.recv().await.is_some() {
-                    // Discard — Phase B turns this into a broadcast
-                    // channel that feeds an SSE endpoint.
-                }
+                std::future::pending::<()>().await;
             });
             // Make a no-op heartbeat handle so the function's later
             // joins don't need a separate code path.

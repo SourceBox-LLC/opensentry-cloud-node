@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react"
 import { NavLink, Outlet } from "react-router-dom"
 
-import { COMMAND_CENTER_URL, getStatus, NodeStatus } from "./lib/api"
+import { COMMAND_CENTER_URL_FALLBACK, getStatus, NodeStatus } from "./lib/api"
 import { ToastProvider } from "./lib/toasts"
 
 export default function App() {
@@ -68,13 +68,15 @@ export default function App() {
             already have the full management surface and don't need the
             CTA.  Keep it tasteful: describe the capabilities, no social
             proof / "X cameras online" claims (we're pre-PMF). */}
-        {mode === "local" && <LocalUpsell />}
+        {mode === "local" && (
+          <LocalUpsell url={status?.command_center_url ?? COMMAND_CENTER_URL_FALLBACK} />
+        )}
       </div>
     </ToastProvider>
   )
 }
 
-function LocalUpsell() {
+function LocalUpsell({ url }: { url: string }) {
   return (
     <footer className="local-upsell">
       <div className="local-upsell-content">
@@ -88,7 +90,7 @@ function LocalUpsell() {
         </p>
       </div>
       <a
-        href={COMMAND_CENTER_URL}
+        href={url}
         target="_blank"
         rel="noopener noreferrer"
         className="btn btn-primary local-upsell-cta"

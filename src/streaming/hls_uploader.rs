@@ -102,19 +102,22 @@ pub struct HlsUploader {
     db: NodeDatabase,
     /// Motion detection configuration
     motion_config: MotionConfig,
-    /// Channel to send motion events to the WebSocket client
-    motion_tx: tokio::sync::mpsc::Sender<MotionEvent>,
 }
 
 impl HlsUploader {
-    /// Create a new HLS uploader
+    /// Create a new HLS uploader.
+    ///
+    /// Note (v0.1.61): the `motion_tx` parameter was removed.  Motion
+    /// events have only ever been delivered via the HTTP `report_motion`
+    /// path inside `spawn_motion_detection`; the mpsc channel that used
+    /// to forward them to the WS task was orphaned plumbing that the
+    /// next refactor would have tripped over.
     pub fn new(
         config: HlsUploaderConfig,
         api_client: ApiClient,
         recording_state: Arc<RwLock<HashSet<String>>>,
         db: NodeDatabase,
         motion_config: MotionConfig,
-        motion_tx: tokio::sync::mpsc::Sender<MotionEvent>,
     ) -> Self {
         Self {
             config,
@@ -124,7 +127,6 @@ impl HlsUploader {
             recording_state,
             db,
             motion_config,
-            motion_tx,
         }
     }
 
@@ -283,7 +285,6 @@ impl HlsUploader {
                 let rec_state = self.recording_state.clone();
                 let db = self.db.clone();
                 let motion_cfg = self.motion_config.clone();
-                let motion_tx = self.motion_tx.clone();
                 let last_motion = last_motion.clone();
 
                 // Spawn upload as a concurrent task so it doesn't block
@@ -366,7 +367,6 @@ impl HlsUploader {
                                     camera_id.clone(),
                                     seq,
                                     &motion_cfg,
-                                    motion_tx.clone(),
                                     last_motion.clone(),
                                     api_client.clone(),
                                 );
@@ -606,15 +606,17 @@ impl HlsUploader {
     }
 }
 
-/// Spawn a background task that runs FFmpeg scene-change detection on a
-/// segment and, if motion exceeds the threshold and the per-camera cooldown
-/// has elapsed, sends the event to the WebSocket client.
+/// Spawn a background task that runs FFmpeg scene-change detection on
+/// a segment and, if motion exceeds the threshold and the per-camera
+/// cooldown has elapsed, POSTs a `motion_detected` event to the
+/// backend.  Delivery is HTTP-only via `api_client.report_motion`;
+/// pre-v0.1.61 a `motion_tx` `mpsc::Sender` was also threaded through
+/// here for a never-implemented WS-forwarding path, removed in v0.1.61.
 fn spawn_motion_detection(
     segment_path: PathBuf,
     camera_id: String,
     seq: u64,
     motion_cfg: &MotionConfig,
-    _tx: tokio::sync::mpsc::Sender<MotionEvent>,
     last_motion: Arc<Mutex<Option<Instant>>>,
     api_client: ApiClient,
 ) {

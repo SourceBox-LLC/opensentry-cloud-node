@@ -66,6 +66,20 @@ impl Dashboard {
         }
     }
 
+    /// Replace the node_id displayed in the TUI status bar (and
+    /// returned by `/api/status`).  Called after Connected-mode
+    /// registration returns the CC-assigned id so the operator sees
+    /// the real node identifier instead of the pre-registration
+    /// "unknown" placeholder.  Pre-v0.1.61 a fresh Connected install
+    /// would show `NODE · UNKNOWN` briefly until the first
+    /// `/api/status` poll on the SPA side caught the persisted value
+    /// from the next boot.
+    pub fn set_node_id(&self, node_id: impl Into<String>) {
+        if let Ok(mut s) = self.0.lock() {
+            s.node_id = node_id.into();
+        }
+    }
+
     /// Record the org's subscription plan for display in the status bar.
     ///
     /// Empty-string / whitespace-only values are treated as `None` so the

@@ -773,22 +773,22 @@ impl Node {
             // newer release lands while CloudNode is still running).
             let mut last_update_hint: Option<String> = None;
 
-            // Log a one-shot summary on the first successful heartbeat so
-            // the operator can SEE what Command Center says about recording
-            // policy.  Without this, the "click Record in CC → expect
-            // segments to archive" loop is invisible from the node side
-            // when the response is `recording_state: {}` (no cameras
-            // assigned to record) or `recording_state` absent (older
-            // backend).  Combined with the transition logging in the
-            // reconciler below, the operator can distinguish three states:
-            //   1. "Heartbeat OK — N/M cameras recording per CC" + later
-            //      "Recording started" lines  → working
-            //   2. "Heartbeat OK — 0/M cameras recording per CC" with no
-            //      transition lines after a Record click → CC isn't
-            //      flipping continuous_24_7 (CC-side bug)
-            //   3. "Heartbeat OK — recording_state field absent" →
-            //      older backend, archive will never enable
-            let mut logged_first_heartbeat = false;
+            // Diagnostic for "I clicked Record in CC, did the node hear about it?":
+            // log a one-line summary of every heartbeat's recording_state so
+            // the operator can SEE what Command Center is telling the node.
+            // Pre-v0.1.60 we logged only the FIRST heartbeat, which scrolled
+            // off the TUI buffer within ~2 minutes (~100 segment lines past
+            // it).  Per-heartbeat logging at INFO is 1 line per 30s — fine
+            // density, sticks around in the buffer.  Combined with the
+            // transition logging below, the operator can distinguish:
+            //   "Heartbeat: 1 cam in policy (1 on)"   → CC says record
+            //   "Heartbeat: 1 cam in policy (0 on)"   → CC says don't record
+            //   "Heartbeat: no cameras in policy"     → camera not attached
+            //                                            to this node
+            //   "Heartbeat: recording_state absent"   → older backend
+            // If the user clicks Record in CC and the very NEXT heartbeat
+            // still says "0 on", the bug is CC-side (continuous_24_7 not
+            // being flipped on the row this heartbeat queries).
 
             loop {
                 // Build a fresh snapshot each tick from the supervisor's
@@ -840,23 +840,20 @@ impl Node {
                     3,
                 ).await {
                     Ok(r) => {
-                        // One-shot diagnostic on the first successful
-                        // heartbeat.  See the `logged_first_heartbeat`
-                        // doc comment above for why.
-                        if !logged_first_heartbeat {
-                            logged_first_heartbeat = true;
-                            let summary = match &r.recording_state {
-                                None => "recording_state field absent (older backend?)".to_string(),
-                                Some(m) if m.is_empty() => {
-                                    "no cameras in recording policy".to_string()
-                                }
-                                Some(m) => {
-                                    let on = m.values().filter(|v| **v).count();
-                                    format!("{} of {} camera(s) recording per CC", on, m.len())
-                                }
-                            };
-                            dash.log_info(format!("Heartbeat OK — {}", summary));
-                        }
+                        // Per-heartbeat diagnostic summary — see the
+                        // comment block on the `let mut last_update_hint`
+                        // above for the rationale.
+                        let summary = match &r.recording_state {
+                            None => "recording_state absent".to_string(),
+                            Some(m) if m.is_empty() => {
+                                "no cameras in policy".to_string()
+                            }
+                            Some(m) => {
+                                let on = m.values().filter(|v| **v).count();
+                                format!("{} cam in policy ({} on)", m.len(), on)
+                            }
+                        };
+                        dash.log_info(format!("Heartbeat: {}", summary));
                         if r.key_rotated {
                             if let Some(new_key) = r.new_api_key {
                                 dash.log_warn("API key rotated by server — updating");

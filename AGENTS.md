@@ -53,9 +53,13 @@ a no-op behaviorally.
 - **Local** — node skips registration, the heartbeat loop, the WS
   client, and the segment-push HTTP call.  FFmpeg supervisor + HLS
   generation + local /api/* + browser dashboard all run unchanged.
-  Camera IDs are namespaced under a stable `local_node_id` UUID
-  generated on first boot (also a `config` SQLite KV row), so
-  per-camera dirs and DB rows survive reboots.
+  Camera IDs are namespaced under a stable `local_node_id` (the first
+  8 hex chars of a fresh `Uuid::new_v4()`, persisted as a `config`
+  SQLite KV row on first Local boot), so per-camera dirs and DB rows
+  survive reboots.  Eight chars matches the format CC's registration
+  endpoint returns for Connected installs, so downstream string
+  formatting (status-bar truncation, camera-id namespacing) works
+  identically in both modes.
 
 Runtime fork point: `node::runner::run_internal` — every CC-coupled
 spawn is gated on `self.config.mode.is_connected()`.  See `NodeMode`
@@ -504,13 +508,13 @@ All outbound calls use `ApiClient` in `src/api/client.rs`. Local-mode nodes hold
 | POST | `/api/cameras/{id}/codec` | `X-Node-API-Key` | `{video_codec, audio_codec}` JSON | After first segment or codec change | `is_local()` short-circuit returns `Ok(())` |
 | POST | `/api/cameras/{id}/push-segment?filename=…` | `X-Node-API-Key` | raw `.ts` bytes (`video/mp2t`) | Every segment | `SegmentUploader` short-circuits `Ok(true)` without HTTP |
 | POST | `/api/cameras/{id}/playlist` | `X-Node-API-Key` | playlist text (`text/plain`) | Every playlist rewrite | `is_local()` short-circuit returns `Ok(())` |
-| POST | `/api/cameras/{id}/motion` | `X-Node-API-Key` | `{score, timestamp, segment_seq}` JSON | Motion event when WS is disconnected | `is_local()` short-circuit returns `Ok(())` |
+| POST | `/api/cameras/{id}/motion` | `X-Node-API-Key` | `{score, timestamp, segment_seq}` JSON | Every motion-detected segment after cooldown (HTTP-only post v0.1.61) | `is_local()` short-circuit returns `Ok(())` |
 | POST | `/api/nodes/self/decommission` | `X-Node-API-Key` | (empty) | `/wipe confirm` in TUI | `is_local()` short-circuit returns `Ok(())` so no misleading "Backend unpair failed" line |
 | WS | `/ws/node?api_key=…&node_id=…` | query params | JSON frames | Connected continuously | Skipped — WS task isn't spawned |
 
 **WebSocket message types:**
 
-- Node → Backend: `heartbeat`, `command_result`, `event` (with `command: "motion_detected"`)
+- Node → Backend: `heartbeat`, `command_result`.  (Pre-v0.1.61 an `event` type carrying `command: "motion_detected"` existed in the message schema but was never written to the wire — the `motion_tx` channel had no producer.  Motion events have always reached the backend via the HTTP `report_motion` path; the dead WS branch was removed in v0.1.61.)
 - Backend → Node: `ack`, `command` (`take_snapshot`, `list_snapshots`, `list_recordings`, `wipe_data`), `error`.  The legacy `start_recording` / `stop_recording` commands were retired in v0.1.43 — recording state now flows through the heartbeat reconciler (see "Recording lifecycle" above).
 
 ## Dashboard TUI (`src/dashboard/`)

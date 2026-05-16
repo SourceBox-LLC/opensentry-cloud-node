@@ -1,4 +1,4 @@
-//! Integration tests for SourceBox Sentry CloudNode
+//! Integration tests for Sentinel CloudNode
 
 use sourcebox_sentry_cloudnode::{Config, Result};
 

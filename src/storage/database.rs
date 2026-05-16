@@ -1,4 +1,4 @@
-// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+// Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -709,10 +709,19 @@ use std::sync::OnceLock;
 /// Domain-separation tag mixed into the SHA-256 hash so the same machine ID
 /// never produces the same key as some unrelated tool that happens to hash
 /// the same input. `v2` marks the switch from hostname-derived (v1) keys.
+///
+/// **Do not rename across brand changes.**  This string is part of the key
+/// derivation; changing it would brick every existing install's encrypted
+/// SQLite DB.  The `opensentry-` prefix is a historical artifact from
+/// when the product was called "OpenSentry" — kept verbatim through the
+/// later "SourceBox Sentry" and "Sentinel by SourceBox" rebrands so
+/// nodes can still decrypt their data after an upgrade.
 const KEY_DOMAIN_V2: &[u8] = b"opensentry-cloudnode-machine-id-v2";
 
 /// Legacy domain tag — kept so `derive_key_legacy` still reproduces the
-/// pre-migration key for DBs written with the old code.
+/// pre-migration key for DBs written with the old code.  Same brand-
+/// history note as `KEY_DOMAIN_V2`: this string is load-bearing for
+/// decryption, not a brand reference.
 const KEY_DOMAIN_V1_LEGACY: &[u8] = b"opensentry-cloudnode-v1";
 
 /// Cached derived key for this process — `machine_id()` on Linux reads a

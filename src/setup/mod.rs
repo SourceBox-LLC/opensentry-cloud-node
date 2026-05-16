@@ -1,4 +1,4 @@
-// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+// Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-//! Setup wizard for SourceBox Sentry CloudNode
+//! Setup wizard for Sentinel CloudNode
 //!
 //! Beautiful animated terminal-based setup experience
 
@@ -160,7 +160,7 @@ pub fn run_quick_setup(api_url: &str, node_id: &str, api_key: &str) -> Result<()
 
     println!();
     println!(
-        "  {} SourceBox Sentry CloudNode — Quick Setup",
+        "  {} Sentinel CloudNode — Quick Setup",
         "⚡".cyan()
     );
     println!("  ────────────────────────────────────────");

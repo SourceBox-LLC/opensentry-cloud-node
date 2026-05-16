@@ -1,7 +1,7 @@
 <p align="center">
-  <h1 align="center">SourceBox Sentry CloudNode</h1>
+  <h1 align="center">Sentinel CloudNode</h1>
   <p align="center">
-    Turn any USB webcam into a cloud-connected security camera.
+    <em>Sentinel by SourceBox</em> — turn any USB webcam into a cloud-connected security camera.
     <br />
     <a href="#quick-start">Quick Start</a>
     &middot;
@@ -20,7 +20,7 @@
 
 ---
 
-CloudNode runs on your local network, detects USB cameras, and streams live video to the [SourceBox Sentry Command Center](https://opensentry-command.fly.dev) via HLS. All configuration is stored locally in an encrypted SQLite database — no cloud dependency for setup.
+CloudNode runs on your local network, detects USB cameras, and streams live video to the [Sentinel Command Center](https://opensentry-command.fly.dev) via HLS. All configuration is stored locally in an encrypted SQLite database — no cloud dependency for setup.
 
 **What it does:**
 
@@ -47,7 +47,7 @@ CloudNode runs on your local network, detects USB cameras, and streams live vide
 CloudNode runs in one of two modes, chosen interactively by the setup wizard's first prompt:
 
 - **Local-only** — free, runs on your home / office LAN, no account, no cloud.  Live camera viewing + snapshots + recording + recording playback through a browser dashboard at `http://<node-ip>:8080`.  Single LAN, single node.  Plex / Home Assistant / Synology model.
-- **Connected** — pair with a [SourceBox Sentry Command Center](https://opensentry-command.fly.dev) account.  Adds multi-site dashboards, the Sentinel AI agent, mobile remote access, email alerts, MCP integrations, and team workflows.  Requires a free Command Center account and a node API key.
+- **Connected** — pair with a [Sentinel Command Center](https://opensentry-command.fly.dev) account.  Adds multi-site dashboards, the Sentinel AI agent, mobile remote access, email alerts, MCP integrations, and team workflows.  Requires a free Command Center account and a node API key.
 
 The same binary serves both modes; pick whichever fits.  Local installs can later be paired by re-running setup, but for now the choice is made once at first boot.
 
@@ -70,7 +70,7 @@ curl -fsSL https://opensentry-command.fly.dev/install.sh | bash
 
 1. Download `sourcebox-sentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases/latest).
 2. Run the MSI (UAC prompt). SmartScreen will warn "Windows protected your PC" because the installer is unsigned — click **More info → Run anyway**. (Code signing is on the roadmap.)
-3. From the Start menu, click **SourceBox Sentry CloudNode**. First launch runs the setup wizard interactively, then drops into the foreground TUI dashboard with cameras streaming. Every launch after just streams.
+3. From the Start menu, click **Sentinel CloudNode**. First launch runs the setup wizard interactively, then drops into the foreground TUI dashboard with cameras streaming. Every launch after just streams.
 
 Config + recordings live under `C:\ProgramData\SourceBoxSentry\`. The setup wizard checks for FFmpeg and offers to install it via `winget install Gyan.FFmpeg` if it isn't already on PATH. For 24/7 unattended operation, the MSI also registers an optional Windows Service named `SourceBoxSentryCloudNode` (manual start by default) — see [Running as a Windows Service](#running-as-a-windows-service) below.
 
@@ -247,7 +247,7 @@ This is the recommended path for everyday use: you can see what's happening, hit
 
 | Path | Purpose |
 |------|---------|
-| `C:\Program Files\SourceBox Sentry CloudNode\sourcebox-sentry-cloudnode.exe` | Binary (read-only after install) |
+| `C:\Program Files\Sentinel CloudNode\sourcebox-sentry-cloudnode.exe` | Binary (read-only after install) |
 | `C:\ProgramData\SourceBoxSentry\node.db` | Encrypted SQLite — config + (optionally) recordings |
 | `C:\ProgramData\SourceBoxSentry\logs\` | Daily-rotating service log files (text) — only written when running as a service |
 
@@ -262,7 +262,7 @@ sourcebox-sentry-cloudnode setup
 
 ### Uninstalling
 
-Use **Settings → Apps → SourceBox Sentry CloudNode → Uninstall**. The MSI uninstaller stops the service if it's running, removes the binary + service registration, and wipes `C:\ProgramData\SourceBoxSentry\` — including your encrypted config and recordings. FFmpeg installed via `winget` stays put because it's a separately-managed package.
+Use **Settings → Apps → Sentinel CloudNode → Uninstall**. The MSI uninstaller stops the service if it's running, removes the binary + service registration, and wipes `C:\ProgramData\SourceBoxSentry\` — including your encrypted config and recordings. FFmpeg installed via `winget` stays put because it's a separately-managed package.
 
 > **Heads up:** the MSI is **unsigned** today. SmartScreen flags unsigned installers with "Windows protected your PC" — click **More info → Run anyway** to proceed. Code signing is deferred until we have a sustained release cadence worth the EV-cert fee; the binary itself is open source and reproducibly buildable from this repository if you want to verify.
 
@@ -817,7 +817,7 @@ CloudNode uses GPL-3.0 to ensure users can always inspect, modify, and verify wh
 ---
 
 <p align="center">
-  <a href="https://opensentry-command.fly.dev">SourceBox Sentry Command Center</a>
+  <a href="https://opensentry-command.fly.dev">Sentinel Command Center</a>
   &middot;
-  Made by the SourceBox Sentry Team
+  Made by the Sentinel Team
 </p>

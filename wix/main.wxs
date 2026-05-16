@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  WiX Toolset 3.x source for the SourceBox Sentry CloudNode MSI.
+  WiX Toolset 3.x source for the Sentinel CloudNode MSI.
 
   Built by `cargo wix` (which shells out to `candle.exe` and `light.exe`
   from the WiX toolset) and emitted to `target/wix/sourcebox-sentry-cloudnode-
@@ -65,7 +65,7 @@
 
     <Product
         Id='*'
-        Name='SourceBox Sentry CloudNode'
+        Name='Sentinel CloudNode'
         UpgradeCode='7B8E5C9A-4D2F-4A1B-9E3C-A0F6D8B25E47'
         Manufacturer='SourceBox LLC'
         Language='1033'
@@ -74,7 +74,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='SourceBox Sentry CloudNode Installer'
+            Description='Sentinel CloudNode Installer'
             Manufacturer='SourceBox LLC'
             InstallerVersion='450'
             Languages='1033'
@@ -186,7 +186,7 @@
         <CustomAction
             Id='LaunchSetup'
             Directory='APPLICATIONFOLDER'
-            ExeCommand='cmd.exe /c start "SourceBox Sentry CloudNode Setup" "[#filServiceExe]" setup'
+            ExeCommand='cmd.exe /c start "Sentinel CloudNode Setup" "[#filServiceExe]" setup'
             Execute='immediate'
             Impersonate='yes'
             Return='asyncNoWait' />
@@ -195,7 +195,7 @@
              One-time cleanup of stale runtime-created residue
              ========================================================
              v0.1.20-v0.1.33 had a bug where SQLite could create
-             `Program Files\SourceBox Sentry CloudNode\data\node.db`
+             `Program Files\Sentinel CloudNode\data\node.db`
              — runtime-created files MSI doesn't know about and
              therefore won't remove on uninstall.  This CustomAction
              nukes that directory on every fresh install so the
@@ -292,7 +292,7 @@
         <Directory Id='TARGETDIR' Name='SourceDir'>
 
             <Directory Id='ProgramFiles64Folder'>
-                <Directory Id='APPLICATIONFOLDER' Name='SourceBox Sentry CloudNode'>
+                <Directory Id='APPLICATIONFOLDER' Name='Sentinel CloudNode'>
 
                     <!-- Component: the binary + the service registration.
                          Tying these together means the service can't
@@ -327,8 +327,8 @@
                         <ServiceInstall
                             Id='svcCloudNode'
                             Name='SourceBoxSentryCloudNode'
-                            DisplayName='SourceBox Sentry CloudNode'
-                            Description='Streams local USB cameras to the SourceBox Sentry Command Center. Configure with: sourcebox-sentry-cloudnode setup.'
+                            DisplayName='Sentinel CloudNode'
+                            Description='Streams local USB cameras to the Sentinel Command Center. Configure with: sourcebox-sentry-cloudnode setup.'
                             Type='ownProcess'
                             Start='demand'
                             ErrorControl='normal'
@@ -373,11 +373,11 @@
                  dropped the argument so the shortcut becomes a
                  normal app launcher. -->
             <Directory Id='ProgramMenuFolder'>
-                <Directory Id='ApplicationProgramsFolder' Name='SourceBox Sentry CloudNode'>
+                <Directory Id='ApplicationProgramsFolder' Name='Sentinel CloudNode'>
                     <Component Id='cmpStartMenu'
                                Guid='9DAB7EBC-6F4F-4C3D-B05E-C2F8FAD47069'>
                         <Shortcut Id='ShortcutLauncher'
-                                  Name='SourceBox Sentry CloudNode'
+                                  Name='Sentinel CloudNode'
                                   Description='Launch the CloudNode dashboard. Runs the setup wizard the first time, streams cameras every time after.'
                                   Target='[#filServiceExe]'
                                   WorkingDirectory='APPLICATIONFOLDER' />
@@ -398,7 +398,7 @@
 
         <Feature Id='Default'
                  Title='Main'
-                 Description='SourceBox Sentry CloudNode service binary and Start menu shortcut.'
+                 Description='Sentinel CloudNode service binary and Start menu shortcut.'
                  Display='expand'
                  ConfigurableDirectory='APPLICATIONFOLDER'
                  Level='1'>

@@ -1,4 +1,4 @@
-// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+// Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// Operating mode chosen at install time.
 ///
 /// `Connected` (default for back-compat): the node registers with a
-/// SourceBox Sentry Command Center, opens a WebSocket for inbound
+/// Sentinel Command Center, opens a WebSocket for inbound
 /// commands, sends heartbeats, and pushes HLS segments. The node is
 /// just one half of a SaaS product.
 ///
@@ -141,7 +141,7 @@ impl Default for NodeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudConfig {
-    /// SourceBox Sentry Command Center URL
+    /// Sentinel Command Center URL
     pub api_url: String,
 
     /// Organization API key for authentication

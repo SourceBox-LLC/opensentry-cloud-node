@@ -39,7 +39,7 @@ export default function App() {
           <div className="app-brand">
             <div className="app-brand-mark" aria-hidden />
             <div>
-              <div className="app-brand-text">SourceBox Sentry</div>
+              <div className="app-brand-text">Sentinel</div>
               <span className="app-brand-sub">Node · {nodeIdShort}</span>
             </div>
           </div>
@@ -83,7 +83,7 @@ function LocalUpsell({ url }: { url: string }) {
         <div className="local-upsell-title">Get more out of your cameras</div>
         <p className="local-upsell-body">
           Connect this node to{" "}
-          <strong>SourceBox Sentry Command Center</strong> for access from
+          <strong>Sentinel Command Center</strong> for access from
           anywhere, motion-event email alerts, multi-node dashboards, and AI
           assistants that can see what your cameras see — all without losing
           your local-only setup.

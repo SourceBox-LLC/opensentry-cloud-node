@@ -1,14 +1,19 @@
 [package]
-# Package name = binary name. The repo URL still says "opensentry-cloud-node"
-# (rename deferred per the brand-transition note in MEMORY.md), but the
-# product is now "SourceBox Sentry" and the binary that users invoke
-# should reflect that. Going from `opensentry-cloudnode` to
-# `sourcebox-sentry-cloudnode` keeps the binary name explicit + branded.
+# Package name = binary name.  Brand history (display copy has been
+# updated to match the latest line; identifiers below have NOT, on
+# purpose, because changing them breaks existing installs):
+#   v0 : OpenSentry         → repo URL still says `opensentry-cloud-node`
+#   v0 : SourceBox Sentry   → binary name still says `sourcebox-sentry-cloudnode`
+#   v0+: Sentinel by SourceBox (current — display-only rebrand)
+# Renaming the binary now would orphan existing systemd units, Windows
+# service registrations, install scripts, and Docker volumes.  When we
+# eventually do the breaking rename (probably alongside a v1.0.0
+# release), this is the line that changes.
 name = "sourcebox-sentry-cloudnode"
-version = "0.1.62"
+version = "0.1.63"
 edition = "2021"
 authors = ["SourceBox LLC"]
-description = "SourceBox Sentry CloudNode — turns a USB webcam into a cloud-connected security camera."
+description = "Sentinel CloudNode — turns a USB webcam into a cloud-connected security camera."
 license = "GPL-3.0"
 repository = "https://github.com/SourceBox-LLC/opensentry-cloud-node"
 homepage = "https://opensentry-command.fly.dev"

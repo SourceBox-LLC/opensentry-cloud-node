@@ -1,4 +1,4 @@
-// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+// Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -72,10 +72,12 @@ pub fn run_tui_setup() -> Result<bool> {
 // ─── Step 0: Header ──────────────────────────────────────────────────────────
 
 fn show_animated_header() -> Result<()> {
-    // Wordmark for the SourceBox Sentry brand. "SOURCEBOX" in big block
-    // letters with a "Sentry CloudNode" subtitle keeps the banner narrow
-    // enough to fit a standard 80-col terminal (~78 cols incl. indent)
-    // while making clear which product line this binary belongs to.
+    // Wordmark for the "Sentinel by SourceBox" brand.  Big block-letter
+    // "SOURCEBOX" (the company) sits above the subtitle that names the
+    // specific product ("Sentinel CloudNode Setup"), so the visual
+    // hierarchy reads as "Sentinel CloudNode, by SourceBox".  Keeps
+    // the banner narrow enough to fit a standard 80-col terminal
+    // (~78 cols incl. indent).
     let header_lines = vec![
         "   ███████╗ ██████╗ ██╗   ██╗██████╗  ██████╗███████╗██████╗  ██████╗ ██╗  ██╗",
         "   ██╔════╝██╔═══██╗██║   ██║██╔══██╗██╔════╝██╔════╝██╔══██╗██╔═══██╗╚██╗██╔╝",
@@ -95,7 +97,7 @@ fn show_animated_header() -> Result<()> {
     draw_expanding_border(Duration::from_millis(350))?;
     println!();
     fade_in(
-        "    📹  Sentry CloudNode Setup  —  Your camera, connected to the cloud.",
+        "    📹  Sentinel CloudNode Setup  —  Your camera, connected to the cloud.",
         Duration::from_millis(400),
     )?;
     thread::sleep(Duration::from_millis(250));
@@ -292,7 +294,7 @@ fn prompt_and_install_ffmpeg(platform: &PlatformInfo) -> Result<()> {
             // here propagates up to run_setup which prints the error and
             // exits — the message is the user's next action.
             Err(anyhow::anyhow!(
-                "FFmpeg installed. Close this window and re-launch SourceBox Sentry CloudNode \
+                "FFmpeg installed. Close this window and re-launch Sentinel CloudNode \
                  from the Start menu. PATH changes don't apply to the current process — a fresh \
                  launch is required for the prereq check to see the new install."
             ))
@@ -396,7 +398,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
     panel_row(&format!(
         "  {} {}",
         "•".cyan(),
-        "Connected — pair with SourceBox Sentry Command Center for".bright_white()
+        "Connected — pair with Sentinel Command Center for".bright_white()
     ));
     panel_row("    multi-site dashboards, AI agent, mobile remote access,");
     panel_row("    email alerts, and team workflows. Free account required.");
@@ -434,7 +436,7 @@ fn configure_node(platform: &PlatformInfo) -> Result<SetupConfig> {
         panel_blank();
         panel_row(&format!(
             "  Open {} in your browser:",
-            "SourceBox Sentry Command Center".cyan().bold()
+            "Sentinel Command Center".cyan().bold()
         ));
         panel_row(&format!(
             "  {} {}",
@@ -1019,7 +1021,7 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     panel_blank();
 
     // Pulse the tagline inside the panel
-    let tagline = "🎉  Your SourceBox Sentry CloudNode is ready!";
+    let tagline = "🎉  Your Sentinel CloudNode is ready!";
     for _ in 0..2 {
         panel_row(&format!("  {}", tagline.green().bold()));
         thread::sleep(Duration::from_millis(450));

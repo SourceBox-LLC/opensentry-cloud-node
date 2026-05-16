@@ -1,4 +1,4 @@
-// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+// Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -71,7 +71,7 @@ use windows_service::{
 /// installer side, since SCM uses this string as the primary key.
 ///
 /// Spaces aren't allowed in the SCM key; use the spaceless form here
-/// and put the user-visible "SourceBox Sentry CloudNode" in the
+/// and put the user-visible "Sentinel CloudNode" in the
 /// `DisplayName` attribute on `ServiceInstall` instead.
 pub const SERVICE_NAME: &str = "SourceBoxSentryCloudNode";
 
@@ -307,7 +307,7 @@ fn write_fatal_startup_error(message: &str) {
         .unwrap_or(0);
 
     let line = format!(
-        "[{}] SourceBox Sentry CloudNode service failed to start: {}\n",
+        "[{}] Sentinel CloudNode service failed to start: {}\n",
         timestamp, message
     );
 
@@ -354,7 +354,7 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     write_diag_step("run_service: init_file_logging OK");
 
     tracing::info!(
-        "Starting SourceBox Sentry CloudNode service (version {})",
+        "Starting Sentinel CloudNode service (version {})",
         env!("CARGO_PKG_VERSION")
     );
 

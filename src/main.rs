@@ -1,4 +1,4 @@
-// SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+// Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 // Copyright (C) 2026  SourceBox LLC
 //
 // This program is free software: you can redistribute it and/or modify
@@ -14,12 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! SourceBox Sentry CloudNode - Camera streaming node for SourceBox Sentry Cloud
+//! Sentinel CloudNode - Camera streaming node for Sentinel Command Center
 //!
 //! This node runs on a local device (Raspberry Pi, Mini PC, etc.) and:
 //! - Detects USB cameras
 //! - Captures video frames
-//! - Streams to SourceBox Sentry Command Center
+//! - Streams to Sentinel Command Center
 //! - Stores recordings locally
 //! - Serves recordings via HTTP
 
@@ -36,7 +36,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[derive(Parser)]
 #[command(name = "sourcebox-sentry-cloudnode")]
 #[command(version)]
-#[command(about = "SourceBox Sentry camera node - stream cameras to SourceBox Sentry Cloud")]
+#[command(about = "Sentinel camera node - stream cameras to Sentinel")]
 struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -403,7 +403,7 @@ fn run() -> Result<()> {
             // which feels like the binary hung.
             use colored::Colorize;
             println!();
-            println!("  {}  Loading SourceBox Sentry CloudNode...", "📡".cyan());
+            println!("  {}  Loading Sentinel CloudNode...", "📡".cyan());
             println!("  {}", "Configuration found. Starting camera node...".dimmed());
             println!();
             run_cloudnode(args.node_id, args.api_key, args.api_url, args.once, args.config)?;
@@ -420,7 +420,7 @@ fn run_cloudnode(
     once: bool,
     config_path: Option<String>,
 ) -> Result<()> {
-    info!("Starting SourceBox Sentry CloudNode v{}", env!("CARGO_PKG_VERSION"));
+    info!("Starting Sentinel CloudNode v{}", env!("CARGO_PKG_VERSION"));
 
     // Retry loop: if the user confirms a credential reset after a registration
     // failure, the node returns `Error::ResetRequested`. We then re-run the
@@ -529,7 +529,7 @@ fn init_logging(log_level: &str) {
 /// Detect whether the running binary was installed by the Windows MSI.
 ///
 /// Heuristic: the MSI installs `sourcebox-sentry-cloudnode.exe` under
-/// `C:\Program Files\SourceBox Sentry CloudNode\` (or the `(x86)` mirror
+/// `C:\Program Files\Sentinel CloudNode\` (or the `(x86)` mirror
 /// on 32-bit emulation, though we only build x86_64 today). Legacy
 /// v0.1.x installs landed under `C:\Program Files\OpenSentry CloudNode\`
 /// — both paths are matched below for diagnostic continuity.
@@ -548,13 +548,15 @@ fn is_msi_install() -> bool {
     // Windows path comparison is case-insensitive; normalise to lowercase
     // before substring matching.
     //
-    // Match BOTH new (SourceBox Sentry CloudNode) and legacy (OpenSentry
-    // CloudNode) install paths. Pre-launch we don't really have to care
-    // about the legacy path, but the cost of probing both is one extra
-    // string compare per setup invocation, and it preserves the
-    // diagnostic for anyone who hung onto a v0.1.x test install.
+    // Match the current install-dir name AND every legacy variant we've
+    // shipped so the diagnostic stays accurate across rebrands.  Brand
+    // history: OpenSentry → Sentinel → Sentinel.  Probing all
+    // three is one extra string compare per setup invocation; tiny cost
+    // for preserving the "you're on an old test install" signal.
     let path = exe.to_string_lossy().to_lowercase();
-    path.contains(r"\program files\sourcebox sentry cloudnode\")
+    path.contains(r"\program files\sentinel cloudnode\")
+        || path.contains(r"\program files (x86)\sentinel cloudnode\")
+        || path.contains(r"\program files\sourcebox sentry cloudnode\")
         || path.contains(r"\program files (x86)\sourcebox sentry cloudnode\")
         || path.contains(r"\program files\opensentry cloudnode\")
         || path.contains(r"\program files (x86)\opensentry cloudnode\")
@@ -581,7 +583,7 @@ fn uninstall_cloudnode(force: bool) -> Result<()> {
         println!();
         println!("  This is an MSI install — uninstall via Windows Settings:");
         println!();
-        println!("    Settings → Apps → Installed apps → SourceBox Sentry CloudNode → Uninstall");
+        println!("    Settings → Apps → Installed apps → Sentinel CloudNode → Uninstall");
         println!();
         println!("  Settings → Apps cleanly stops the service, removes the binary,");
         println!("  removes the Windows Service registration, and (on a real");
@@ -603,7 +605,7 @@ fn uninstall_cloudnode(force: bool) -> Result<()> {
     }
 
     println!("{}", "╔════════════════════════════════════════════════════╗".red());
-    println!("{}", "║          SourceBox Sentry CloudNode Uninstall           ║".red());
+    println!("{}", "║          Sentinel CloudNode Uninstall           ║".red());
     println!("{}", "╚════════════════════════════════════════════════════╝".red());
     println!();
 
@@ -703,7 +705,7 @@ fn launch_in_terminal() -> std::result::Result<bool, anyhow::Error> {
 #[cfg(target_os = "windows")]
 fn show_terminal_required_message() {
     eprintln!();
-    eprintln!("  SourceBox Sentry CloudNode");
+    eprintln!("  Sentinel CloudNode");
     eprintln!("  ────────────────────────────────────────");
     eprintln!();
     eprintln!("  This application requires a terminal window.");

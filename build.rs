@@ -23,7 +23,7 @@ const PLACEHOLDER_INDEX: &str = r#"<!doctype html>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SourceBox Sentry Node — Web UI not built</title>
+<title>Sentinel Node — Web UI not built</title>
 <style>
   body {
     background: #0f1115;

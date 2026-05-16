@@ -687,11 +687,15 @@ impl NodeDatabase {
 // Two ciphertext shapes are supported:
 //   - Config strings use hex-encoded `nonce ‖ ciphertext` written via
 //     `encrypt_value` / `decrypt_value` (the older path).
-//   - BLOBs use a 5-byte magic prefix `OSE\x02\x01` followed by raw
-//     `nonce ‖ ciphertext` via `encrypt_bytes` / `decrypt_bytes`. Hex would
-//     double the on-disk footprint of multi-megabyte video segments; the
-//     magic prefix lets a future reader cleanly reject an unencrypted blob
-//     rather than pass raw bytes to AES-GCM and get a generic tag-failure.
+//   - BLOBs use a 5-byte magic prefix followed by raw
+//     `nonce ‖ ciphertext` via `encrypt_bytes` / `decrypt_bytes`. Current
+//     writes use the v0.1.18+ V2 format with prefix `OSE\x02\x02` and AAD
+//     bound to the row's identity tuple (see `BLOB_MAGIC_V2` + `*_aad()`
+//     helpers below); the pre-v0.1.18 V1 prefix `OSE\x02\x01` (no AAD) is
+//     still readable for back-compat. Hex would double the on-disk
+//     footprint of multi-megabyte video segments; the magic prefix lets a
+//     future reader cleanly reject an unencrypted blob rather than pass
+//     raw bytes to AES-GCM and get a generic tag-failure.
 //
 // Earlier versions derived the key from the hostname, which is predictable
 // (most Pis ship as `raspberrypi`) and trivially guessable from a stolen DB.

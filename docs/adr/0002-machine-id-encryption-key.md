@@ -26,7 +26,7 @@ We considered four options for where the encryption key comes from:
 
 Implementation lives in `src/storage/database.rs::derive_key`. Cached per-process via `OnceLock` so repeated calls don't re-read the OS source. Fallback chain on Linux: `/etc/machine-id` → `/var/lib/dbus/machine-id` → fail loudly.
 
-Both the API key (hex-encoded ciphertext, via `encrypt_value`) and the recording/snapshot blobs (binary, via `encrypt_bytes`) use the same derived key. Domain separation is implicit in the format prefixes (hex vs the `OSE\x02\x01` magic) — nothing in either path can decrypt a payload the other path wrote.
+Both the API key (hex-encoded ciphertext, via `encrypt_value`) and the recording/snapshot blobs (binary, via `encrypt_bytes`) use the same derived key. Domain separation is implicit in the format prefixes (hex vs the `OSE\x02\x02` magic — the v0.1.18+ blob-format V2; the earlier V1 prefix `OSE\x02\x01` is still readable) — nothing in either path can decrypt a payload the other path wrote.
 
 ### v1 → v2 migration
 
@@ -66,7 +66,7 @@ Re-evaluate if any of the following become true:
 
 - `src/storage/database.rs::derive_key` — the v2 (machine-id) key derivation, with `OnceLock` caching.
 - `src/storage/database.rs::derive_key_legacy` — the v1 (hostname) fallback for migrating old DBs.
-- `src/storage/database.rs::encrypt_bytes` / `decrypt_bytes` — BLOB encryption layer (with the `OSE\x02\x01` magic prefix and the typed `DecryptError` enum from v0.1.17).
+- `src/storage/database.rs::encrypt_bytes` / `decrypt_bytes` — BLOB encryption layer.  Current write path uses the V2 wire format (`OSE\x02\x02` magic, AAD bound to the row's identity tuple) since v0.1.18; the V1 prefix (`OSE\x02\x01`, empty AAD) is still read-supported so nodes upgrading from older builds keep working without a re-encryption migration.  Typed `DecryptError` enum (`BlobTooShort` / `NotEncrypted` / `WrongKeyOrCorrupted` / `KeyDerivation`) introduced in v0.1.17 so callers can log the root cause.
 - `src/storage/database.rs::encrypt_value` / `decrypt_value` — config-string encryption (hex-encoded).
 - `setup/` — onboarding flow that doesn't prompt for a passphrase, by design.
 - ADR 0003 (`0003-sqlite-recording-store.md`) — why blobs live in SQLite at all.

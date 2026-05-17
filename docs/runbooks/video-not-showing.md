@@ -99,7 +99,7 @@ The config DB (`data/node.db`) is forward-compatible across the 0.1.x line; no m
 ## Escalation path
 
 - If segments are pushing and the playlist is fresh but the browser still stalls, grab the playlist body, a segment, and a browser MSE console dump and open a bug at `SourceBox-LLC/OpenSentry-CloudNode`.
-- If multiple nodes in the same org are affected identically at the same time, it's almost certainly a backend regression — escalate to `SourceBox-LLC/OpenSentry-Command` instead.
+- If multiple nodes in the same org are affected identically at the same time, it's almost certainly a backend regression — escalate to `SourceBox-LLC/Sentinel-Command` instead.
 
 ## See also
 

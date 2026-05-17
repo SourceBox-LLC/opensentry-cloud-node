@@ -237,10 +237,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # metadata-action auto-lowercases the image name, so
-      # `SourceBox-LLC/OpenSentry-CloudNode` → `sourcebox-llc/opensentry-cloudnode`.
-      # The GitHub repo URL is intentionally still `OpenSentry-CloudNode`
-      # (rename deferred per the brand-transition note in MEMORY.md);
-      # the binary inside is `sourcebox-sentry-cloudnode` per Cargo.toml.
+      # `SourceBox-LLC/Sentinel-CameraNode` → `sourcebox-llc/sentinel-cameranode`.
+      # The GitHub repo was renamed `opensentry-cloud-node` → `Sentinel-CameraNode`
+      # in May 2026; ghcr.io image name follows the repo, so existing pulls of
+      # `ghcr.io/sourcebox-llc/opensentry-cloudnode:<tag>` will keep working
+      # only via GitHub's package-redirect window — re-pull against the new
+      # image name once you next update your compose/k8s manifests.  The
+      # binary inside is still `sourcebox-sentry-cloudnode` per Cargo.toml.
       # `latest=auto` tags :latest only on stable semver tag pushes.
       - name: Extract metadata
         id: meta

@@ -68,7 +68,7 @@ impl RegistrationError {
 /// setup wizard (`ui::panel_*`), recolored red to signal failure.
 pub fn show_registration_error(error: &RegistrationError) {
     let (code, caption, kv, steps) = section_for(error);
-    let trouble_url = "https://github.com/SourceBox-LLC/opensentry-cloud-node#troubleshooting";
+    let trouble_url = "https://github.com/SourceBox-LLC/Sentinel-CameraNode#troubleshooting";
 
     println!();
     panel_top_color("Registration Failed", FAIL);

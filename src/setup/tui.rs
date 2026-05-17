@@ -1109,7 +1109,7 @@ fn show_success_screen(config: &SetupConfig) -> Result<()> {
     panel_row(&format!(
         "  {}  {}",
         "Docs:       ".white().bold(),
-        "https://github.com/SourceBox-LLC/opensentry-cloud-node".cyan()
+        "https://github.com/SourceBox-LLC/Sentinel-CameraNode".cyan()
     ));
 
     panel_blank();

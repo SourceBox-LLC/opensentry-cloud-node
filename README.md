@@ -68,7 +68,7 @@ curl -fsSL https://opensentry-command.fly.dev/install.sh | bash
 
 **Windows:**
 
-1. Download `sourcebox-sentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases/latest).
+1. Download `sourcebox-sentry-cloudnode-windows-x86_64.msi` from the [latest release](https://github.com/SourceBox-LLC/Sentinel-CameraNode/releases/latest).
 2. Run the MSI (UAC prompt). SmartScreen will warn "Windows protected your PC" because the installer is unsigned — click **More info → Run anyway**. (Code signing is on the roadmap.)
 3. From the Start menu, click **Sentinel CloudNode**. First launch runs the setup wizard interactively, then drops into the foreground TUI dashboard with cameras streaming. Every launch after just streams.
 
@@ -78,8 +78,8 @@ Config + recordings live under `C:\ProgramData\SourceBoxSentry\`. The setup wiza
 <summary><strong>Manual install (build from source)</strong></summary>
 
 ```bash
-git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
-cd opensentry-cloud-node
+git clone https://github.com/SourceBox-LLC/Sentinel-CameraNode.git
+cd Sentinel-CameraNode
 cargo build --release
 
 # Run the interactive setup wizard
@@ -413,7 +413,7 @@ docker run -d \
   ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
 ```
 
-Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.18`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/opensentry-cloud-node/releases) for the current version.
+Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.18`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/Sentinel-CameraNode/releases) for the current version.
 
 ### Docker Compose
 
@@ -651,8 +651,8 @@ CloudNode runs on 64-bit Raspberry Pi OS. Build from source (the prebuilt ARM64 
 sudo apt install -y build-essential pkg-config libssl-dev ffmpeg
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
-git clone https://github.com/SourceBox-LLC/opensentry-cloud-node.git
-cd opensentry-cloud-node
+git clone https://github.com/SourceBox-LLC/Sentinel-CameraNode.git
+cd Sentinel-CameraNode
 cargo build --release
 ./target/release/sourcebox-sentry-cloudnode setup
 ```

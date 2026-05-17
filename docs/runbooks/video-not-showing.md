@@ -45,7 +45,7 @@ Common FFmpeg failures and what they mean:
 | `status: 234`, `[libx264] Error parsing option 'level'` | CloudNode < v0.1.15 on Pi / libx264 host | Update to v0.1.15+ (the fix that removed `-level auto` from libx264 args) |
 | `Cannot open device /dev/video0` / errno -16 | Another process has the camera | Kill whatever's holding it (`fuser /dev/video0`), or unplug / replug |
 | `Immediate exit after opening` | USB bandwidth starvation (multi-cam on a single bus, or a hub that can't hit USB 2.0 HS) | Plug cameras into separate root-hub ports; on Pi, connect directly to the board, not through a hub |
-| `errno -28` / `(disk exhausted: N MiB free)` in the dashboard error tag | `data/hls/{cam}/` grew unbounded because the upload pipeline stalled and the orphan sweeper hasn't caught up | Update to v0.1.17+ — segment cleanup is now owned by the `sweep_orphan_segments` function in `hls_uploader.rs`, which runs every ~60 s and keeps the newest `local_buffer_size + 60` segments per camera (`-hls_flags delete_segments` was deliberately *removed* in v0.1.17 — FFmpeg's rotation-delete raced AV scanners on Windows and got `failed to delete old segment …` warnings on every rotation; our own sweeper handles cleanup more reliably). On a Pi, also `df -h ~/opensentry-cloud-node/data` + `du -sh ~/opensentry-cloud-node/data/hls/*` to confirm you're not still holding GBs of pre-v0.1.17 orphan `.ts` files — a `/wipe confirm` from the dashboard clears them. |
+| `errno -28` / `(disk exhausted: N MiB free)` in the dashboard error tag | `data/hls/{cam}/` grew unbounded because the upload pipeline stalled and the orphan sweeper hasn't caught up | Update to v0.1.17+ — segment cleanup is now owned by the `sweep_orphan_segments` function in `hls_uploader.rs`, which runs every ~60 s and keeps the newest `local_buffer_size + 60` segments per camera (`-hls_flags delete_segments` was deliberately *removed* in v0.1.17 — FFmpeg's rotation-delete raced AV scanners on Windows and got `failed to delete old segment …` warnings on every rotation; our own sweeper handles cleanup more reliably). On a Pi, also `df -h ~/Sentinel-CameraNode/data` + `du -sh ~/Sentinel-CameraNode/data/hls/*` to confirm you're not still holding GBs of pre-v0.1.17 orphan `.ts` files — a `/wipe confirm` from the dashboard clears them. |
 
 ### 3. Are segments being pushed to the backend?
 
@@ -92,13 +92,13 @@ Open devtools → Network → filter on `.ts`. You should see 2xx responses ever
 
 ## Rollback steps
 
-If an update triggered the breakage, `cargo install --git https://github.com/SourceBox-LLC/opensentry-cloud-node --tag v<previous>` to go back to the last known-good tag.
+If an update triggered the breakage, `cargo install --git https://github.com/SourceBox-LLC/Sentinel-CameraNode --tag v<previous>` to go back to the last known-good tag.
 
 The config DB (`data/node.db`) is forward-compatible across the 0.1.x line; no migration rollback is needed.
 
 ## Escalation path
 
-- If segments are pushing and the playlist is fresh but the browser still stalls, grab the playlist body, a segment, and a browser MSE console dump and open a bug at `SourceBox-LLC/OpenSentry-CloudNode`.
+- If segments are pushing and the playlist is fresh but the browser still stalls, grab the playlist body, a segment, and a browser MSE console dump and open a bug at `SourceBox-LLC/Sentinel-CameraNode`.
 - If multiple nodes in the same org are affected identically at the same time, it's almost certainly a backend regression — escalate to `SourceBox-LLC/Sentinel-Command` instead.
 
 ## See also

@@ -1,11 +1,16 @@
 [package]
-# Package name = binary name.  Brand history (display copy has been
-# updated to match the latest line; identifiers below have NOT, on
-# purpose, because changing them breaks existing installs):
-#   v0 : OpenSentry         → repo URL still says `opensentry-cloud-node`
-#   v0 : SourceBox Sentry   → binary name still says `sourcebox-sentry-cloudnode`
-#   v0+: Sentinel by SourceBox (current — display-only rebrand)
-# Renaming the binary now would orphan existing systemd units, Windows
+# Package name = binary name.  Brand history (display copy + repo URL
+# have been updated to match the latest line; the BINARY name below
+# has NOT, on purpose, because changing it breaks existing installs):
+#   v0 : OpenSentry         → original brand
+#   v0 : SourceBox Sentry   → mid-life rename; binary name was minted
+#                              here as `sourcebox-sentry-cloudnode`
+#   v0+: Sentinel by SourceBox (current — repo renamed
+#        `opensentry-cloud-node` → `Sentinel-CameraNode` in May 2026,
+#        GitHub auto-redirects the old URL; binary name preserved
+#        verbatim so existing systemd units / Windows services /
+#        install scripts / Docker volumes keep working).
+# Renaming the binary would orphan existing systemd units, Windows
 # service registrations, install scripts, and Docker volumes.  When we
 # eventually do the breaking rename (probably alongside a v1.0.0
 # release), this is the line that changes.
@@ -15,7 +20,7 @@ edition = "2021"
 authors = ["SourceBox LLC"]
 description = "Sentinel CloudNode — turns a USB webcam into a cloud-connected security camera."
 license = "GPL-3.0"
-repository = "https://github.com/SourceBox-LLC/opensentry-cloud-node"
+repository = "https://github.com/SourceBox-LLC/Sentinel-CameraNode"
 homepage = "https://opensentry-command.fly.dev"
 
 [dependencies]

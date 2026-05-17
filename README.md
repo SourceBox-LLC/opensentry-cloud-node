@@ -400,7 +400,7 @@ Prebuilt multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHu
 ### Quick run (prebuilt image — recommended)
 
 ```bash
-docker pull ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
+docker pull ghcr.io/sourcebox-llc/sentinel-cameranode:latest
 
 docker run -d \
   --name sourcebox-sentry-cloudnode \
@@ -410,10 +410,10 @@ docker run -d \
   -e SOURCEBOX_SENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
   -v ./data:/app/data \
-  ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
+  ghcr.io/sourcebox-llc/sentinel-cameranode:latest
 ```
 
-Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/opensentry-cloudnode:0.1.18`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/Sentinel-CameraNode/releases) for the current version.
+Pin to a specific release instead of `:latest` when you want reproducible deploys — e.g. `ghcr.io/sourcebox-llc/sentinel-cameranode:0.1.18`. Major.minor tags like `:0.1` are also published and float to the newest patch. See [releases](https://github.com/SourceBox-LLC/Sentinel-CameraNode/releases) for the current version.
 
 ### Docker Compose
 
@@ -423,7 +423,7 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-> The bundled `docker-compose.yml` currently builds from source (`build: .`). To use the prebuilt image instead, swap the `build:` line for `image: ghcr.io/sourcebox-llc/opensentry-cloudnode:latest` and run `docker compose pull && docker compose up -d`.
+> The bundled `docker-compose.yml` currently builds from source (`build: .`). To use the prebuilt image instead, swap the `build:` line for `image: ghcr.io/sourcebox-llc/sentinel-cameranode:latest` and run `docker compose pull && docker compose up -d`.
 
 ### Build from source (dev / airgapped)
 
@@ -453,7 +453,7 @@ docker run -d \
   -e SOURCEBOX_SENTRY_API_KEY=your_api_key \
   -e SOURCEBOX_SENTRY_API_URL=https://your-backend.example.com \
   -p 8080:8080 \
-  ghcr.io/sourcebox-llc/opensentry-cloudnode:latest
+  ghcr.io/sourcebox-llc/sentinel-cameranode:latest
 ```
 
 ---

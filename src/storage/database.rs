@@ -361,6 +361,22 @@ impl NodeDatabase {
     /// List `(segment_seq, duration_ms)` for a given camera + date,
     /// ordered ascending so the M3U8 builder can emit segments in
     /// playback order.  Empty Vec when no recordings match.
+    ///
+    /// De-duplicated by `segment_seq` (GROUP BY): the table has no
+    /// UNIQUE(camera_id, date, segment_seq) constraint, and FFmpeg's
+    /// `segment_%05d.ts` counter restarts at 0 whenever the supervisor
+    /// restarts the pipeline (a flaky USB/RTSP camera on a Pi does this
+    /// routinely), so two physically distinct rows can share the same
+    /// (camera, date, seq) within one UTC day.  The VOD playlist builder
+    /// emits exactly one `segment_<seq>.ts` line per row returned here,
+    /// and the fetch route resolves that URL to a single blob — so a
+    /// duplicate seq would make the player replay the same ~1s twice
+    /// while the colliding segment stays unreachable.  Collapsing to one
+    /// row per seq keeps the playlist well-formed.  `MAX(duration_ms)` is
+    /// the safe pick for the survivor: TARGETDURATION must bound every
+    /// EXTINF, so erring toward the longer duration can't violate the
+    /// spec.  (Making *both* colliding blobs individually addressable is
+    /// a deeper change tracked separately.)
     pub fn list_recording_segment_seqs(
         &self,
         camera_id: &str,
@@ -369,8 +385,9 @@ impl NodeDatabase {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT segment_seq, duration_ms FROM recording_segments
+                "SELECT segment_seq, MAX(duration_ms) FROM recording_segments
                  WHERE camera_id = ?1 AND date = ?2
+                 GROUP BY segment_seq
                  ORDER BY segment_seq ASC",
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -1616,5 +1633,81 @@ mod retention_reclaim_tests {
             .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
             .expect("query auto_vacuum");
         assert_eq!(mode, 2, "fresh DB must be INCREMENTAL (2), got {}", mode);
+    }
+}
+
+#[cfg(test)]
+mod recording_segment_listing_tests {
+    use super::*;
+
+    /// `list_recording_segment_seqs` feeds the VOD M3U8 builder, which
+    /// emits one `segment_<seq>.ts` line per row it returns.  Because the
+    /// table has no UNIQUE(camera_id, date, segment_seq) constraint and
+    /// FFmpeg's `segment_%05d.ts` counter restarts at 0 on every pipeline
+    /// restart, two distinct rows can share the same (camera, date, seq)
+    /// within one UTC day.  Without de-dup the playlist would list that
+    /// seq twice — the player replays the same ~1s and the colliding blob
+    /// is unreachable.  Pin that the listing collapses dupes to one row
+    /// per seq, keeping the longer duration.
+    #[test]
+    fn list_recording_segment_seqs_dedups_colliding_seqs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = NodeDatabase::new(&tmp.path().join("node.db")).expect("db opens");
+
+        let date = "2026-05-28";
+        // Monotonic first run: seqs 1,2,3.
+        for seq in 1..=3u64 {
+            db.save_recording_segment("cam_x", seq, date, b"first-run", 1000)
+                .expect("save segment");
+        }
+        // FFmpeg restarted mid-day and reused seqs 1 and 2 with different
+        // footage and a longer (max) duration.
+        db.save_recording_segment("cam_x", 1, date, b"second-run-1", 2000)
+            .expect("save dup seq 1");
+        db.save_recording_segment("cam_x", 2, date, b"second-run-2", 2000)
+            .expect("save dup seq 2");
+
+        let rows = db
+            .list_recording_segment_seqs("cam_x", date)
+            .expect("list seqs");
+
+        // Five physical rows, but exactly one entry per distinct seq.
+        let seqs: Vec<u64> = rows.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3],
+            "duplicate seqs must collapse to a single playlist entry each",
+        );
+        // MAX(duration_ms) survives for a collided seq; untouched seq keeps its own.
+        let dur_for = |want: u64| rows.iter().find(|(s, _)| *s == want).map(|(_, d)| *d);
+        assert_eq!(
+            dur_for(1),
+            Some(2000),
+            "collided seq keeps the longer duration"
+        );
+        assert_eq!(dur_for(3), Some(1000));
+    }
+
+    /// The dedup guard must be a no-op on the happy path: a clean run with
+    /// no collisions is returned verbatim, ascending.
+    #[test]
+    fn list_recording_segment_seqs_preserves_unique_runs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = NodeDatabase::new(&tmp.path().join("node.db")).expect("db opens");
+
+        let date = "2026-05-28";
+        for seq in [3u64, 1, 2, 7] {
+            db.save_recording_segment("cam_y", seq, date, b"x", 1000)
+                .expect("save segment");
+        }
+        let rows = db
+            .list_recording_segment_seqs("cam_y", date)
+            .expect("list seqs");
+        let seqs: Vec<u64> = rows.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3, 7],
+            "unique seqs returned ascending, unchanged"
+        );
     }
 }
